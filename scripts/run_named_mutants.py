@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MUTANT_ROOT = Path(r"E:\TORQ_CLI_EVIDENCE\t06b-20260718\luna-builder-evidence\named-mutants-tmp")
+DEFAULT_MUTANT_ROOT = ROOT / "tmp" / "named-mutants"
 
 
 @dataclass(frozen=True)

@@ -25,8 +25,8 @@ def test_protected_path_denied_before_read() -> None:
     assert error.value.finding_id == "protected_path_denied"
 
 
-def test_explicit_config_path_is_allowed() -> None:
-    assert_read_allowed(r"C:\temp\torq-config.yaml")
+def test_explicit_config_path_is_allowed(tmp_path) -> None:
+    assert_read_allowed(str(tmp_path / "torq-config.yaml"))
 
 
 def test_production_imports_forbid_subprocess() -> None:
@@ -183,6 +183,7 @@ def test_allowed_candidate_is_inspected_and_read_without_resolve(monkeypatch) ->
 
 
 def test_reader_inspects_and_opens_the_same_normalized_candidate(monkeypatch) -> None:
+    monkeypatch.setattr(hermetic_module.sys, "platform", "win32")
     inspected: list[str] = []
     opened: list[str] = []
 
@@ -481,7 +482,12 @@ def test_windows_alias_and_volume_mismatch_fail_closed(monkeypatch) -> None:
 
     fds = iter([10, 11, 12])
     monkeypatch.setattr(hermetic_module, "_windows_open", native_open)
-    monkeypatch.setattr(hermetic_module.ctypes, "WinDLL", lambda *args, **kwargs: MissingCreateFileW())
+    monkeypatch.setattr(
+        hermetic_module.ctypes,
+        "WinDLL",
+        lambda *args, **kwargs: MissingCreateFileW(),
+        raising=False,
+    )
     with pytest.raises(ProtectedPathError):
         hermetic_module._windows_open(
             r"C:\safe\config.json",

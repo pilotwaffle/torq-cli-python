@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError, replace
 import hashlib
 import json
+import os
 
 import pytest
 import yaml
@@ -221,7 +222,8 @@ def _reachable_config(config):
 
 
 def _reachable_config_read(monkeypatch, capsys):
-    return _cli_output(["profile", "validate", "--config", r"C:\missing\config.yaml"], capsys)
+    path = r"C:\missing\config.yaml" if os.name == "nt" else "/missing/config.yaml"
+    return _cli_output(["profile", "validate", "--config", path], capsys)
 
 
 def _reachable_protected(monkeypatch, capsys):
