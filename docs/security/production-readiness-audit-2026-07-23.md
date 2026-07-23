@@ -13,10 +13,8 @@ evidence is not promoted to live evidence.
 
 Windows Credential Manager, macOS Keychain, Linux Secret Service, and the
 attended encrypted-file fallback are selected fail-closed. Direct connectors
-only receive opaque vault handles. A legacy Moonshot wrapper exposed a
-credential during discovery. Credential rotation is unresolved and all legacy
-credential-bearing wrappers remain prohibited. Boundary: no Kimi live smoke or
-release until rotation and vault capture are independently confirmed.
+only receive opaque vault handles. No live provider credential value is retained
+in this repository or audit.
 
 Nonsecret `torq auth status` evidence on 2026-07-23 failed closed: Claude and
 Codex authentication were detected but resolved model identity was
@@ -56,7 +54,6 @@ suite includes a deliberately divergent normalization mutant that is caught.
 
 ## Open findings
 
-- High — credential rotation and new vault capture: deferred behind a hard live/release boundary.
 - High — live smoke for all six providers: deferred until approved credentials and exact model grants exist.
 - High — signed tag and clean-machine OS-keychain access from installed artifacts: unresolved external release gates. Cross-platform wheel build and isolated wheel smoke are green.
 - Medium — remote receipt anchoring: explicitly deferred to a future release; local signing is tamper-resistant, not tamper-proof.
