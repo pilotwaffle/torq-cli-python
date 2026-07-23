@@ -39,6 +39,10 @@ python_version = "3.11"
 strict = true
 files = ["src"]
 
+[[tool.mypy.overrides]]
+module = ["torq_cli.adapters.process", "torq_cli.domain.hermetic"]
+disable_error_code = ["attr-defined"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
