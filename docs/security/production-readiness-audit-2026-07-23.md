@@ -1,7 +1,6 @@
 # Production-readiness audit — 2026-07-23
 
-Commit baseline: `UNCOMMITTED-STANDALONE-BASELINE` (to be replaced by the
-standalone repository commit before tagging).
+Commit baseline: `cebe1e0` (standalone repository implementation baseline).
 
 This audit distinguishes implemented/local evidence from external release
 evidence. A missing live credential, hosted OS runner, branch rule, or signed
@@ -54,4 +53,3 @@ suite includes a deliberately divergent normalization mutant that is caught.
 - High — live smoke for all six providers: deferred until approved credentials and exact model grants exist.
 - High — signed tag, release artifact provenance, protected main, and clean-machine Windows/macOS/Linux installs: unresolved external release gates.
 - Medium — remote receipt anchoring: explicitly deferred to a future release; local signing is tamper-resistant, not tamper-proof.
-
