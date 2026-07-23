@@ -1,0 +1,69 @@
+name: quality
+
+env:
+  TORQ_TEST_NETWORK_MODE: deny
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality-windows-py311:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m mypy src
+      - run: python -m pytest -q
+      - run: python scripts/run_named_mutants.py
+      - run: python -m build
+      - run: python scripts/wheel_smoke.py dist
+
+  quality-macos-py311:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m mypy src
+      - run: python -m pytest -q
+      - run: python scripts/run_named_mutants.py
+      - run: python -m build
+      - run: python scripts/wheel_smoke.py dist
+
+  quality-linux-py311:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m mypy src
+      - run: python -m pytest -q
+      - run: python scripts/run_named_mutants.py
+      - run: python -m build
+      - run: python scripts/wheel_smoke.py dist
+
+  headless-linux-py311:
+    runs-on: ubuntu-latest
+    env:
+      TORQ_HEADLESS: '1'
+      TORQ_CREDENTIAL_BACKEND: encrypted_file_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m ruff check src tests
+      - run: python -m mypy src
+      - run: python -m pytest -q tests/test_headless_fallback.py
+      - run: python -m pytest -q
+      - run: python scripts/run_named_mutants.py
+      - run: python -m build
+      - run: python scripts/wheel_smoke.py dist

@@ -1,0 +1,99 @@
+schema: torq-provider-surface-matrix-v1
+observed_at: '2026-07-23'
+providers:
+  claude:
+    surfaces:
+      authentication: {status: verified, evidence: 'claude auth status reported a first-party Claude subscription session; identifying fields were not retained', observed_at: '2026-07-23'}
+      machine_readable_output: {status: verified, evidence: 'claude -p with JSON output exited 0 and returned a result envelope', observed_at: '2026-07-23'}
+      session_resume: {status: verified, evidence: 'a live session ID resumed successfully and retained the same session identity', observed_at: '2026-07-23'}
+      cancellation: {status: unavailable, evidence: 'no provider-side cancellation acknowledgement was safely exercised', observed_at: '2026-07-23'}
+      tool_events: {status: unavailable, evidence: 'stream JSON is documented by the installed CLI but no live tool event was induced', observed_at: '2026-07-23'}
+      usage: {status: verified, evidence: 'live JSON result included a usage object', observed_at: '2026-07-23'}
+      resolved_model_identity: {status: unattestable, evidence: 'requested model was accepted but the retained probe did not independently attest resolved identity', observed_at: '2026-07-23'}
+      working_directory_isolation: {status: unavailable, evidence: 'single safe-directory probe does not prove cross-session filesystem isolation', observed_at: '2026-07-23'}
+      rate_limit_behavior: {status: unavailable, evidence: 'rate limiting was not intentionally induced', observed_at: '2026-07-23'}
+    tos:
+      posture: 'official Claude Code supports Pro/Max subscription and non-interactive CLI use; production automation must remain within the official client contract'
+      citation: 'https://docs.anthropic.com/en/docs/claude-code/getting-started'
+      checked_at: '2026-07-23'
+    decision: {primary: agent_sdk, fallback: cli_json, usage_expectation: reported, claude_agent_sdk_primary: true}
+  codex:
+    surfaces:
+      authentication: {status: verified, evidence: 'codex login status reported an authenticated ChatGPT session without exposing credentials', observed_at: '2026-07-23'}
+      machine_readable_output: {status: verified, evidence: 'codex exec JSON mode exited 0 with thread and turn events', observed_at: '2026-07-23'}
+      session_resume: {status: unavailable, evidence: 'resume was present in CLI help but not exercised in the retained probe', observed_at: '2026-07-23'}
+      cancellation: {status: unavailable, evidence: 'provider-side cancellation acknowledgement was not exercised', observed_at: '2026-07-23'}
+      tool_events: {status: verified, evidence: 'JSON execution emitted typed item and turn events', observed_at: '2026-07-23'}
+      usage: {status: unreported, evidence: 'the retained JSON event summary did not establish a stable usage object', observed_at: '2026-07-23'}
+      resolved_model_identity: {status: unattestable, evidence: 'retained events did not independently attest the resolved model identity', observed_at: '2026-07-23'}
+      working_directory_isolation: {status: unavailable, evidence: 'read-only sandbox execution alone does not prove independent session workdirs', observed_at: '2026-07-23'}
+      rate_limit_behavior: {status: unavailable, evidence: 'rate limiting was not intentionally induced', observed_at: '2026-07-23'}
+    tos:
+      posture: 'official CLI subscription login was observed; automated use remains subject to OpenAI terms and usage policies'
+      citation: 'https://openai.com/policies/terms-of-use/'
+      checked_at: '2026-07-23'
+    decision: {primary: codex_sdk, fallback: cli_json, usage_expectation: unreported, codex_sdk_primary: true}
+  grok:
+    surfaces:
+      authentication: {status: unavailable, evidence: 'installed Grok CLI reported not authenticated', observed_at: '2026-07-23'}
+      machine_readable_output: {status: unavailable, evidence: 'headless output was not called without authentication', observed_at: '2026-07-23'}
+      session_resume: {status: unavailable, evidence: 'resume capability appears in CLI help but could not be exercised without authentication', observed_at: '2026-07-23'}
+      cancellation: {status: unavailable, evidence: 'not exercisable without an authenticated session', observed_at: '2026-07-23'}
+      tool_events: {status: unavailable, evidence: 'not exercisable without an authenticated session', observed_at: '2026-07-23'}
+      usage: {status: unreported, evidence: 'no authenticated result was available', observed_at: '2026-07-23'}
+      resolved_model_identity: {status: unattestable, evidence: 'model listing is not runtime resolved-model attestation', observed_at: '2026-07-23'}
+      working_directory_isolation: {status: unavailable, evidence: 'worktree option is documented by CLI help but not exercised', observed_at: '2026-07-23'}
+      rate_limit_behavior: {status: unavailable, evidence: 'not exercisable without authentication', observed_at: '2026-07-23'}
+    tos:
+      posture: 'consumer automated/non-human access is hostile under the current xAI AUP; require an expressly permitted enterprise/API surface'
+      citation: 'https://x.ai/legal/acceptable-use-policy'
+      checked_at: '2026-07-23'
+    decision: {primary: acp, fallback: excluded_until_authorized, usage_expectation: unreported, grok_acp_primary: true}
+  kimi:
+    surfaces:
+      authentication: {status: blocked, evidence: 'legacy wrapper exposed embedded credential material and is prohibited pending rotation and vault migration', observed_at: '2026-07-23'}
+      machine_readable_output: {status: unavailable, evidence: 'probe aborted after insecure wrapper failure', observed_at: '2026-07-23'}
+      session_resume: {status: unavailable, evidence: 'direct API resume contract not established', observed_at: '2026-07-23'}
+      cancellation: {status: unavailable, evidence: 'not exercised after credential incident', observed_at: '2026-07-23'}
+      tool_events: {status: unavailable, evidence: 'not exercised after credential incident', observed_at: '2026-07-23'}
+      usage: {status: unreported, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      resolved_model_identity: {status: unattestable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      working_directory_isolation: {status: unavailable, evidence: 'direct HTTP API has no filesystem workdir surface', observed_at: '2026-07-23'}
+      rate_limit_behavior: {status: unavailable, evidence: 'known 429 behavior was not intentionally induced with a compromised credential', observed_at: '2026-07-23'}
+    tos:
+      posture: 'official API documentation supports programmatic API use; credential use is blocked locally until rotated into an approved vault'
+      citation: 'https://platform.moonshot.ai/docs/guide/prompt-best-practice'
+      checked_at: '2026-07-23'
+    decision: {primary: direct_api, fallback: none, usage_expectation: unreported, kimi_direct_api_primary: true}
+  zai:
+    surfaces:
+      authentication: {status: blocked, evidence: 'legacy environment wrapper is prohibited; no approved vault credential was available', observed_at: '2026-07-23'}
+      machine_readable_output: {status: unavailable, evidence: 'no approved live API response was retained', observed_at: '2026-07-23'}
+      session_resume: {status: unavailable, evidence: 'direct API resume contract not established', observed_at: '2026-07-23'}
+      cancellation: {status: unavailable, evidence: 'no approved live request was started', observed_at: '2026-07-23'}
+      tool_events: {status: unavailable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      usage: {status: unreported, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      resolved_model_identity: {status: unattestable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      working_directory_isolation: {status: unavailable, evidence: 'direct HTTP API has no filesystem workdir surface', observed_at: '2026-07-23'}
+      rate_limit_behavior: {status: unavailable, evidence: 'not intentionally induced', observed_at: '2026-07-23'}
+    tos:
+      posture: 'Z.ai API terms expressly permit application integration; local use still requires approved credential storage'
+      citation: 'https://docs.z.ai/legal-agreement/terms-of-use'
+      checked_at: '2026-07-23'
+    decision: {primary: direct_api, fallback: none, usage_expectation: unreported, zai_direct_api_primary: true}
+  deepseek:
+    surfaces:
+      authentication: {status: blocked, evidence: 'legacy environment wrapper is prohibited; no approved vault credential was available', observed_at: '2026-07-23'}
+      machine_readable_output: {status: unavailable, evidence: 'no approved live API response was retained', observed_at: '2026-07-23'}
+      session_resume: {status: unavailable, evidence: 'direct API resume contract not established', observed_at: '2026-07-23'}
+      cancellation: {status: unavailable, evidence: 'no approved live request was started', observed_at: '2026-07-23'}
+      tool_events: {status: unavailable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      usage: {status: unreported, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      resolved_model_identity: {status: unattestable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      working_directory_isolation: {status: unavailable, evidence: 'direct HTTP API has no filesystem workdir surface', observed_at: '2026-07-23'}
+      rate_limit_behavior: {status: unavailable, evidence: 'not intentionally induced', observed_at: '2026-07-23'}
+    tos:
+      posture: 'DeepSeek API/open-platform use is governed by separate developer terms; local use requires approved credential storage'
+      citation: 'https://cdn.deepseek.com/policies/en-US/deepseek-terms-of-use.html'
+      checked_at: '2026-07-23'
+    decision: {primary: mmh_adapter, fallback: none, usage_expectation: unreported, deepseek_mmh_primary: true}

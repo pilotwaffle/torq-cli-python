@@ -1,0 +1,75 @@
+version: 5
+created: 2026-04-24
+supersedes: v4
+agents:
+  g1d:
+    role: Gate 1 Design Authority
+    model: claude-opus-4-7
+    cli: claude-sub
+    prompt: prompts/gate1_design.md
+    reads: [artifacts/00_input/prd.md]
+    writes: [artifacts/01_design/build_spec.md, artifacts/01_design/design_questions.md]
+  g1r:
+    role: Gate 1 Adversarial Review
+    model: claude-opus-4-7
+    cli: claude-sub
+    prompt: prompts/gate1_review.md
+    reads: [artifacts/00_input/prd.md, artifacts/01_design/build_spec.md]
+    writes: [artifacts/01_design/gate1_review.md]
+  builder:
+    role: Builder
+    model: deepseek-v4-pro
+    cli: claude-deepseek
+    prompt: prompts/builder.md
+    endpoint: https://api.deepseek.com/anthropic
+    reads: [artifacts/01_design/build_spec.md]
+    writes: [artifacts/02_build/build_result.md]
+  g2a:
+    role: Gate 2 Build Authority / Audit
+    model: claude-opus-4-7
+    cli: claude-sub
+    prompt: prompts/gate2_audit.md
+    reads: [artifacts/01_design/build_spec.md, artifacts/02_build/build_result.md]
+    writes: [artifacts/03_audit/audit_report.md]
+  refine_bug:
+    role: Bug / Race / Self-correction refinement
+    model: kimi-k2.7-code
+    cli: claude-kimi
+    prompt: prompts/refine_bug.md
+    endpoint: https://api.moonshot.ai/anthropic/
+    reads: [artifacts/03_audit/audit_report.md]
+    writes: [artifacts/04_refine/bug_refinement.md]
+    notes: Account unavailable
+  refine_ui:
+    role: UI polish refinement
+    model: glm-5.2
+    cli: claude-zai
+    prompt: prompts/refine_ui.md
+    endpoint: https://api.z.ai/api/anthropic
+    reads: [artifacts/03_audit/audit_report.md]
+    writes: [artifacts/04_refine/ui_refinement.md]
+state_machine:
+  states:
+    - ready
+    - design_complete
+    - gate1_passed
+    - design_revision_needed
+    - build_complete
+    - build_revision_needed
+    - refine_needed
+    - complete
+    - human_escalation
+rejection_routing:
+  architecture_issue: builder
+  bug_or_race: refine_bug
+  ui_polish: refine_ui
+  spec_is_wrong: g1d
+  ambiguous: human_escalation
+cost_guardrails:
+  max_cost_per_prd_usd: 5.00
+  alert_threshold_usd: 3.00
+success_criteria:
+  - rejection_count: v5 should reject earlier than v4
+  - wall_clock: v5 should be faster
+  - cost: V5 builder should be cheaper
+  - post_push_issues: v5 should have fewer production bugs

@@ -1,0 +1,126 @@
+registry_schema_version: "1.0.0"
+registry_id: torq-cli-role-registry
+registry_version: "1.0.0"
+policies:
+  - policy_id: g2a-routing-3.1.3
+    policy_version: "3.1.3"
+    contract_sha256: fbeb3e1597a8dde9b4e5c1b5b049605bd3ed767c468a3f75b2e362c3e2f153ca
+prompts:
+  - {prompt_id: live.g1d.design, prompt_version: "1.0.0", resource_path: prompts/live.g1d.design.md, content_sha256: f3bfbde6af7171290d1ee04edeb22ddbf3186f511e67a7351f138d40e1ef463a}
+  - {prompt_id: live.g1r.review, prompt_version: "1.0.0", resource_path: prompts/live.g1r.review.md, content_sha256: a44ac9ecfe0812af59eed3a3dfd0b1fdaf5641b4bf0c7b237259b6b64b7f8bc3}
+  - {prompt_id: live.builder.execute, prompt_version: "1.0.0", resource_path: prompts/live.builder.execute.md, content_sha256: faaa73cbb1e4990cee081907014f61893a979f67de347aae0909291ef07d1ece}
+  - {prompt_id: live.g2a.audit, prompt_version: "1.0.0", resource_path: prompts/live.g2a.audit.md, content_sha256: 05efe5ed6011fe4a1c0c11957768d40bb8921207bf6c4d05f42a62d891d16fac}
+  - {prompt_id: live.refine_bug.repair, prompt_version: "1.0.0", resource_path: prompts/live.refine_bug.repair.md, content_sha256: 3da3961a0b1781ce582eecc8d58ffd2aca9c3cfdfb0e5348e0d3f40cd9df8e9c}
+  - {prompt_id: live.refine_ui.repair, prompt_version: "1.0.0", resource_path: prompts/live.refine_ui.repair.md, content_sha256: cae7eaf0b4dae71b56519843b4b171a570d3cc2f4b8e5755a835528f4e95dcf6}
+  - {prompt_id: compat.gate1_design, prompt_version: "1.0.0", resource_path: prompts/compat.gate1_design.md, content_sha256: 90c17eaac94c51cac25a862a463de3a4c93fb5cbf696c8c871da058e697a279c}
+  - {prompt_id: compat.gate1_review, prompt_version: "1.0.0", resource_path: prompts/compat.gate1_review.md, content_sha256: f03bae8e49849b3979720df905bf7c83d1a1feada49d0e9f39ffddbefd09a867}
+  - {prompt_id: compat.builder, prompt_version: "1.0.0", resource_path: prompts/compat.builder.md, content_sha256: ea78e683a4da1eb19c2ac3372309d0fc8abd957b01a363dda58ff135fa9c8314}
+  - {prompt_id: compat.g2a_adversarial, prompt_version: "1.0.0", resource_path: prompts/compat.g2a_adversarial.md, content_sha256: 13d029794c7f4951be3b0128b7ef34557f76e278fbf039d9e0307bf07c9e41a8}
+  - {prompt_id: compat.refine_bug, prompt_version: "1.0.0", resource_path: prompts/compat.refine_bug.md, content_sha256: 42c07e65fdb133515d9643be6917496398c0f52c11e07979022f9fa6267b6794}
+  - {prompt_id: compat.refine_ui, prompt_version: "1.0.0", resource_path: prompts/compat.refine_ui.md, content_sha256: d4edeaaaa36b5301b5f3e62f4fe7215aeaba45d81d879c90ba41a0371eb385c5}
+efforts:
+  - {effort_id: effort.standard, provider_value: standard}
+  - {effort_id: effort.high, provider_value: high}
+  - {effort_id: effort.maximum, provider_value: maximum}
+roles:
+  - {role_id: g1d, allowed_authority: [draft_design, revise_design], prohibited_authority: [approve_design, approve_build, apply_primary_diff]}
+  - {role_id: g1r, allowed_authority: [approve_design, reject_design], prohibited_authority: [draft_design, produce_sandbox_diff, apply_primary_diff]}
+  - {role_id: builder, allowed_authority: [produce_sandbox_diff, run_allowed_tests], prohibited_authority: [approve_design, approve_build, apply_primary_diff]}
+  - {role_id: g2a, allowed_authority: [approve_build, reject_build, route_defect, request_human_review], prohibited_authority: [produce_sandbox_diff, apply_primary_diff]}
+  - {role_id: refine_bug, allowed_authority: [produce_bug_repair, run_allowed_tests], prohibited_authority: [approve_design, approve_build, apply_primary_diff]}
+  - {role_id: refine_ui, allowed_authority: [produce_ui_repair, run_allowed_tests], prohibited_authority: [approve_design, approve_build, apply_primary_diff]}
+states:
+  - {state_id: draft}
+  - {state_id: design_submitted}
+  - {state_id: design_rejected}
+  - {state_id: design_approved}
+  - {state_id: building}
+  - {state_id: build_submitted}
+  - {state_id: audit_rejected}
+  - {state_id: refine_bug}
+  - {state_id: refine_ui}
+  - {state_id: targeted_reaudit}
+  - {state_id: awaiting_human_approval}
+  - {state_id: complete}
+  - {state_id: blocked}
+transitions:
+  - {from_state: draft, event: submit_design, to_state: design_submitted, actor_id: g1d}
+  - {from_state: design_submitted, event: reject_design, to_state: design_rejected, actor_id: g1r}
+  - {from_state: design_submitted, event: approve_design, to_state: design_approved, actor_id: g1r}
+  - {from_state: design_rejected, event: revise_design, to_state: draft, actor_id: g1d}
+  - {from_state: design_approved, event: start_build, to_state: building, actor_id: builder}
+  - {from_state: building, event: submit_build, to_state: build_submitted, actor_id: builder}
+  - {from_state: build_submitted, event: reject_build, to_state: audit_rejected, actor_id: g2a}
+  - {from_state: build_submitted, event: approve_build, to_state: awaiting_human_approval, actor_id: g2a}
+  - {from_state: audit_rejected, event: route_bug, to_state: refine_bug, actor_id: g2a}
+  - {from_state: audit_rejected, event: route_ui, to_state: refine_ui, actor_id: g2a}
+  - {from_state: audit_rejected, event: route_builder, to_state: building, actor_id: g2a}
+  - {from_state: refine_bug, event: submit_repair, to_state: targeted_reaudit, actor_id: refine_bug}
+  - {from_state: refine_ui, event: submit_repair, to_state: targeted_reaudit, actor_id: refine_ui}
+  - {from_state: targeted_reaudit, event: reject_build, to_state: audit_rejected, actor_id: g2a}
+  - {from_state: targeted_reaudit, event: approve_build, to_state: awaiting_human_approval, actor_id: g2a}
+  - {from_state: awaiting_human_approval, event: approve_apply, to_state: complete, actor_id: operator}
+  - {from_state: awaiting_human_approval, event: deny_apply, to_state: blocked, actor_id: operator}
+  - {from_state: draft, event: policy_block, to_state: blocked, actor_id: system}
+  - {from_state: design_submitted, event: policy_block, to_state: blocked, actor_id: system}
+  - {from_state: design_approved, event: policy_block, to_state: blocked, actor_id: system}
+  - {from_state: building, event: policy_block, to_state: blocked, actor_id: system}
+  - {from_state: build_submitted, event: policy_block, to_state: blocked, actor_id: system}
+  - {from_state: targeted_reaudit, event: policy_block, to_state: blocked, actor_id: system}
+severity_buckets:
+  - {severity: critical, bucket_id: A}
+  - {severity: high, bucket_id: B}
+  - {severity: medium, bucket_id: C}
+  - {severity: low, bucket_id: D}
+strategies:
+  - {strategy_id: light_v1, stage_roles: [g1d, g1r, builder, g2a]}
+  - {strategy_id: standard_v1, stage_roles: [g1d, g1r, builder, g2a, refine_bug, refine_ui]}
+profiles:
+  - profile_id: torq-v5-6-live
+    profile_version: "1.0.0"
+    default: true
+    strategy_id: standard_v1
+    policy_id: g2a-routing-3.1.3
+    bindings:
+      - {role_id: g1d, provider_id: anthropic, model_id: claude-fable-5, prompt_id: live.g1d.design, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: agent_sdk}
+      - {role_id: g1r, provider_id: anthropic, model_id: claude-opus-4-8, prompt_id: live.g1r.review, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: agent_sdk}
+      - {role_id: builder, provider_id: deepseek, model_id: deepseek-v4-pro, prompt_id: live.builder.execute, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: direct_api}
+      - {role_id: g2a, provider_id: openai, model_id: gpt-5.5-thinking, prompt_id: live.g2a.audit, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: codex_sdk}
+      - {role_id: refine_bug, provider_id: moonshot, model_id: kimi-k3, prompt_id: live.refine_bug.repair, prompt_version: "1.0.0", effort_id: effort.standard, connector_surface: direct_api}
+      - {role_id: refine_ui, provider_id: zai, model_id: glm-5.2, prompt_id: live.refine_ui.repair, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: direct_api}
+    independence_rules:
+      - {reviewer_role: g1r, reviewed_role: g1d, minimum: model}
+      - {reviewer_role: g2a, reviewed_role: builder, minimum: vendor}
+      - {reviewer_role: g2a, reviewed_role: refine_bug, minimum: vendor}
+      - {reviewer_role: g2a, reviewed_role: refine_ui, minimum: vendor}
+    escalations:
+      - {escalation_id: builder.sol-high, target_role: builder, provider_id: openai, model_id: gpt-5.6-sol-high, promotion_id: promotion-v1, triggers: [{kind: operator_flag, value: builder_escalation}, {kind: task_label, value: cross_stack}, {kind: task_label, value: product_critical}, {kind: task_label, value: major_workflow}]}
+      - {escalation_id: refine_ui.terra-high, target_role: refine_ui, provider_id: openai, model_id: gpt-5.6-terra-high, promotion_id: promotion-v1, triggers: [{kind: operator_flag, value: refine_ui_escalation}, {kind: task_label, value: customer_facing_ui}, {kind: task_label, value: design_system}]}
+      - {escalation_id: g1d.fable-5b, target_role: g1d, provider_id: anthropic, model_id: claude-fable-5b, promotion_id: promotion-v1, triggers: [{kind: operator_flag, value: g1d_promotion}, {kind: task_label, value: promoted_g1d}]}
+    promotion_id: promotion-v1
+  - profile_id: torq-v5-repo-compat
+    profile_version: "1.0.0"
+    default: false
+    strategy_id: standard_v1
+    policy_id: g2a-routing-3.1.3
+    bindings:
+      - {role_id: g1d, provider_id: anthropic, model_id: claude-opus-4-8, prompt_id: compat.gate1_design, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: agent_sdk}
+      - {role_id: g1r, provider_id: anthropic, model_id: claude-opus-4-7, prompt_id: compat.gate1_review, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: agent_sdk}
+      - {role_id: builder, provider_id: deepseek, model_id: deepseek-v4-pro, prompt_id: compat.builder, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: direct_api}
+      - {role_id: g2a, provider_id: anthropic, model_id: claude-opus-4-8, prompt_id: compat.g2a_adversarial, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: agent_sdk}
+      - {role_id: refine_bug, provider_id: moonshot, model_id: kimi-k2.7-code, prompt_id: compat.refine_bug, prompt_version: "1.0.0", effort_id: effort.standard, connector_surface: direct_api}
+      - {role_id: refine_ui, provider_id: zai, model_id: glm-5.2, prompt_id: compat.refine_ui, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: direct_api}
+    independence_rules:
+      - {reviewer_role: g1r, reviewed_role: g1d, minimum: model}
+      - {reviewer_role: g2a, reviewed_role: builder, minimum: vendor}
+      - {reviewer_role: g2a, reviewed_role: refine_bug, minimum: vendor}
+      - {reviewer_role: g2a, reviewed_role: refine_ui, minimum: vendor}
+    escalations:
+      - {escalation_id: builder.sol-high, target_role: builder, provider_id: openai, model_id: gpt-5.6-sol-high, promotion_id: promotion-v1, triggers: [{kind: operator_flag, value: builder_escalation}, {kind: task_label, value: cross_stack}, {kind: task_label, value: product_critical}, {kind: task_label, value: major_workflow}]}
+      - {escalation_id: refine_ui.terra-high, target_role: refine_ui, provider_id: openai, model_id: gpt-5.6-terra-high, promotion_id: promotion-v1, triggers: [{kind: operator_flag, value: refine_ui_escalation}, {kind: task_label, value: customer_facing_ui}, {kind: task_label, value: design_system}]}
+      - {escalation_id: g1d.fable-5b, target_role: g1d, provider_id: anthropic, model_id: claude-fable-5b, promotion_id: promotion-v1, triggers: [{kind: operator_flag, value: g1d_promotion}, {kind: task_label, value: promoted_g1d}]}
+    promotion_id: promotion-v1
+promotion_procedures:
+  - {promotion_id: promotion-v1, benchmark_fixture_id: model-promotion-fixture-v1, required_record_fields: [incumbent_model, candidate_model, fixture_hash, score, decision_id, decided_at_utc]}
+drift_oracles:
+  - {oracle_id: torq-console-compat@3ae196102a84aed24f7daa9dc3fed037522e1f20, source_commit: 3ae196102a84aed24f7daa9dc3fed037522e1f20, fixture_directory: oracles/torq-console-3ae19610, refresh_mode: operator_gated_external_capture, runtime_access: fixture_only, manifest_schema: torq-oracle-manifest-v1}

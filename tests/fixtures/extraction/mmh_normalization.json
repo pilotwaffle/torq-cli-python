@@ -1,0 +1,31 @@
+[
+  {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "response": {
+      "model": "deepseek-v4-flash",
+      "choices": [{"message": {"content": "Final: use a lazy accessor.", "reasoning_content": "considering module scope risks"}}],
+      "usage": {"prompt_tokens": 120, "completion_tokens": 40, "completion_tokens_details": {"reasoning_tokens": 25}}
+    }
+  },
+  {
+    "provider": "moonshot",
+    "model": "kimi-k2.7-code",
+    "response": {
+      "model": "kimi-k2.7-code",
+      "choices": [{"message": {"content": "<think>plan the diff first</think>Here is the patch."}}],
+      "usage": {"prompt_tokens": 200, "completion_tokens": 90}
+    }
+  },
+  {
+    "provider": "openrouter",
+    "model": "z-ai/glm-5.2",
+    "response": {
+      "model": "z-ai/glm-5.2",
+      "provider": "z-ai",
+      "choices": [{"message": {"content": "Judged final output.", "reasoning": "weighing findings severity"}}],
+      "usage": {"prompt_tokens": 300, "completion_tokens": 55, "reasoning_tokens": 30}
+    }
+  }
+]
+

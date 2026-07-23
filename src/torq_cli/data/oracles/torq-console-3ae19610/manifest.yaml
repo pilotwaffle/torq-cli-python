@@ -1,0 +1,9 @@
+schema: torq-oracle-manifest-v1
+source_commit: 3ae196102a84aed24f7daa9dc3fed037522e1f20
+fixtures:
+  prompt_provenance.normalized.json:
+    sha256: 798c9ba82859da69eb6d38c5b16a47dd9891be48f4310136421c36e6b8e6382b
+  role_map.normalized.json:
+    sha256: 7348b7c15bfece61ecacdeb71a860ad4221425044d39e705cf0ec7b28b4d2cf0
+  v5_config.normalized.json:
+    sha256: 52110d4522b883ee16b313a612441871e802710e75bb754bb5d9707492f27698
