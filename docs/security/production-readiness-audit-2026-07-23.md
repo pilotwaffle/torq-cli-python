@@ -1,10 +1,13 @@
 # Production-readiness audit — 2026-07-23
 
-Commit baseline: `cebe1e0` (standalone repository implementation baseline).
+Commit baseline: `f330177` (code baseline).
+Hosted CI evidence: run `30053432134`, green on Windows, macOS, Linux, and
+headless Linux, including lint, strict typing, full tests, 14 named mutants,
+wheel build, and clean-wheel smoke.
 
 This audit distinguishes implemented/local evidence from external release
-evidence. A missing live credential, hosted OS runner, branch rule, or signed
-tag is a release blocker; mock evidence is not promoted to live evidence.
+evidence. A missing live credential or signed tag is a release blocker; mock
+evidence is not promoted to live evidence.
 
 ## Credential handling — High deferred
 
@@ -15,14 +18,18 @@ credential during discovery. Credential rotation is unresolved and all legacy
 credential-bearing wrappers remain prohibited. Boundary: no Kimi live smoke or
 release until rotation and vault capture are independently confirmed.
 
+Nonsecret `torq auth status` evidence on 2026-07-23 failed closed: Claude and
+Codex authentication were detected but resolved model identity was
+unattestable; DeepSeek, Kimi, and Z.ai were blocked; Grok was unavailable.
+
 ## Sandbox escape — resolved locally
 
 Path traversal, symlink escape, protected `.env` reads, concurrent workspace
 access, dirty-primary refusal, command/network allowlists, environment
 filtering, and process-tree cancellation have automated coverage.
 
-Sandbox re-test: `tests/test_phase4_safety.py` passed on Windows on 2026-07-23.
-Hosted macOS and Linux execution is still required before release.
+Sandbox re-test: `tests/test_phase4_safety.py` passed locally and in the hosted
+Windows, macOS, Linux, and headless Linux matrix on 2026-07-23.
 
 ## Receipt-chain integrity — resolved locally
 
@@ -51,5 +58,11 @@ suite includes a deliberately divergent normalization mutant that is caught.
 
 - High — credential rotation and new vault capture: deferred behind a hard live/release boundary.
 - High — live smoke for all six providers: deferred until approved credentials and exact model grants exist.
-- High — signed tag, release artifact provenance, protected main, and clean-machine Windows/macOS/Linux installs: unresolved external release gates.
+- High — signed tag and clean-machine OS-keychain access from installed artifacts: unresolved external release gates. Cross-platform wheel build and isolated wheel smoke are green.
 - Medium — remote receipt anchoring: explicitly deferred to a future release; local signing is tamper-resistant, not tamper-proof.
+
+## Repository controls — resolved
+
+The standalone public repository is `pilotwaffle/torq-cli-python`. `main` is
+protected with strict required checks for all four CI jobs, admin enforcement,
+linear history, conversation resolution, and force-push/deletion disabled.
