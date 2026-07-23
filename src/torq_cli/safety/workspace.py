@@ -21,8 +21,16 @@ def tree_hash(root: Path) -> str:
     digest = hashlib.sha256()
     if not root.exists():
         return "sha256:" + digest.hexdigest()
-    for path in sorted((p for p in root.rglob("*") if p.is_file()), key=lambda p: p.as_posix()):
+    for path in sorted(root.rglob("*"), key=lambda p: p.as_posix()):
         relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            digest.update(relative.encode())
+            digest.update(b"\0SYMLINK\0")
+            digest.update(os.readlink(path).encode())
+            digest.update(b"\0")
+            continue
+        if not path.is_file():
+            continue
         digest.update(relative.encode())
         digest.update(b"\0")
         digest.update(path.read_bytes())
@@ -106,4 +114,3 @@ class WorkspaceManager:
             lock_path.unlink(missing_ok=True)
             raise
         return WorkspaceHandle(destination, resolved_primary, tree_hash(resolved_primary), GuardedPaths(destination), lock_path)
-

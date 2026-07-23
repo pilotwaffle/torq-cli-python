@@ -11,7 +11,7 @@ import pytest
 from torq_cli.safety.approval import ApprovalBoundary, ChangeProposal
 from torq_cli.safety.governed import EvidenceBundle, GovernedRun, RunState
 from torq_cli.safety.policy import ExecutionPolicy, ManagedProcess, PolicyHalt, ResourceCeilings
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain
+from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
 from torq_cli.safety.usage import summarize_usage
 from torq_cli.safety.workspace import PathAccessDenied, WorkspaceBusy, WorkspaceManager, tree_hash
 
@@ -45,6 +45,21 @@ def test_copy_sandbox_primary_untouched_lock_dirty_policy_and_path_guards(tmp_pa
     with pytest.raises(ValueError, match="dirty_primary_refused"):
         WorkspaceManager(tmp_path / "other").create(primary, "run-3", dirty=True)
     handle.release()
+
+
+def test_tree_hash_does_not_follow_external_symlink(tmp_path: Path) -> None:
+    primary = tmp_path / "repo-link"
+    primary.mkdir()
+    outside = tmp_path / "external-secret"
+    outside.write_text("first", encoding="utf-8")
+    link = primary / "linked"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    first = tree_hash(primary)
+    outside.write_text("second", encoding="utf-8")
+    assert tree_hash(primary) == first
 
 
 def test_execution_policy_blocks_commands_network_env_and_each_ceiling() -> None:
@@ -104,6 +119,17 @@ def test_receipt_chain_artifact_tamper_signature_redaction_and_permissions(tmp_p
     original = artifact.read_bytes()
     artifact.write_bytes(original + b"x")
     assert chain.verify(manifest).ok is False
+
+
+def test_receipt_verifier_rejects_artifact_path_escape_before_read(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"do-not-read")
+    chain = ReceiptChain(tmp_path / "evidence", "run-escape", MemoryRunKeyStore(), profile_version="1", policy_version="3.1.3")
+    chain.append("audit", {"artifact": "../../outside.bin", "artifact_hash": chain.hash_file(outside)})
+    chain.seal()
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "artifact_path_escape"
 
 
 def test_governed_run_evidence_routing_escalation_timeline_and_loop_limit(tmp_path: Path) -> None:

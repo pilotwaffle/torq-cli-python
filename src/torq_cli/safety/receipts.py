@@ -161,7 +161,10 @@ def verify_receipt_store(root: Path) -> StoreVerification:
             versions = current_versions
             payload = envelope.get("payload", {})
             if isinstance(payload, dict) and "artifact" in payload:
-                artifact = root / str(payload["artifact"])
+                resolved_root = root.resolve()
+                artifact = (resolved_root / str(payload["artifact"])).resolve(strict=False)
+                if not artifact.is_relative_to(resolved_root):
+                    return StoreVerification("tampered", "artifact_path_escape")
                 if not artifact.exists() or ReceiptChain.hash_file(artifact) != payload.get("artifact_hash"):
                     return StoreVerification("tampered", "artifact_hash_mismatch")
             previous = receipt_hash
