@@ -24,15 +24,14 @@ for context only.
 
 The implementation gate passed. T-08 through T-35 are implemented and tested;
 T-21 and the live portion of T-33 still require approved provider credentials.
-T-36 remains correctly withheld until those live gates and credential rotation
-are complete.
+T-36 remains correctly withheld until those live gates are complete.
 
 ## Explicit non-claims
 
 Credential backends, headless fallback, signing, receipts, governed execution,
 approval/apply, and packaging are now implemented. Live provider effectiveness,
-credential rotation, clean-machine keychain verification, and release/tagging
-remain external release gates and are not claimed complete.
+clean-machine keychain verification, and release/tagging remain external release
+gates and are not claimed complete.
 
 The remaining residual risks are the documented limits on rollback, lost
 passphrases, local administration, metadata privacy, OS synchronization,

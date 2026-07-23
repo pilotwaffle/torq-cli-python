@@ -51,17 +51,17 @@ providers:
     decision: {primary: acp, fallback: excluded_until_authorized, usage_expectation: unreported, grok_acp_primary: true}
   kimi:
     surfaces:
-      authentication: {status: blocked, evidence: 'legacy wrapper exposed embedded credential material and is prohibited pending rotation and vault migration', observed_at: '2026-07-23'}
-      machine_readable_output: {status: unavailable, evidence: 'probe aborted after insecure wrapper failure', observed_at: '2026-07-23'}
+      authentication: {status: blocked, evidence: 'no approved vault-backed credential was available', observed_at: '2026-07-23'}
+      machine_readable_output: {status: unavailable, evidence: 'no approved live API response was retained', observed_at: '2026-07-23'}
       session_resume: {status: unavailable, evidence: 'direct API resume contract not established', observed_at: '2026-07-23'}
-      cancellation: {status: unavailable, evidence: 'not exercised after credential incident', observed_at: '2026-07-23'}
-      tool_events: {status: unavailable, evidence: 'not exercised after credential incident', observed_at: '2026-07-23'}
+      cancellation: {status: unavailable, evidence: 'no approved live request was started', observed_at: '2026-07-23'}
+      tool_events: {status: unavailable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
       usage: {status: unreported, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
       resolved_model_identity: {status: unattestable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
       working_directory_isolation: {status: unavailable, evidence: 'direct HTTP API has no filesystem workdir surface', observed_at: '2026-07-23'}
-      rate_limit_behavior: {status: unavailable, evidence: 'known 429 behavior was not intentionally induced with a compromised credential', observed_at: '2026-07-23'}
+      rate_limit_behavior: {status: unavailable, evidence: 'not intentionally induced', observed_at: '2026-07-23'}
     tos:
-      posture: 'official API documentation supports programmatic API use; credential use is blocked locally until rotated into an approved vault'
+      posture: 'official API documentation supports programmatic API use; local use requires approved credential storage'
       citation: 'https://platform.moonshot.ai/docs/guide/prompt-best-practice'
       checked_at: '2026-07-23'
     decision: {primary: direct_api, fallback: none, usage_expectation: unreported, kimi_direct_api_primary: true}

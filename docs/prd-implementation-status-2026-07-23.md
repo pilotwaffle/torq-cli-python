@@ -21,7 +21,7 @@ provider evidence.
 | T-33 | Recorded composition complete; live execution pending | Fault-injected heterogeneous governed E2E and receipt verification pass; providers were recorded/mock. |
 | T-34 | Complete | `SECURITY.md` matches implemented controls and audit findings. |
 | T-35 | Implementation and CI packaging complete; keychain install evidence pending | Wheels build and smoke on all three OSes; clean-machine OS-keychain access still needs operator environments. |
-| T-36 | Correctly withheld | A signed release tag would violate the PRD while T-21, live T-33, credential rotation, and the remaining T-35 evidence are open. |
+| T-36 | Correctly withheld | A signed release tag would violate the PRD while T-21, live T-33, and the remaining T-35 evidence are open. |
 
 ## Verification
 
@@ -36,12 +36,10 @@ provider evidence.
 
 ## Required operator evidence before T-36
 
-1. Revoke/rotate the exposed legacy Moonshot credential and capture the new
-   Kimi credential through TORQ's vault boundary.
-2. Supply approved credentials and exact model grants for all six providers;
+1. Supply approved credentials and exact model grants for all six providers;
    run T-21 live smoke and retain redacted evidence.
-3. Run T-33 against at least two live heterogeneous providers.
-4. Verify installed-artifact access to Credential Manager, Keychain, and Secret
+2. Run T-33 against at least two live heterogeneous providers.
+3. Verify installed-artifact access to Credential Manager, Keychain, and Secret
    Service/encrypted fallback on clean Windows, macOS, and Linux machines.
-5. Re-run T-32, then create the signed standalone tag `v0.1.0` and matching
+4. Re-run T-32, then create the signed standalone tag `v0.1.0` and matching
    release artifacts only if no High finding remains.

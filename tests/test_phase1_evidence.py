@@ -120,5 +120,5 @@ def test_provider_matrix_document_names_every_provider_and_security_boundary() -
     for provider in PROVIDERS:
         assert f"`{provider}`" in text
     assert "2026-07-23" in text
-    assert "credential rotation" in text
+    assert "vault-backed credential" in text
     assert "unattestable" in text
