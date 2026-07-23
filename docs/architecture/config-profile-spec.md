@@ -35,7 +35,11 @@ The packaged registry is authoritative for CLI profiles. The pinned TORQ Console
 
 The complete normative schemas, byte preimages, hashes, findings catalog, transitions, bindings, prompt identities, mutation definitions, and test obligations are the latest `task_complete` packet in the Terra thread named above. If this summary and that packet differ, implementation stops and returns to Gate 1.
 
-## Honest PRD status
+## Historical PRD status
+
+The list below records the status when this Foundation design was approved. It
+is not the current implementation status; see `phase1-status.md` and the
+production-readiness audit for the 2026-07-23 state.
 
 - T-01: partial until implementation and evidence complete.
 - T-02: audit draft/inventory only.
@@ -45,6 +49,9 @@ The complete normative schemas, byte preimages, hashes, findings catalog, transi
   YAML import, and the closed v1 config contract remain read-only and offline.
   No new independent T-06C gate approval is claimed.
 - T-07: scaffold and CI definition only.
-- T-08 through T-36: excluded and not started.
+- At Foundation approval, T-08 through T-36 were excluded and not started.
 
-No Phase 1 gate, runtime effectiveness, provider capability, branch protection, signing, tagging, release, or deployment is claimed.
+These statements were true for the bounded Foundation slice. The later
+implementation adds runtime capability, protected-branch CI, signing, and
+packaging while retaining the Foundation invariants. Live provider evidence and
+the release tag remain gated.
