@@ -11,9 +11,13 @@ local compatibility credential source. TORQ never copies that file, serializes
 its values, or exposes more than the selected provider credential to a child
 process.
 
-The supported backends are Windows Credential Manager, macOS Keychain, and
-Linux Secret Service. Headless Linux uses an attended encrypted-file fallback;
-it does not silently downgrade to plaintext storage.
+The implemented native backends are Windows Credential Manager, macOS Keychain,
+and Linux Secret Service through a verified `keyring` backend. Credential values
+enter through an attended no-echo terminal only; redirected input is rejected.
+Configuration stores opaque credential references, never values. The headless
+Linux encrypted-file envelope remains a requirements contract and is not yet an
+implemented fallback; headless selection therefore fails closed instead of
+downgrading to plaintext.
 
 ## Sandbox and approval
 

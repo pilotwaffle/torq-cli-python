@@ -61,6 +61,15 @@ def test_optional_external_credential_source_is_closed_and_absolute() -> None:
         findings = validate_config(changed, load_registry())
         assert any(finding.path.startswith("/credential_source") for finding in findings)
 
+    native = valid_config()
+    native["credential_source"] = {"kind": "platform_keychain"}
+    assert validate_config(native, load_registry()) == ()
+    native["credential_source"] = {"kind": "platform_keychain", "path": "forbidden"}
+    assert any(
+        finding.path.startswith("/credential_source")
+        for finding in validate_config(native, load_registry())
+    )
+
 
 def test_nfc_equivalent_duplicate_mapping_keys_are_parser_invalid() -> None:
     text = """config_version: 1

@@ -286,20 +286,19 @@ def validate_config_shape(config: Mapping[str, Any], registry: Registry) -> tupl
         if not isinstance(credential_source, Mapping):
             findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source"))
         else:
-            findings.extend(reject_unknown_keys(
-                credential_source,
-                {"kind", "path"},
-                "/credential_source",
-            ))
-            source_path = credential_source.get("path")
-            if credential_source.get("kind") != "external_env":
+            source_kind = credential_source.get("kind")
+            allowed_keys = {"kind", "path"} if source_kind == "external_env" else {"kind"}
+            findings.extend(reject_unknown_keys(credential_source, allowed_keys, "/credential_source"))
+            if source_kind not in {"external_env", "platform_keychain"}:
                 findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/kind"))
-            if (
-                not isinstance(source_path, str)
-                or not source_path
-                or not (source_path.startswith("/") or _WINDOWS_ABSOLUTE.match(source_path))
-            ):
-                findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/path"))
+            if source_kind == "external_env":
+                source_path = credential_source.get("path")
+                if (
+                    not isinstance(source_path, str)
+                    or not source_path
+                    or not (source_path.startswith("/") or _WINDOWS_ABSOLUTE.match(source_path))
+                ):
+                    findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/path"))
     policy = config.get("policy")
     if not isinstance(policy, Mapping):
         findings.append(FindingCatalog.make("config_schema_invalid", path="/policy"))

@@ -1,8 +1,12 @@
 # PRD r5 implementation status — 2026-07-24
 
-Assessed source commit: `5138c3542ab3b3065960fa65c0c4b59c03d7cc9b`
-(`feature/governed-orchestrator`, PR #5). Receipt/security base: `4ecd42c`
-(PR #4). Latest matching hosted quality runs:
+Merged implementation baseline: `9b5e77b174626c794bfe76fe3940b09b3c5efb9e`
+(`main`, merged PR #5). Receipt/security base: `9bac9246faf93c00c7b69b6828d397347e48a536`
+(merged PR #4). The T-35 native-credential phase is being verified on
+`feature/native-credential-backends`; hosted run identifiers will be added after
+the branch is pushed.
+
+Previous matching hosted quality runs:
 
 - pull request: [`30064851658`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30064851658);
 - push: [`30064849331`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30064849331).
@@ -31,15 +35,15 @@ complete.
 | T-32 | Complete for this source baseline | The production-readiness audit records resolved and open findings. It must be rerun after external evidence or implementation changes. |
 | T-33 | Operator/integration gated | Recorded/mock heterogeneous composition and receipt verification pass. Closing the live criterion needs at least two authorized live providers plus a safe application target. |
 | T-34 | Complete | `SECURITY.md` distinguishes the authenticated private identity from the mutable public-key cache and states the same-principal/private-identity limitation. |
-| T-35 | Packaging code complete; clean-machine evidence pending | Wheel/sdist construction and hosted wheel smoke pass on all three OS families. Clean-machine installs remain operator-gated. The repository currently selects keychain backend names but does not implement Credential Manager, Keychain, or Secret Service read/write operations; any criterion requiring those operations needs separately scoped implementation before evidence can be produced. |
+| T-35 | Native implementation complete; cross-platform clean-machine evidence pending | Wheel/sdist construction and hosted wheel smoke pass on all three OS families. Native Windows Credential Manager, macOS Keychain, and Linux Secret Service read/write/revoke operations now use verified platform-specific `keyring` backends and opaque references. An ephemeral Windows round trip was verified and revoked on 2026-07-24. macOS/Linux installed-artifact evidence remains operator-gated. The headless encrypted-file contract remains unimplemented and fails closed. |
 | T-36 | Correctly withheld | Signed tag, release publication, and final branch/release evidence remain gated by T-21, live T-33, applicable T-35 evidence, a refreshed T-32 audit, and explicit operator authorization. |
 
 ## Verification
 
-- Test collection: 452 tests across 22 test files; the refreshed local suite and
-  full hosted matrix pass with four intentional live/environment skips (448
+- Test collection: 460 tests across 23 test files; the refreshed local suite
+  passes with four intentional live/environment skips (456
   executed tests).
-- Strict mypy: pass across 44 Python source files.
+- Strict mypy: pass across 45 Python source files.
 - Ruff: pass.
 - Named security/governance mutants: 14/14 killed.
 - Source distribution and wheel builds: pass; hosted jobs perform isolated wheel
@@ -55,6 +59,12 @@ complete.
   unchanged.
 - Operator replay reported on 2026-07-24: key wipe, anchor deletion, and full
   consistent reforge variants were rejected, including `trust_identity_unsafe`.
+- T-35 Windows evidence on 2026-07-24: both the editable checkout and an isolated
+  installation of the built wheel selected `windows_credential_manager`, stored
+  and resolved a generated test-only value, revoked it, and verified absence.
+  No credential value was printed or retained; artifacts and the isolated
+  environment live only under `E:\tmp`. The final tested wheel SHA-256 is
+  `BB47AC3136C2AEC9E9DE8F87C91E0CEDB7A7EBA63077D2E2203902346E6288F3`.
 
 ## Remaining closure work and ownership
 
@@ -62,7 +72,7 @@ complete.
 | --- | --- | --- | --- |
 | T-21 | Redacted independent live-smoke results for the required providers/models | Provide or authorize access to approved credential sources, exact grants, endpoints, and any billable calls | Run the probes through an approved live integration, preserve secret-free receipts, and update the audit. |
 | T-33 | A governed heterogeneous live run using at least two real providers against a safe target | Approve providers, cost/risk limits, and the application target; provide the concrete production transport integration if it remains out of repo | Execute and verify the run, fault routing, receipts, proposal boundary, and negative cases. |
-| T-35 | Clean-machine install and artifact verification on Windows, macOS, and Linux; keychain evidence only if required by the acceptance criterion | Supply the clean machines/VMs and attended keychain prompts | Drive installs and collect evidence. Native keychain read/write code is additional implementation scope, not evidence collection. |
+| T-35 | Clean-machine install, artifact verification, and native credential round trips on Windows, macOS, and Linux | Supply clean macOS/Linux machines or VMs and attended keychain prompts; decide whether the separately gated headless encrypted-file contract is required for v0.1.0 | Drive installs and collect secret-free evidence. Windows native access is locally verified; macOS/Linux effectiveness is not yet claimed. |
 | T-36 | Refreshed T-32 audit, signed `v0.1.0` tag, immutable artifacts/hashes, and release/branch evidence | Explicitly authorize signing and publication after all prerequisite gates pass | Prepare, verify, tag, and publish only within that authorization. |
 
 External evidence production is therefore in scope for Codex once King Flowers

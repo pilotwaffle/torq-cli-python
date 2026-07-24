@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 from torq_cli.connectors.credential_sources import ExplicitEnvVault
+from torq_cli.domain.config_schema import validate_credential_ref
 from torq_cli.domain.registry_schema import load_registry
 
 
@@ -52,6 +53,9 @@ class SetupService:
             raise SetupError("policy_invalid:independence_mode")
         credential_source: dict[str, str] | None = None
         raw_credential_file = answers.get("credential_file")
+        raw_credential_refs = answers.get("credential_refs")
+        if raw_credential_file is not None and raw_credential_refs is not None:
+            raise SetupError("credential_source_ambiguous")
         if raw_credential_file is not None:
             source = Path(str(raw_credential_file))
             vault = ExplicitEnvVault(source)
@@ -64,6 +68,32 @@ class SetupService:
             if missing:
                 raise SetupError("provider_credential_missing:" + ",".join(missing))
             credential_source = {"kind": "external_env", "path": str(source)}
+        credential_refs: dict[str, str] = {}
+        if raw_credential_refs is not None:
+            if not isinstance(raw_credential_refs, Mapping):
+                raise SetupError("credential_refs_invalid")
+            for provider, raw_ref in raw_credential_refs.items():
+                if not isinstance(provider, str) or validate_credential_ref(
+                    raw_ref, "/credential_refs"
+                ) is not None:
+                    raise SetupError("credential_refs_invalid")
+                credential_refs[provider] = str(raw_ref)
+            bound_providers = {
+                str(raw.get("provider"))
+                for raw in bindings.values()
+                if isinstance(raw, Mapping)
+            }
+            if set(credential_refs) - bound_providers:
+                raise SetupError("credential_refs_invalid")
+            direct_providers = {
+                str(raw.get("provider"))
+                for raw in bindings.values()
+                if isinstance(raw, Mapping) and raw.get("provider") in {"deepseek", "kimi", "zai"}
+            }
+            missing = sorted(direct_providers - set(credential_refs))
+            if missing:
+                raise SetupError("provider_credential_ref_missing:" + ",".join(missing))
+            credential_source = {"kind": "platform_keychain"}
         registry = load_registry()
         profile_id = str(answers.get("profile"))
         profile_version = str(answers.get("profile_version"))
@@ -86,6 +116,8 @@ class SetupService:
                 "surface": expected.connector_surface,
                 "enabled": True,
             }
+            if provider in credential_refs:
+                connectors[connector_id]["credential_ref"] = credential_refs[provider]
         ceilings = policy.get("ceilings")
         if not isinstance(ceilings, Mapping):
             raise SetupError("policy_invalid:ceilings")

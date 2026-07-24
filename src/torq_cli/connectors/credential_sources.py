@@ -5,6 +5,12 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Protocol
+
+from torq_cli.connectors.native_credentials import (
+    ConfiguredNativeVault,
+    native_store_for_current_platform,
+)
 
 
 MAX_CREDENTIAL_SOURCE_BYTES = 65_536
@@ -30,6 +36,10 @@ _CLAUDE_COMPAT = {
 
 class CredentialSourceError(ValueError):
     """Fail-closed credential-source error with a secret-free reason."""
+
+
+class CredentialVault(Protocol):
+    def get(self, provider: str) -> str | None: ...
 
 
 def _unquote(value: str) -> str:
@@ -96,7 +106,7 @@ class ExplicitEnvVault:
 
 def claude_compatible_environment(
     provider: str,
-    vault: ExplicitEnvVault,
+    vault: CredentialVault,
     base_environment: Mapping[str, str],
 ) -> dict[str, str]:
     """Build one provider-scoped Claude-compatible child environment."""
@@ -128,16 +138,36 @@ def provider_environment_from_config(
 ) -> dict[str, str]:
     """Resolve the saved source and build one production child environment."""
     source = config.get("credential_source")
-    if not isinstance(source, Mapping) or set(source) != {"kind", "path"}:
+    if not isinstance(source, Mapping):
         raise CredentialSourceError("credential_source_missing")
-    if source.get("kind") != "external_env" or not isinstance(source.get("path"), str):
+    if source.get("kind") == "external_env" and set(source) == {"kind", "path"}:
+        path = source.get("path")
+        if not isinstance(path, str):
+            raise CredentialSourceError("credential_source_invalid")
+        vault: CredentialVault = ExplicitEnvVault(Path(path))
+    elif source.get("kind") == "platform_keychain" and set(source) == {"kind"}:
+        connectors = config.get("connectors")
+        if not isinstance(connectors, Mapping):
+            raise CredentialSourceError("credential_source_invalid")
+        references: dict[str, str] = {}
+        for raw in connectors.values():
+            if not isinstance(raw, Mapping):
+                continue
+            provider_id = raw.get("provider_id")
+            credential_ref = raw.get("credential_ref")
+            if isinstance(provider_id, str) and isinstance(credential_ref, str):
+                if provider_id in references and references[provider_id] != credential_ref:
+                    raise CredentialSourceError("credential_source_invalid")
+                references[provider_id] = credential_ref
+        vault = ConfiguredNativeVault(native_store_for_current_platform(), references)
+    else:
         raise CredentialSourceError("credential_source_invalid")
-    vault = ExplicitEnvVault(Path(source["path"]))
     return claude_compatible_environment(provider, vault, base_environment)
 
 
 __all__ = [
     "CredentialSourceError",
+    "CredentialVault",
     "ExplicitEnvVault",
     "MAX_CREDENTIAL_SOURCE_BYTES",
     "claude_compatible_environment",
