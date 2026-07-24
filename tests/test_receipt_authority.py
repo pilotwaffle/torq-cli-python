@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -155,10 +157,16 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
     assert private_directory.is_dir()
     assert not private_directory.is_relative_to(first.root)
     assert signing_file_permissions_are_restricted(private_directory)
+    if os.name != "nt":
+        assert stat.S_IMODE(private_directory.stat().st_mode) == 0o700
     for run_directory in private_directory.iterdir():
         assert signing_file_permissions_are_restricted(run_directory)
+        if os.name != "nt":
+            assert stat.S_IMODE(run_directory.stat().st_mode) == 0o700
     for private_file in private_directory.rglob("*.key"):
         assert signing_file_permissions_are_restricted(private_file)
+        if os.name != "nt":
+            assert stat.S_IMODE(private_file.stat().st_mode) == 0o600
 
 
 def test_writer_permissions_allow_only_certified_role_basis_transitions(

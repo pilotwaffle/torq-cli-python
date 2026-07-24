@@ -433,6 +433,15 @@ def _restrict_signing_file(path: Path, failure: str) -> None:
         raise PermissionError(failure)
 
 
+def _restrict_signing_directory(path: Path, failure: str) -> None:
+    if os.name == "nt":
+        _set_windows_owner_only_acl(path)
+    else:
+        os.chmod(path, 0o700)
+    if not signing_file_permissions_are_restricted(path):
+        raise PermissionError(failure)
+
+
 def _restrict_private_key(path: Path) -> None:
     _restrict_signing_file(path, "receipt_signing_key_permissions_unsafe")
 
@@ -553,13 +562,16 @@ class FileRunKeyStore:
     def get_or_create_run_keys(self, run_id: str) -> RunKeys:
         identity = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
         self.run_identities_path.mkdir(parents=True, exist_ok=True)
-        _restrict_signing_file(
+        _restrict_signing_directory(
             self.run_identities_path,
             "receipt_run_identity_permissions_unsafe",
         )
         directory = self.run_identities_path / identity
         directory.mkdir(parents=True, exist_ok=True)
-        _restrict_signing_file(directory, "receipt_run_identity_permissions_unsafe")
+        _restrict_signing_directory(
+            directory,
+            "receipt_run_identity_permissions_unsafe",
+        )
         return RunKeys(
             manifest=self._get_or_create_secret(directory / "manifest.key"),
             orchestrator=self._get_or_create_secret(directory / "orchestrator.key"),
