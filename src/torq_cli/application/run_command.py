@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
 
 
 class ResumeMismatch(ValueError):
@@ -45,7 +48,6 @@ class RunController:
         live_opt_in: bool = False,
         policy_opt_in: bool = False,
     ) -> dict[str, Any]:
-        del identity
         for field, expected_value in expected.items():
             observed = actual.get(field)
             if observed is None:
@@ -54,7 +56,33 @@ class RunController:
                 raise ValueError(f"attestation_mismatch:{field}")
         if live and not (live_opt_in and policy_opt_in):
             raise ValueError("double_opt_in_required")
-        return {"mode": "live" if live else "dry_run", "attested": True}
+        mode = "live" if live else "dry_run"
+        run_id = "run-" + uuid.uuid4().hex
+        chain = ReceiptChain(
+            self.run_root,
+            run_id,
+            MemoryRunKeyStore(),
+            profile_version=identity.profile_version,
+            policy_version=identity.policy_version,
+        )
+        chain.append(
+            "run_attested",
+            {
+                "mode": mode,
+                "identity": asdict(identity),
+                "attested_fields": sorted(expected),
+            },
+        )
+        chain.seal()
+        verification = verify_receipt_store(chain.root)
+        if verification.status != "verified":
+            raise RuntimeError(f"receipt_verification_failed:{verification.finding}")
+        return {
+            "mode": mode,
+            "attested": True,
+            "run_id": run_id,
+            "receipts": str(chain.root),
+        }
 
     def cancel(self, run_id: str, identity: RunIdentity, *, completed: tuple[str, ...]) -> Path:
         directory = self.run_root / run_id
@@ -72,4 +100,3 @@ class RunController:
                 raise ResumeMismatch(f"resume_mismatch:{field}")
         completed = set(payload.get("completed", ()))
         return tuple(stage for stage in stages if stage not in completed)
-

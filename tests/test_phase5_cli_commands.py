@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from torq_cli.interfaces.cli import main
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain
+from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
 
 from test_phase5_cli_experience import _answers
 
@@ -29,7 +29,13 @@ def test_run_command_dry_default_and_evidence_verify_exit_codes(tmp_path, capsys
     expected.write_text(json.dumps({"model": "fable-5"}), encoding="utf-8")
     actual.write_text(json.dumps({"model": "fable-5"}), encoding="utf-8")
     assert main(["run", "--goal", "test", "--run-root", str(tmp_path / "runs"), "--identity", str(identity), "--expected", str(expected), "--actual", str(actual)]) == 0
-    assert json.loads(capsys.readouterr().out)["mode"] == "dry_run"
+    run_output = json.loads(capsys.readouterr().out)
+    assert run_output["mode"] == "dry_run"
+    receipt_root = tmp_path / "runs" / run_output["run_id"]
+    assert run_output["receipts"] == str(receipt_root)
+    assert verify_receipt_store(receipt_root).status == "verified"
+    assert main(["evidence", "verify", "--run-root", run_output["receipts"]]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "verified"
     chain = ReceiptChain(tmp_path, "evidence", MemoryRunKeyStore(), profile_version="1", policy_version="3.1.3")
     chain.append("done", {})
     chain.seal()
@@ -37,4 +43,3 @@ def test_run_command_dry_default_and_evidence_verify_exit_codes(tmp_path, capsys
     assert json.loads(capsys.readouterr().out)["status"] == "verified"
     (chain.root / "receipts.jsonl").write_text("", encoding="utf-8")
     assert main(["evidence", "verify", "--run-root", str(chain.root)]) == 4
-

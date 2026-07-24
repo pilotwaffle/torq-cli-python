@@ -1,12 +1,18 @@
 # Provider surface matrix
 
-Date verified: 2026-07-23
+Observation date: 2026-07-23
 
-The machine-readable source of truth is
-`src/torq_cli/data/provider_surfaces.v1.yaml`. Its schema is closed: every
-provider must declare every required surface, and every surface must carry a
-status, evidence, and verification date. Unknown providers or fields fail
-validation rather than silently gaining capabilities.
+The machine-readable decision matrix is
+`src/torq_cli/data/provider_surfaces.v1.yaml`. The surface evidence was produced
+by out-of-band operator probes and manually transcribed into the matrix. It is
+not machine-generated attestation and is not receipt-backed. A `verified`
+surface status therefore means "reported as observed by the operator on the
+stated date"; it does not mean TORQ generated or independently verified an
+attestation artifact.
+
+The schema is closed: every provider must declare every required surface, and
+every surface must carry a status, evidence note, and observation date. Unknown
+providers or fields fail validation rather than silently gaining capabilities.
 
 ## Current provider decisions
 
