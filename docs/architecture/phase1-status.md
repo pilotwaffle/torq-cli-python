@@ -25,9 +25,13 @@ for context only.
 The implementation gate passed. T-08 through T-35 are implemented and tested;
 T-21 is complete with a machine-generated, secret-free six-provider live-smoke
 report. T-33 is complete with a receipt-backed, three-provider governed live
-run against an immutable proposal-only target. T-36 remains correctly withheld
-until the remaining audit and release gates complete. T-35 is complete for the
-attended Windows, macOS, and Linux native credential backends.
+run against an immutable proposal-only target. T-35 is complete for the
+attended Windows, macOS, and Linux native credential backends, with fresh hosted
+installed-wheel evidence on macOS and Linux and local isolated-wheel evidence
+on Windows. The refreshed T-32 audit is complete for stacked baseline
+`767b1db`; T-36 remains withheld until the draft stack is merged through
+protected `main`, the current fresh-machine Windows release criterion is met or
+explicitly narrowed, final checks pass, and signing/publication is authorized.
 
 ## Explicit non-claims
 
