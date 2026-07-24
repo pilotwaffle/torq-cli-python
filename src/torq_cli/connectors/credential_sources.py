@@ -121,9 +121,25 @@ def claude_compatible_environment(
     return child
 
 
+def provider_environment_from_config(
+    config: Mapping[str, object],
+    provider: str,
+    base_environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Resolve the saved source and build one production child environment."""
+    source = config.get("credential_source")
+    if not isinstance(source, Mapping) or set(source) != {"kind", "path"}:
+        raise CredentialSourceError("credential_source_missing")
+    if source.get("kind") != "external_env" or not isinstance(source.get("path"), str):
+        raise CredentialSourceError("credential_source_invalid")
+    vault = ExplicitEnvVault(Path(source["path"]))
+    return claude_compatible_environment(provider, vault, base_environment)
+
+
 __all__ = [
     "CredentialSourceError",
     "ExplicitEnvVault",
     "MAX_CREDENTIAL_SOURCE_BYTES",
     "claude_compatible_environment",
+    "provider_environment_from_config",
 ]

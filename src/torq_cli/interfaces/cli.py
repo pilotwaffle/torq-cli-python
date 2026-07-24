@@ -134,9 +134,10 @@ def _matrix_auth_status(credential_file: str | None = None) -> dict[str, Any]:
         else:
             state = "unavailable"
         credential_configured = provider in configured
-        if credential_configured and auth in {"blocked", "unavailable"}:
+        if credential_configured:
             auth = "configured"
             state = "unavailable"
+            identity = "unattestable"
         rows[provider] = {
             "state": state,
             "authentication": auth,

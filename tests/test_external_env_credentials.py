@@ -5,11 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from torq_cli.adapters import process as process_module
+from torq_cli.adapters.process import ManagedProcess
 from torq_cli.connectors.credential_sources import (
     CredentialSourceError,
     ExplicitEnvVault,
     claude_compatible_environment,
+    provider_environment_from_config,
 )
+from torq_cli.domain.config_schema import parse_config_text, validate_config
+from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces.cli import main
 from test_phase5_cli_experience import _answers
 
@@ -92,9 +97,9 @@ def test_auth_status_accepts_explicit_external_store_without_printing_values(
     assert code == 3  # Credentials are configured, but live model identity is not yet attested.
     for provider in ("deepseek", "kimi", "zai"):
         assert report["providers"][provider]["credential_configured"] is True
-    assert report["providers"]["deepseek"]["authentication"] == "verified"
-    assert report["providers"]["zai"]["authentication"] == "verified"
-    assert report["providers"]["kimi"]["authentication"] == "configured"
+    for provider in ("deepseek", "kimi", "zai"):
+        assert report["providers"][provider]["authentication"] == "configured"
+        assert report["providers"][provider]["resolved_model_identity"] == "unattestable"
     assert "deep-secret" not in output
     assert "current-kimi-secret" not in output
     assert "glm-secret" not in output
@@ -119,6 +124,11 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
     assert "deep-secret" not in rendered
     assert "current-kimi-secret" not in rendered
     assert "glm-secret" not in rendered
+    parsed = parse_config_text(rendered)
+    assert validate_config(parsed, load_registry()) == ()
+    environment = provider_environment_from_config(parsed, "deepseek", {"PATH": "safe"})
+    assert environment["ANTHROPIC_AUTH_TOKEN"] == "deep-secret"
+    assert environment["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
 
     incomplete = tmp_path / "incomplete.env"
     incomplete.write_text("DEEPSEEK_API_KEY=only-one\n", encoding="utf-8")
@@ -127,3 +137,34 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
         "--credential-file", str(incomplete),
     ]) == 3
     assert json.loads(capsys.readouterr().out)["finding"] == "provider_credential_missing:kimi,zai"
+
+
+def test_managed_process_loads_saved_source_and_scopes_child_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _credential_file(tmp_path)
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured.update({"command": command, **kwargs})
+        return FakeProcess()
+
+    monkeypatch.setattr(process_module.subprocess, "Popen", fake_popen)
+    config = {"credential_source": {"kind": "external_env", "path": str(source)}}
+    managed = ManagedProcess.for_provider_config(
+        ("claude", "-p", "fixture"),
+        cwd=str(tmp_path),
+        provider="kimi",
+        config=config,
+        base_environment={"PATH": "safe", "DEEPSEEK_API_KEY": "must-not-pass"},
+    )
+
+    assert isinstance(managed.process, FakeProcess)
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["ANTHROPIC_AUTH_TOKEN"] == "current-kimi-secret"
+    assert environment["ANTHROPIC_BASE_URL"] == "https://api.moonshot.ai/anthropic/"
+    assert "DEEPSEEK_API_KEY" not in environment
