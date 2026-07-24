@@ -350,20 +350,33 @@ def _windows_acl_is_owner_only(path: Path) -> bool:
         kernel32.LocalFree(descriptor)
 
 
-def private_key_permissions_are_restricted(path: Path) -> bool:
-    """Return whether the private key is limited to the current OS user."""
+def signing_file_permissions_are_restricted(path: Path) -> bool:
+    """Return whether a signing-identity file is limited to the current OS user."""
     if os.name == "nt":
         return _windows_acl_is_owner_only(path)
     return path.stat(follow_symlinks=False).st_mode & 0o077 == 0
 
 
-def _restrict_private_key(path: Path) -> None:
+def private_key_permissions_are_restricted(path: Path) -> bool:
+    """Backward-compatible name for the signing-file permission check."""
+    return signing_file_permissions_are_restricted(path)
+
+
+def _restrict_signing_file(path: Path, failure: str) -> None:
     if os.name == "nt":
         _set_windows_owner_only_acl(path)
     else:
         os.chmod(path, 0o600)
-    if not private_key_permissions_are_restricted(path):
-        raise PermissionError("receipt_signing_key_permissions_unsafe")
+    if not signing_file_permissions_are_restricted(path):
+        raise PermissionError(failure)
+
+
+def _restrict_private_key(path: Path) -> None:
+    _restrict_signing_file(path, "receipt_signing_key_permissions_unsafe")
+
+
+def _restrict_trust_anchor(path: Path) -> None:
+    _restrict_signing_file(path, "receipt_trust_anchor_permissions_unsafe")
 
 
 class RunKeyStore(Protocol):
@@ -471,6 +484,7 @@ class ReceiptChain:
             metadata = pin_path.stat(follow_symlinks=False)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 raise ValueError("receipt_trust_anchor_unsafe")
+            _restrict_trust_anchor(pin_path)
             if not hmac.compare_digest(pin_path.read_bytes().strip(), encoded):
                 raise ValueError("receipt_signing_key_mismatch")
             return
@@ -480,7 +494,7 @@ class ReceiptChain:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.chmod(pin_path, 0o600)
+        _restrict_trust_anchor(pin_path)
 
     @staticmethod
     def hash_file(path: Path) -> str:
@@ -598,6 +612,12 @@ def verify_receipt_store(root: Path) -> StoreVerification:
         except FileNotFoundError:
             return StoreVerification("incomplete", "trust_anchor_missing")
         if not stat.S_ISREG(pin_metadata.st_mode) or pin_metadata.st_nlink != 1:
+            return StoreVerification("tampered", "trust_anchor_unsafe")
+        try:
+            anchor_restricted = signing_file_permissions_are_restricted(pin_path)
+        except OSError:
+            return StoreVerification("tampered", "trust_anchor_unsafe")
+        if not anchor_restricted:
             return StoreVerification("tampered", "trust_anchor_unsafe")
         pinned_public_key = bytes.fromhex(pin_path.read_text(encoding="ascii").strip())
         if not hmac.compare_digest(public_key, pinned_public_key):

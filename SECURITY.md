@@ -31,9 +31,10 @@ persistence. Receipts are sequence-numbered and hash-chained; artifacts carry
 content hashes and are encrypted at rest; an Ed25519 terminal manifest seals
 the chain. The CLI persists one signing identity in the run root, outside each
 per-run receipt directory, and pins its public key beside the private key. The
-private key is owner-only through mode `0600` on POSIX and a protected DACL
-granting full control only to the current user SID on Windows; failure to apply
-or verify that protection blocks signing.
+private key and public trust anchor are owner-only through mode `0600` on POSIX
+and protected DACLs granting full control only to the current user SID on
+Windows. Failure to apply or verify either protection blocks signing, and
+verification rejects a permissive trust anchor as `trust_anchor_unsafe`.
 `torq evidence verify` checks the manifest signer against that external trust
 anchor before accepting the signature. Replacing a receipt directory with a
 newly generated and self-signed chain therefore fails as

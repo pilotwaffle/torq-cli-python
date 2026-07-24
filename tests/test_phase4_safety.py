@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+import torq_cli.safety.receipts as receipts_module
 
 from torq_cli.safety.approval import ApprovalBoundary, ChangeProposal
 from torq_cli.safety.governed import EvidenceBundle, GovernedRun, RunState
@@ -16,6 +17,7 @@ from torq_cli.safety.receipts import (
     MemoryRunKeyStore,
     ReceiptChain,
     private_key_permissions_are_restricted,
+    signing_file_permissions_are_restricted,
     verify_receipt_store,
 )
 from torq_cli.safety.usage import summarize_usage
@@ -197,9 +199,39 @@ def test_file_key_store_persists_one_signing_identity_outside_run_directories(
     assert verify_receipt_store(first.root).status == "verified"
     assert verify_receipt_store(second.root).status == "verified"
     private_key = evidence_root / ".torq-receipt-signing-key"
+    trust_anchor = evidence_root / ".torq-receipt-signing-key.pub"
     assert private_key.is_file()
     assert private_key_permissions_are_restricted(private_key)
-    assert (evidence_root / ".torq-receipt-signing-key.pub").is_file()
+    assert trust_anchor.is_file()
+    assert signing_file_permissions_are_restricted(trust_anchor)
+
+
+def test_receipt_verifier_rejects_permissive_trust_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    chain = ReceiptChain(
+        evidence_root,
+        "run",
+        FileRunKeyStore(evidence_root),
+        profile_version="1",
+        policy_version="3.1.3",
+    )
+    chain.append("run_attested", {"mode": "dry_run"})
+    chain.seal()
+    trust_anchor = evidence_root / ".torq-receipt-signing-key.pub"
+    original = receipts_module.signing_file_permissions_are_restricted
+    monkeypatch.setattr(
+        receipts_module,
+        "signing_file_permissions_are_restricted",
+        lambda path: False if path == trust_anchor else original(path),
+    )
+
+    result = verify_receipt_store(chain.root)
+
+    assert result.status == "tampered"
+    assert result.finding == "trust_anchor_unsafe"
 
 
 def test_governed_run_evidence_routing_escalation_timeline_and_loop_limit(tmp_path: Path) -> None:
