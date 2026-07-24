@@ -1,13 +1,13 @@
 # Production-readiness audit — 2026-07-24
 
-Commit baseline: `767b1db5d70a83aee1e98b1ebc93360bb471ecae`
-on the stacked release-candidate branch `feat/t35-clean-machine-credentials`.
-This baseline is **not merged to `main`**: it is composed of draft PRs #7, #8,
-and #9 above `main` at `148175cfb6fc677b5a8f97da38af115aee912ab3`.
-This documentation-only T-32 refresh is a descendant of that assessed source.
+Commit baseline: `b34ff31ceca8975784aca7c8159506103a46bb12` on
+`agent/t35-windows-credential-evidence`. The T-21/T-33/T-35/T-32 consolidation
+is merged to protected `main` at `bdf329480a56f91fbe801c85ed8df663a03f5490`;
+this final Windows evidence change remains in PR #12 until reviewed and merged.
+This documentation-only audit refresh is a descendant of the assessed source.
 
 Verdict: the assessed candidate passes the implemented security and quality
-gates, and the previously open live-provider and macOS/Linux native-credential
+gates, and the previously open live-provider and three-OS native-credential
 findings are resolved by actual evidence. It is **not ready to publish as
 v0.1.0** until the High release blockers below are closed. Evidence produced by
 mock or injected transports is not promoted to live evidence.
@@ -36,9 +36,11 @@ mock or injected transports is not promoted to live evidence.
   The committed native reports came from run
   [30104750363](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30104750363)
   at `3b3bb95`; the only later source change was bounded workflow retry handling.
-- Draft PRs #7, #8, and #9 are cleanly mergeable and their Windows, macOS,
-  Linux, and headless Linux quality matrices are green. Their draft/unmerged
-  status is nevertheless a release-state blocker, not merged-main evidence.
+- Fresh three-OS native-credential workflow run
+  [30123795749](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30123795749)
+  passed `build-wheel`, `native-windows`, `native-macos`, and `native-linux` at
+  `b34ff31`. The Windows report SHA-256 is
+  `54F026CC0CDB0D2D8957519B648072B62121F07892224C1159697BE464BAF8FE`.
 
 ## Credential handling — implemented; attended native evidence is OS-specific
 
@@ -50,12 +52,12 @@ rejected; and errors collapse to secret-free findings. The headless encrypted-
 file contract remains unimplemented and fails closed. It is not a claimed
 v0.1.0 capability.
 
-Fresh hosted installed-wheel evidence now proves macOS Keychain and Linux
-Secret Service store/resolve/revoke/absence behavior without persisted test
-secrets. Windows Credential Manager passed locally from both the editable
-checkout and an isolated wheel installation, using an ephemeral value that was
-revoked immediately. That is valid Windows implementation evidence, but it is
-not the fresh-machine Windows evidence required by the current release notes.
+Fresh hosted installed-wheel evidence now proves Windows Credential Manager,
+macOS Keychain, and Linux Secret Service store/resolve/revoke/absence behavior
+without persisted test secrets. All three jobs consumed the same build artifact;
+the Windows job verified wheel SHA-256
+`0B9B527DC764B35795585C35F0EAD099474DB1E9990F27F9CC213BC0C016B7B2`,
+used a generated ephemeral value, revoked it, and verified absence.
 
 ## Sandbox escape — resolved at the assessed baseline
 
@@ -112,16 +114,9 @@ and 13 other security/governance mutants.
 
 ## Open findings and release disposition
 
-- **High — unmerged release candidate.** T-21, T-33, and T-35 are in draft PRs
-  #7, #8, and #9 rather than protected `main`. Resolve by reviewing and merging
-  the stack in dependency order, then requiring the protected-branch quality
-  matrix on the resulting mainline commit.
-- **High — missing fresh-machine Windows credential attestation.** The release
-  notes require clean-machine credential-backend access on all three desktop
-  OSes. Current Windows evidence is local isolated-wheel evidence. Resolve with
-  a fresh Windows host installing the exact candidate artifact and recording
-  secret-free store/resolve/revoke/absence evidence, or explicitly narrow and
-  approve the v0.1.0 release criterion before publication.
+- **High — final evidence change not yet on main.** PR #12 contains the passing
+  fresh-Windows runner and machine report. Resolve by merging it through branch
+  protection and confirming the resulting mainline quality matrix.
 - **High — release identity and immutable artifacts absent.** No signed
   `v0.1.0` tag or published artifact hashes exist. Resolve only after the source
   blockers close and King Flowers explicitly authorizes signing/publication.
