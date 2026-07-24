@@ -1,10 +1,11 @@
 # Production-readiness audit — 2026-07-24
 
-Commit baseline: `b34ff31ceca8975784aca7c8159506103a46bb12` on
-`agent/t35-windows-credential-evidence`. The T-21/T-33/T-35/T-32 consolidation
-is merged to protected `main` at `bdf329480a56f91fbe801c85ed8df663a03f5490`;
-this final Windows evidence change remains in PR #12 until reviewed and merged.
-This documentation-only audit refresh is a descendant of the assessed source.
+Commit baseline: `6d4d5647001b35dfbea592e32a0c36370bfcb93c` on protected
+`main`, including merged PR #12 and the committed fresh-Windows evidence.
+Hosted quality run
+[30124572287](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30124572287)
+passed Windows, macOS, Linux, and headless Linux. This documentation-only audit
+refresh is a descendant of the assessed source.
 
 Verdict: the assessed candidate passes the implemented security and quality
 gates, and the previously open live-provider and three-OS native-credential
@@ -114,12 +115,10 @@ and 13 other security/governance mutants.
 
 ## Open findings and release disposition
 
-- **High — final evidence change not yet on main.** PR #12 contains the passing
-  fresh-Windows runner and machine report. Resolve by merging it through branch
-  protection and confirming the resulting mainline quality matrix.
 - **High — release identity and immutable artifacts absent.** No signed
   `v0.1.0` tag or published artifact hashes exist. Resolve only after the source
-  blockers close and King Flowers explicitly authorizes signing/publication.
+  and evidence gates now recorded on protected `main` and King Flowers
+  explicitly authorizes signing/publication.
 - **Medium — local signing identity is exportable.** Same-principal compromise
   can replace and reuse the private identity. Accepted for v0.1.0 with the
   documented limitation; non-exportable key storage and remote receipt
