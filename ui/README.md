@@ -3,6 +3,8 @@
 This directory reserves the future desktop/web UI boundary for v0.2.
 
 The UI is not part of the v0.1 build. Version 0.1 remains a headless-first
-Python CLI; future UI code must consume the public core/application APIs rather
-than importing CLI command handlers.
+Python CLI. UI code consumes `torq-fleet-snapshot-v1` through
+`GET /api/v1/fleet` or the public `FleetProjector` application service; it must
+not import CLI command handlers or read provider stdout.
 
+See `docs/architecture/fleet-backend-contract.md`.

@@ -91,7 +91,9 @@ def test_dry_run_plans_governed_graph_without_provider_dispatch(tmp_path: Path) 
     chain.seal()
 
     assert result.status == "dry_run_complete"
-    assert result.planned_roles == ("g1d", "g1r", "builder", "g2a")
+    assert result.planned_roles == (
+        "g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui",
+    )
     assert result.dispatched_roles == ()
     assert result.proposal is None
     assert verify_receipt_store(chain.root).status == "verified"
