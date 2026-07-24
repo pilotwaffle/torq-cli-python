@@ -2,11 +2,16 @@
 
 Merged implementation baseline: `9b5e77b174626c794bfe76fe3940b09b3c5efb9e`
 (`main`, merged PR #5). Receipt/security base: `9bac9246faf93c00c7b69b6828d397347e48a536`
-(merged PR #4). The T-35 native-credential phase is being verified on
-`feature/native-credential-backends`; hosted run identifiers will be added after
-the branch is pushed.
+(merged PR #4). T-35 native-credential implementation commit:
+`39aef301cf677c6cec88a5efdd7539b68ed64266` (PR #6). Its hosted quality runs
+completed successfully:
 
-Previous matching hosted quality runs:
+- pull request: [`30091702831`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30091702831);
+- push: [`30091686718`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30091686718).
+
+Both T-35 runs passed Windows, macOS, Linux, and headless Linux.
+
+Previous orchestration-phase hosted quality runs:
 
 - pull request: [`30064851658`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30064851658);
 - push: [`30064849331`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30064849331).

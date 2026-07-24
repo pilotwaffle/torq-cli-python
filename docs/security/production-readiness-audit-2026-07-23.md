@@ -1,7 +1,8 @@
 # Production-readiness audit — 2026-07-23
 
-Commit baseline: `9b5e77b` (merged `main`). The T-35 native-credential implementation
-is under verification on `feature/native-credential-backends`.
+Commit baseline: `9b5e77b` (merged `main`). T-35 native-credential implementation
+commit `39aef30` passed pull-request run `30091702831` and push run
+`30091686718` on Windows, macOS, Linux, and headless Linux.
 Hosted CI evidence: run `30053432134`, green on Windows, macOS, Linux, and
 headless Linux, including lint, strict typing, full tests, 14 named mutants,
 wheel build, and clean-wheel smoke.
