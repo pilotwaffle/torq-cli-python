@@ -115,7 +115,6 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
     capsys.readouterr()
     rendered = target.read_text(encoding="utf-8")
     assert "kind: external_env" in rendered
-    assert str(source).replace("\\", "\\\\") not in rendered  # YAML does not serialize a secret-like escaped copy.
     assert str(source) in rendered
     assert "deep-secret" not in rendered
     assert "current-kimi-secret" not in rendered
