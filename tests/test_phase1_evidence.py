@@ -106,6 +106,10 @@ def test_hermetic_network_policy_denies_non_loopback_and_rejects_invalid_mode() 
 
 def test_ci_headless_job_exercises_encrypted_fallback_contract() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert workflow.count("actions/checkout@v6") == 4
+    assert workflow.count("actions/setup-python@v6") == 4
+    assert "actions/checkout@v4" not in workflow
+    assert "actions/setup-python@v5" not in workflow
     assert "TORQ_TEST_NETWORK_MODE: deny" in workflow
     assert "TORQ_HEADLESS: '1'" in workflow
     assert "TORQ_CREDENTIAL_BACKEND: encrypted_file_test" in workflow
