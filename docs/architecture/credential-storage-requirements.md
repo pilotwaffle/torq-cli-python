@@ -5,7 +5,8 @@ encrypted-file contract. T-35 now implements native Windows Credential Manager,
 macOS Keychain, and Linux Secret Service access through `keyring` 25.7, opaque
 credential references, attended no-echo input, explicit access verification,
 and local revocation. The headless encrypted-file envelope remains unimplemented
-and fails closed; provider validity and clean-machine evidence remain separate.
+and fails closed. Native attended effectiveness is now evidenced on Windows,
+clean hosted macOS, and clean hosted Linux; provider validity remains separate.
 
 ## Foundation boundary
 
@@ -164,7 +165,6 @@ must not be reused as production secrets or establish backend effectiveness.
 Crypto implementation, dependency choice, backend implementation, secret
 input, provider interaction, and runtime APIs require a separate Gate 1.
 
-This document is not clean-machine verification, provider setup, rotation
-proof, cross-platform credential-backend evidence, or release evidence. A
-test-only Windows native round trip is recorded separately in the current PRD
-status; macOS and Linux still require clean-machine operator evidence.
+This requirements document is not itself clean-machine verification, provider
+setup, rotation proof, or release evidence. The current PRD status links the
+separate machine-generated Windows, macOS, and Linux native-backend evidence.
