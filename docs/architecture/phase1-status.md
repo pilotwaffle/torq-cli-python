@@ -29,15 +29,16 @@ run against an immutable proposal-only target. T-35 is complete for the
 attended Windows, macOS, and Linux native credential backends, with fresh hosted
 installed-wheel evidence on all three systems. The refreshed T-32 audit is
 complete for protected-main baseline `6d4d564`, whose four-platform quality run
-passed. T-36 is ready but remains withheld until signing/publication is
-explicitly authorized.
+passed. T-36 is complete: the signed and GitHub-verified `v0.1.0` tag targets
+protected-main commit `f6df23e`, and the public release artifacts, hashes,
+checksum signature, and clean re-download verification all passed.
 
 ## Explicit non-claims
 
 Native credential backends, signing, receipts, governed execution,
-approval/apply, packaging, and bounded six-provider live effectiveness are now
-implemented or evidenced. Headless encrypted-file storage and release/tagging
-remain separate gates and are not claimed complete.
+approval/apply, packaging, bounded six-provider live effectiveness, and the
+v0.1.0 release are implemented or evidenced. Headless encrypted-file storage
+remains a separate future gate and is not claimed complete.
 
 The remaining residual risks are the documented limits on rollback, lost
 passphrases, local administration, metadata privacy, OS synchronization,
