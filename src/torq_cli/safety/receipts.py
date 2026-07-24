@@ -23,6 +23,225 @@ _PRIVATE_KEY_NAME = ".torq-receipt-signing-key"
 _PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
 
 
+def _windows_current_user_sid() -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    class SidAndAttributes(ctypes.Structure):
+        _fields_ = (("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD))
+
+    class TokenUser(ctypes.Structure):
+        _fields_ = (("user", SidAndAttributes),)
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    advapi32.OpenProcessToken.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    )
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = (
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = (
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPWSTR),
+    )
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+        raise OSError(ctypes.get_last_error(), "open_process_token_failed")
+    try:
+        size = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+        if not size.value:
+            raise OSError(ctypes.get_last_error(), "token_user_size_failed")
+        buffer = ctypes.create_string_buffer(size.value)
+        if not advapi32.GetTokenInformation(
+            token,
+            1,
+            buffer,
+            size,
+            ctypes.byref(size),
+        ):
+            raise OSError(ctypes.get_last_error(), "token_user_read_failed")
+        user = ctypes.cast(buffer, ctypes.POINTER(TokenUser)).contents
+        rendered = wintypes.LPWSTR()
+        if not advapi32.ConvertSidToStringSidW(user.user.sid, ctypes.byref(rendered)):
+            raise OSError(ctypes.get_last_error(), "sid_render_failed")
+        try:
+            if rendered.value is None:
+                raise OSError("sid_render_empty")
+            return rendered.value
+        finally:
+            kernel32.LocalFree(rendered)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _set_windows_owner_only_acl(path: Path) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorDacl.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    )
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.SetNamedSecurityInfoW.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    )
+    advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
+    descriptor = ctypes.c_void_p()
+    sddl = f"D:P(A;;FA;;;{_windows_current_user_sid()})"
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl,
+        1,
+        ctypes.byref(descriptor),
+        None,
+    ):
+        raise OSError(ctypes.get_last_error(), "security_descriptor_create_failed")
+    try:
+        present = wintypes.BOOL()
+        defaulted = wintypes.BOOL()
+        dacl = ctypes.c_void_p()
+        if not advapi32.GetSecurityDescriptorDacl(
+            descriptor,
+            ctypes.byref(present),
+            ctypes.byref(dacl),
+            ctypes.byref(defaulted),
+        ) or not present.value:
+            raise OSError(ctypes.get_last_error(), "security_descriptor_dacl_failed")
+        result = advapi32.SetNamedSecurityInfoW(
+            str(path),
+            1,
+            0x80000004,
+            None,
+            None,
+            dacl,
+            None,
+        )
+        if result != 0:
+            raise OSError(result, "private_key_acl_failed")
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def _windows_acl_sddl(path: Path) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    advapi32.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = (
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPWSTR),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = wintypes.BOOL
+    descriptor = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    result = advapi32.GetNamedSecurityInfoW(
+        str(path),
+        1,
+        0x00000004,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if result != 0:
+        raise OSError(result, "private_key_acl_read_failed")
+    try:
+        rendered = wintypes.LPWSTR()
+        if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            1,
+            0x00000004,
+            ctypes.byref(rendered),
+            None,
+        ):
+            raise OSError(ctypes.get_last_error(), "private_key_acl_render_failed")
+        try:
+            if rendered.value is None:
+                raise OSError("private_key_acl_empty")
+            return rendered.value
+        finally:
+            kernel32.LocalFree(rendered)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def private_key_permissions_are_restricted(path: Path) -> bool:
+    """Return whether the private key is limited to the current OS user."""
+    if os.name == "nt":
+        sid = _windows_current_user_sid()
+        # Windows may retain the AI (auto-inherited) control bit after replacing
+        # the DACL. P still protects it from inheritance; require the exact one
+        # current-user full-control ACE so no broader principal is accepted.
+        expected = {
+            f"D:P(A;;FA;;;{sid})",
+            f"D:PAI(A;;FA;;;{sid})",
+        }
+        return _windows_acl_sddl(path) in expected
+    return path.stat(follow_symlinks=False).st_mode & 0o077 == 0
+
+
+def _restrict_private_key(path: Path) -> None:
+    if os.name == "nt":
+        _set_windows_owner_only_acl(path)
+    else:
+        os.chmod(path, 0o600)
+    if not private_key_permissions_are_restricted(path):
+        raise PermissionError("receipt_signing_key_permissions_unsafe")
+
+
 class RunKeyStore(Protocol):
     def get_or_create(self, run_id: str) -> bytes: ...
 
@@ -60,6 +279,7 @@ class FileRunKeyStore:
         del run_id
         self.evidence_root.mkdir(parents=True, exist_ok=True)
         try:
+            _restrict_private_key(self.private_key_path)
             return self._read_regular_key(self.private_key_path)
         except FileNotFoundError:
             key = secrets.token_bytes(32)
@@ -70,6 +290,7 @@ class FileRunKeyStore:
             try:
                 descriptor = os.open(self.private_key_path, flags, 0o600)
             except FileExistsError:
+                _restrict_private_key(self.private_key_path)
                 return self._read_regular_key(self.private_key_path)
             try:
                 if os.write(descriptor, encoded) != len(encoded):
@@ -77,7 +298,7 @@ class FileRunKeyStore:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-            os.chmod(self.private_key_path, 0o600)
+            _restrict_private_key(self.private_key_path)
             return key
 
 
