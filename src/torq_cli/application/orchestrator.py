@@ -140,6 +140,40 @@ class GovernedOrchestrator:
 
         dispatched: list[str] = []
         usage_rows: list[dict[str, Any]] = []
+        try:
+            return self._execute_live(
+                goal=goal,
+                profile=profile,
+                chain=chain,
+                planned=planned,
+                dispatched=dispatched,
+                usage_rows=usage_rows,
+            )
+        except OrchestrationBlocked as exc:
+            # A refusal that leaves no terminal receipt is indistinguishable
+            # from a run that never happened. Record the decision, then let the
+            # caller seal and re-raise.
+            chain.append(
+                "run_decision",
+                {
+                    "status": "blocked",
+                    "reason": str(exc),
+                    "provider_dispatch": bool(dispatched),
+                    "dispatched_roles": tuple(dispatched),
+                },
+            )
+            raise
+
+    def _execute_live(
+        self,
+        *,
+        goal: str,
+        profile: ProfileSpec,
+        chain: ReceiptChain,
+        planned: tuple[str, ...],
+        dispatched: list[str],
+        usage_rows: list[dict[str, Any]],
+    ) -> OrchestrationResult:
         outputs: dict[str, Mapping[str, Any]] = {}
 
         outputs["g1d"] = self._dispatch(
@@ -231,7 +265,24 @@ class GovernedOrchestrator:
         binding = profile.bindings.get(role)
         if binding is None:
             raise OrchestrationBlocked(f"profile_binding_missing:{role}")
-        cost_usd = self._preflight_cost(role, usage_rows)
+        try:
+            cost_usd = self._preflight_cost(role, usage_rows)
+        except OrchestrationBlocked as exc:
+            chain.append(
+                "stage_blocked",
+                {
+                    "role": role,
+                    "provider": binding.provider_id,
+                    "model": binding.model_id,
+                    "prompt_id": binding.prompt_id,
+                    "reason": str(exc),
+                    "basis": "configured_worst_case",
+                    "usage": self._usage_record({}),
+                    "cost_usd": 0.0,
+                    "provider_dispatch": False,
+                },
+            )
+            raise
         prompt = self._prompt(role, goal, context, binding)
         clean_prompt, findings = self.registry.scan(prompt)
         chain.append(
@@ -265,10 +316,7 @@ class GovernedOrchestrator:
             "model": provenance.model,
             "artifact_hash": artifact_hash,
         }
-        tokens = sum(int(response.usage.get(name, 0)) for name in (
-            "prompt_tokens", "completion_tokens", "reasoning_tokens"
-        ))
-        usage = {"tokens": tokens}
+        usage = self._usage_record(response.usage)
         usage_rows.append({
             "provider": binding.provider_id,
             "agent": role,
@@ -292,6 +340,26 @@ class GovernedOrchestrator:
             },
         )
         return body
+
+    @staticmethod
+    def _usage_record(reported: Mapping[str, Any]) -> dict[str, int]:
+        """Preserve the input/output split that pricing depends on.
+
+        Output tokens bill several times higher than input on every provider in
+        the profile, and reasoning tokens bill at the output rate. A single
+        total cannot be priced, so the sealed receipt keeps the three counts
+        separately. ``tokens`` is retained as a derived convenience total and
+        must never be used as a pricing input.
+        """
+        input_tokens = int(reported.get("prompt_tokens", 0))
+        output_tokens = int(reported.get("completion_tokens", 0))
+        reasoning_tokens = int(reported.get("reasoning_tokens", 0))
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "tokens": input_tokens + output_tokens + reasoning_tokens,
+        }
 
     def _preflight_cost(
         self, role: str, usage_rows: list[dict[str, Any]]
