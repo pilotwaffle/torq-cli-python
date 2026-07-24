@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
+from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
 class ResumeMismatch(ValueError):
@@ -61,7 +61,7 @@ class RunController:
         chain = ReceiptChain(
             self.run_root,
             run_id,
-            MemoryRunKeyStore(),
+            FileRunKeyStore(self.run_root),
             profile_version=identity.profile_version,
             policy_version=identity.policy_version,
         )

@@ -11,7 +11,12 @@ import pytest
 from torq_cli.safety.approval import ApprovalBoundary, ChangeProposal
 from torq_cli.safety.governed import EvidenceBundle, GovernedRun, RunState
 from torq_cli.safety.policy import ExecutionPolicy, ManagedProcess, PolicyHalt, ResourceCeilings
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
+from torq_cli.safety.receipts import (
+    FileRunKeyStore,
+    MemoryRunKeyStore,
+    ReceiptChain,
+    verify_receipt_store,
+)
 from torq_cli.safety.usage import summarize_usage
 from torq_cli.safety.workspace import PathAccessDenied, WorkspaceBusy, WorkspaceManager, tree_hash
 
@@ -130,6 +135,68 @@ def test_receipt_verifier_rejects_artifact_path_escape_before_read(tmp_path: Pat
     result = verify_receipt_store(chain.root)
     assert result.status == "tampered"
     assert result.finding == "artifact_path_escape"
+
+
+def test_receipt_verifier_rejects_chain_resigned_by_untrusted_key(tmp_path: Path) -> None:
+    trusted = ReceiptChain(
+        tmp_path / "evidence",
+        "run-1",
+        MemoryRunKeyStore(),
+        profile_version="1",
+        policy_version="3.1.3",
+    )
+    trusted.append("run_attested", {"mode": "dry_run"})
+    trusted.seal()
+    assert verify_receipt_store(trusted.root).status == "verified"
+
+    forged = ReceiptChain(
+        tmp_path / "attacker",
+        "run-1",
+        MemoryRunKeyStore(),
+        profile_version="1",
+        policy_version="3.1.3",
+    )
+    forged.append("run_attested", {"mode": "live"})
+    forged.seal()
+    (trusted.root / "receipts.jsonl").write_bytes((forged.root / "receipts.jsonl").read_bytes())
+    (trusted.root / "terminal-manifest.json").write_bytes(
+        (forged.root / "terminal-manifest.json").read_bytes()
+    )
+
+    result = verify_receipt_store(trusted.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_signer_untrusted"
+
+
+def test_file_key_store_persists_one_signing_identity_outside_run_directories(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    first = ReceiptChain(
+        evidence_root,
+        "run-1",
+        FileRunKeyStore(evidence_root),
+        profile_version="1",
+        policy_version="3.1.3",
+    )
+    first.append("run_attested", {"mode": "dry_run"})
+    first_manifest = json.loads(first.seal().read_text(encoding="utf-8"))
+
+    second = ReceiptChain(
+        evidence_root,
+        "run-2",
+        FileRunKeyStore(evidence_root),
+        profile_version="1",
+        policy_version="3.1.3",
+    )
+    second.append("run_attested", {"mode": "dry_run"})
+    second_manifest = json.loads(second.seal().read_text(encoding="utf-8"))
+
+    assert first_manifest["public_key"] == second_manifest["public_key"]
+    assert verify_receipt_store(first.root).status == "verified"
+    assert verify_receipt_store(second.root).status == "verified"
+    assert (evidence_root / ".torq-receipt-signing-key").is_file()
+    assert (evidence_root / ".torq-receipt-signing-key.pub").is_file()
 
 
 def test_governed_run_evidence_routing_escalation_timeline_and_loop_limit(tmp_path: Path) -> None:
