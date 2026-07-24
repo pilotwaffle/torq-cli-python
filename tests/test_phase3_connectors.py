@@ -29,6 +29,9 @@ def _payload(model: str, *, usage: object = "unreported") -> dict:
 def test_all_six_connectors_conform_with_optional_unreported_usage(tmp_path: Path) -> None:
     specs = all_connector_specs()
     assert set(specs) == {"claude", "codex", "grok", "kimi", "zai", "deepseek"}
+    assert specs["claude"].required_models == (
+        "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5b"
+    )
     agents = {"kimi": "refine_bug", "zai": "refine_ui", "deepseek": "builder"}
     for name, spec in specs.items():
         model = spec.required_models[0]
@@ -98,7 +101,7 @@ def test_status_and_attestation_report_mixed_states_without_secrets(tmp_path: Pa
         "claude": Connector(specs["claude"], (MockSurface("agent_sdk", _payload("fable-5"), grants=set(specs["claude"].required_models)),), MemoryVault(), work_root=tmp_path),
         "codex": Connector(specs["codex"], (), MemoryVault(), work_root=tmp_path),
         "grok": Connector(specs["grok"], (MockSurface("acp", {}, auth=AuthState.LOGGED_OUT),), MemoryVault(), work_root=tmp_path),
-        "kimi": Connector(specs["kimi"], (), MemoryVault({"kimi": "secret-never-print"}), work_root=tmp_path, blocked_reason="credential_rotation_required"),
+        "kimi": Connector(specs["kimi"], (), MemoryVault({"kimi": "secret-never-print"}), work_root=tmp_path, blocked_reason="operator_policy_hold"),
     }
     report = auth_status(connectors, {"g1d": ("claude", "fable-5"), "g2a": ("codex", "gpt-5.5-thinking")})
     rendered = json.dumps(report)

@@ -121,7 +121,12 @@ class Health:
 
 def all_connector_specs() -> dict[str, ConnectorSpec]:
     return {
-        "claude": ConnectorSpec("claude", "agent_sdk", None, ("fable-5", "opus-4.8")),
+        "claude": ConnectorSpec(
+            "claude",
+            "agent_sdk",
+            None,
+            ("claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5b"),
+        ),
         "codex": ConnectorSpec("codex", "sdk", "cli_json", ("gpt-5.5-thinking", "gpt-5.6-sol-high", "gpt-5.6-terra-high")),
         "grok": ConnectorSpec("grok", "acp", "headless_cli", ("grok-build",)),
         "kimi": ConnectorSpec("kimi", "direct_api", None, ("kimi-k3", "kimi-k2.7-code"), True, frozenset({"refine_bug"})),
