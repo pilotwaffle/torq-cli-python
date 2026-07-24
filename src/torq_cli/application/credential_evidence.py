@@ -7,6 +7,21 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 
+_EVIDENCE_PLATFORM_NAMES = {
+    "Windows": "Windows",
+    "macOS": "Darwin",
+    "Linux": "Linux",
+}
+
+
+def expected_platform_name(evidence_os: str) -> str:
+    """Map a closed evidence OS label to ``platform.system()`` output."""
+    try:
+        return _EVIDENCE_PLATFORM_NAMES[evidence_os]
+    except KeyError as exc:
+        raise ValueError("credential_evidence_os_unsupported") from exc
+
+
 class CredentialRoundTripStore(Protocol):
     @property
     def backend(self) -> str: ...
@@ -57,4 +72,8 @@ def exercise_native_credential(
     }
 
 
-__all__ = ["CredentialRoundTripStore", "exercise_native_credential"]
+__all__ = [
+    "CredentialRoundTripStore",
+    "exercise_native_credential",
+    "expected_platform_name",
+]

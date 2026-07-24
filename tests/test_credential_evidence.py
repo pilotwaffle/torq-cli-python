@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from torq_cli.application.credential_evidence import exercise_native_credential
+from torq_cli.application.credential_evidence import (
+    exercise_native_credential,
+    expected_platform_name,
+)
 
 
 class _Store:
@@ -59,3 +63,26 @@ def test_native_credential_evidence_revokes_after_mismatch() -> None:
             secret_factory=lambda: "ephemeral-test-secret",
         )
     assert store.value is None
+
+
+@pytest.mark.parametrize(
+    ("evidence_os", "platform_name"),
+    (("Windows", "Windows"), ("macOS", "Darwin"), ("Linux", "Linux")),
+)
+def test_native_evidence_platform_labels_are_closed(
+    evidence_os: str, platform_name: str
+) -> None:
+    assert expected_platform_name(evidence_os) == platform_name
+
+
+def test_native_evidence_platform_label_rejects_unknown_os() -> None:
+    with pytest.raises(ValueError, match="credential_evidence_os_unsupported"):
+        expected_platform_name("FreeBSD")
+
+
+def test_native_credential_workflow_exercises_fresh_windows_runner() -> None:
+    workflow = Path(".github/workflows/credential-evidence.yml").read_text(encoding="utf-8")
+    assert "native-windows:" in workflow
+    assert "runs-on: windows-latest" in workflow
+    assert "--expected-os Windows --expected-backend windows_credential_manager" in workflow
+    assert "native-credential-windows" in workflow

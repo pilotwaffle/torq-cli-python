@@ -11,7 +11,10 @@ import platform
 import uuid
 from pathlib import Path
 
-from torq_cli.application.credential_evidence import exercise_native_credential
+from torq_cli.application.credential_evidence import (
+    exercise_native_credential,
+    expected_platform_name,
+)
 from torq_cli.connectors.native_credentials import native_store_for_current_platform
 
 
@@ -21,7 +24,7 @@ def _sha256(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--expected-os", choices=("macOS", "Linux"), required=True)
+    parser.add_argument("--expected-os", choices=("Windows", "macOS", "Linux"), required=True)
     parser.add_argument("--expected-backend", required=True)
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--wheel-sha256", required=True)
@@ -30,7 +33,7 @@ def main() -> int:
     args = parser.parse_args()
 
     observed_os = platform.system()
-    expected_platform = {"macOS": "Darwin", "Linux": "Linux"}[args.expected_os]
+    expected_platform = expected_platform_name(args.expected_os)
     if observed_os != expected_platform:
         raise RuntimeError("clean_machine_os_mismatch")
     observed_hash = _sha256(args.wheel)
