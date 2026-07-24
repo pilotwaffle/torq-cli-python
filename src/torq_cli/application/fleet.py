@@ -94,7 +94,7 @@ class FleetProjector:
         profile_id: str | None = None
         run_status = "running"
         decision_reason: str | None = None
-        decision_authority: str | None = None
+        decision_writer: dict[str, str] | None = None
         context_injections = 0
         lane_rows: dict[str, dict[str, Any]] = {}
         usage_rows: list[dict[str, Any]] = []
@@ -107,7 +107,9 @@ class FleetProjector:
                     "first_sequence": None,
                     "latest_sequence": None,
                     "latest_transition": "run_planned",
-                    "latest_authority": None,
+                    "latest_writer_role": None,
+                    "latest_evidence_basis": None,
+                    "latest_writer_key_id": None,
                     "provider": None,
                     "model": None,
                     "reason": None,
@@ -127,11 +129,14 @@ class FleetProjector:
             transition = str(receipt.get("transition", ""))
             sequence = int(receipt.get("sequence", 0))
             observed_at = receipt.get("observed_at")
-            authority = (
-                str(receipt["authority"])
-                if receipt.get("schema_version") == "1.1.0"
-                else "legacy_unspecified"
-            )
+            if receipt.get("schema_version") == "2.0.0":
+                writer_role = str(receipt["writer_role"])
+                evidence_basis = str(receipt["evidence_basis"])
+                writer_key_id = str(receipt["writer_key_id"])
+            else:
+                writer_role = "legacy_unclassified"
+                evidence_basis = "legacy_unclassified"
+                writer_key_id = "legacy_unclassified"
             payload = receipt.get("payload")
             if not isinstance(payload, Mapping):
                 continue
@@ -146,7 +151,11 @@ class FleetProjector:
                 continue
             if transition == "run_decision":
                 run_status = str(payload.get("status", "unknown"))
-                decision_authority = authority
+                decision_writer = {
+                    "writer_role": writer_role,
+                    "evidence_basis": evidence_basis,
+                    "writer_key_id": writer_key_id,
+                }
                 raw_reason = payload.get("reason")
                 decision_reason = str(raw_reason) if raw_reason is not None else None
                 continue
@@ -159,12 +168,16 @@ class FleetProjector:
                         row["first_sequence"] = sequence
                     row["latest_sequence"] = sequence
                     row["latest_transition"] = transition
-                    row["latest_authority"] = authority
+                    row["latest_writer_role"] = writer_role
+                    row["latest_evidence_basis"] = evidence_basis
+                    row["latest_writer_key_id"] = writer_key_id
                     row["transitions"].append({
                         "sequence": sequence,
                         "transition": transition,
                         "observed_at": observed_at,
-                        "authority": authority,
+                        "writer_role": writer_role,
+                        "evidence_basis": evidence_basis,
+                        "writer_key_id": writer_key_id,
                     })
                 continue
             role_value = payload.get("role")
@@ -178,7 +191,9 @@ class FleetProjector:
                 row["first_sequence"] = sequence
             row["latest_sequence"] = sequence
             row["latest_transition"] = transition
-            row["latest_authority"] = authority
+            row["latest_writer_role"] = writer_role
+            row["latest_evidence_basis"] = evidence_basis
+            row["latest_writer_key_id"] = writer_key_id
             row["provider"] = payload.get("provider", row["provider"])
             row["model"] = payload.get("model", row["model"])
             row["transitions"].append(
@@ -186,7 +201,9 @@ class FleetProjector:
                     "sequence": sequence,
                     "transition": transition,
                     "observed_at": observed_at,
-                    "authority": authority,
+                    "writer_role": writer_role,
+                    "evidence_basis": evidence_basis,
+                    "writer_key_id": writer_key_id,
                 }
             )
             if transition == "stage_started":
@@ -253,7 +270,7 @@ class FleetProjector:
                 "run_id": manifest.get("run_id"),
                 "status": run_status,
                 "reason": decision_reason,
-                "decision_authority": decision_authority,
+                "decision_writer": decision_writer,
                 "mode": run_mode,
                 "profile_id": profile_id,
                 "sealed": bool(manifest.get("sealed", True)),

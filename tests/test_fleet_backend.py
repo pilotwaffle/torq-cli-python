@@ -166,7 +166,7 @@ def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.Cap
     assert output["run"]["run_id"] == "run-cli"
 
 
-def test_fleet_projects_worker_and_supervisor_authority_without_upgrading_legacy(
+def test_fleet_projects_certified_writer_provenance(
     tmp_path: Path,
 ) -> None:
     chain = _chain(tmp_path, "run-authority")
@@ -175,23 +175,25 @@ def test_fleet_projects_worker_and_supervisor_authority_without_upgrading_legacy
     chain.append(
         "stage_interrupted",
         {"role": "g1d", "reason": "worker_lease_expired"},
-        authority="supervisor_derived",
+        writer_role="supervisor",
+        evidence_basis="derived",
     )
     chain.append(
         "run_decision",
         {"status": "recovery_required"},
-        authority="supervisor_derived",
+        writer_role="supervisor",
+        evidence_basis="derived",
     )
     chain.seal()
 
     snapshot = FleetProjector(chain.root).snapshot()
     lane = next(row for row in snapshot["lanes"] if row["role"] == "g1d")
 
-    assert snapshot["run"]["decision_authority"] == "supervisor_derived"
-    assert lane["latest_authority"] == "supervisor_derived"
-    assert [row["authority"] for row in lane["transitions"]] == [
-        "worker",
-        "supervisor_derived",
+    assert snapshot["run"]["decision_writer"]["writer_role"] == "supervisor"
+    assert lane["latest_writer_role"] == "supervisor"
+    assert [row["writer_role"] for row in lane["transitions"]] == [
+        "orchestrator",
+        "supervisor",
     ]
 
 

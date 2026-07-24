@@ -164,7 +164,12 @@ class GovernedOrchestrator:
             "provider_dispatch": False,
         }
         with self._context_lock:
-            receipt = chain.append("context_injected", payload)
+            receipt = chain.append(
+                "context_injected",
+                payload,
+                writer_role="operator_gateway",
+                evidence_basis="submitted",
+            )
             self._pending_context.append({
                 "context_id": context_id,
                 "target_role": target,
