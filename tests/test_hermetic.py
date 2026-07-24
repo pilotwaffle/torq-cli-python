@@ -37,6 +37,10 @@ def test_production_imports_forbid_subprocess() -> None:
             local_allow = {"os", "stat", "ctypes"}
         elif source_path.as_posix().endswith("torq_cli/adapters/process.py"):
             local_allow = {"os", "subprocess"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/live_provider.py"):
+            # T-33's explicit, operator-authorized live transport is isolated to
+            # this adapter; core, connector contracts, and imports stay hermetic.
+            local_allow = {"subprocess", "urllib"}
         elif source_path.as_posix().endswith(
             ("torq_cli/safety/workspace.py", "torq_cli/safety/receipts.py")
         ):

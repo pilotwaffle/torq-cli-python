@@ -38,10 +38,10 @@ complete.
 | T-22–T-27 | Complete | Isolation, execution policy, governed orchestration, bounded repair/re-audit, approval, usage, encrypted artifacts, and receipt verification pass. The `.pub`-swap exploit is replayed end-to-end and rejected as `trust_anchor_substituted`; unsafe/missing identity variants also fail closed. |
 | T-28–T-31 | Complete at the implemented boundary | Setup, dry-run, injected live orchestration, cancellation/resume, effective status, and evidence verification exist. Standalone `torq run --live` fails before creating a run with `live_dispatcher_required`. |
 | T-32 | Complete for this source baseline | The production-readiness audit records resolved and open findings. It must be rerun after external evidence or implementation changes. |
-| T-33 | Operator/integration gated | Recorded/mock heterogeneous composition and receipt verification pass. Closing the live criterion needs at least two authorized live providers plus a safe application target. |
+| T-33 | Complete | The authorized proposal-only runner dispatched G1D/G1R/Builder/G2A across Anthropic, DeepSeek, and OpenAI, verified exact profile-bound model identities, and stopped at `awaiting_approval`. The portable signed receipt bundle verifies against its separately exported public key; no application transition occurred. Report SHA-256: `77CE748C5054DE8B525835287CA32F7DCB17B79101C66E71A99B8E450016B262`. |
 | T-34 | Complete | `SECURITY.md` distinguishes the authenticated private identity from the mutable public-key cache and states the same-principal/private-identity limitation. |
 | T-35 | Native implementation complete; cross-platform clean-machine evidence pending | Wheel/sdist construction and hosted wheel smoke pass on all three OS families. Native Windows Credential Manager, macOS Keychain, and Linux Secret Service read/write/revoke operations now use verified platform-specific `keyring` backends and opaque references. An ephemeral Windows round trip was verified and revoked on 2026-07-24. macOS/Linux installed-artifact evidence remains operator-gated. The headless encrypted-file contract remains unimplemented and fails closed. |
-| T-36 | Correctly withheld | Signed tag, release publication, and final branch/release evidence remain gated by live T-33, applicable T-35 evidence, a refreshed T-32 audit, and explicit operator authorization. |
+| T-36 | Correctly withheld | Signed tag, release publication, and final branch/release evidence remain gated by applicable T-35 evidence, a refreshed T-32 audit, and explicit operator authorization. |
 
 ## Verification
 
@@ -70,12 +70,16 @@ complete.
   No credential value was printed or retained; artifacts and the isolated
   environment live only under `E:\tmp`. The final tested wheel SHA-256 is
   `BB47AC3136C2AEC9E9DE8F87C91E0CEDB7A7EBA63077D2E2203902346E6288F3`.
+- T-33 live evidence on 2026-07-24: the machine-generated report at
+  `docs/evidence/governed-live-2026-07-24.json` records four governed stages
+  across three real providers, a verified receipt chain, bounded configured
+  cost, and `application_performed: false`. The committed chain can be checked
+  with `torq evidence verify --run-root docs/evidence/t33-governed-live-2026-07-24/run --trusted-public-key docs/evidence/t33-governed-live-2026-07-24/.torq-receipt-signing-key.pub`.
 
 ## Remaining closure work and ownership
 
 | Task | Required closure evidence | Operator-owned prerequisite | Codex scope after authorization |
 | --- | --- | --- | --- |
-| T-33 | A governed heterogeneous live run using at least two real providers against a safe target | Approve providers, cost/risk limits, and the application target; provide the concrete production transport integration if it remains out of repo | Execute and verify the run, fault routing, receipts, proposal boundary, and negative cases. |
 | T-35 | Clean-machine install, artifact verification, and native credential round trips on Windows, macOS, and Linux | Supply clean macOS/Linux machines or VMs and attended keychain prompts; decide whether the separately gated headless encrypted-file contract is required for v0.1.0 | Drive installs and collect secret-free evidence. Windows native access is locally verified; macOS/Linux effectiveness is not yet claimed. |
 | T-36 | Refreshed T-32 audit, signed `v0.1.0` tag, immutable artifacts/hashes, and release/branch evidence | Explicitly authorize signing and publication after all prerequisite gates pass | Prepare, verify, tag, and publish only within that authorization. |
 
