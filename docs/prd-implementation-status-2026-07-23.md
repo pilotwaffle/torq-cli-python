@@ -11,6 +11,10 @@ completed successfully:
 
 Both T-35 runs passed Windows, macOS, Linux, and headless Linux.
 
+T-35 clean-machine native evidence later completed successfully at source commit
+`3b3bb957a055d989eeb41b6a1eff88966d9f3390` in hosted run
+[`30104750363`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30104750363).
+
 Previous orchestration-phase hosted quality runs:
 
 - pull request: [`30064851658`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30064851658);
@@ -40,15 +44,15 @@ complete.
 | T-32 | Complete for this source baseline | The production-readiness audit records resolved and open findings. It must be rerun after external evidence or implementation changes. |
 | T-33 | Complete | The authorized proposal-only runner dispatched G1D/G1R/Builder/G2A across Anthropic, DeepSeek, and OpenAI, verified exact profile-bound model identities, and stopped at `awaiting_approval`. The portable signed receipt bundle verifies against its separately exported public key; no application transition occurred. Report SHA-256: `77CE748C5054DE8B525835287CA32F7DCB17B79101C66E71A99B8E450016B262`. |
 | T-34 | Complete | `SECURITY.md` distinguishes the authenticated private identity from the mutable public-key cache and states the same-principal/private-identity limitation. |
-| T-35 | Native implementation complete; cross-platform clean-machine evidence pending | Wheel/sdist construction and hosted wheel smoke pass on all three OS families. Native Windows Credential Manager, macOS Keychain, and Linux Secret Service read/write/revoke operations now use verified platform-specific `keyring` backends and opaque references. An ephemeral Windows round trip was verified and revoked on 2026-07-24. macOS/Linux installed-artifact evidence remains operator-gated. The headless encrypted-file contract remains unimplemented and fails closed. |
-| T-36 | Correctly withheld | Signed tag, release publication, and final branch/release evidence remain gated by applicable T-35 evidence, a refreshed T-32 audit, and explicit operator authorization. |
+| T-35 | Complete for native attended backends | One exact wheel (`24C0286B6B1E8D981AF577FB4DEBB8A2D60B312412F0D6E36A3FFCF53E96AD32`) was transferred to fresh hosted macOS and Linux runners, hash-verified, installed into isolated environments, and exercised through native store/resolve/revoke/absence operations. Windows was previously verified locally from both editable and isolated wheel installs. The separately gated headless encrypted-file contract remains unimplemented and fails closed. |
+| T-36 | Correctly withheld | Signed tag, release publication, and final branch/release evidence remain gated by a refreshed T-32 audit and explicit operator authorization. |
 
 ## Verification
 
-- Test collection: 461 tests across 23 test files; the refreshed local suite
-  passes with four intentional live/environment skips (457
+- Test collection: 471 tests across 25 test files; the refreshed local suite
+  passes with four intentional live/environment skips (467
   executed tests).
-- Strict mypy: pass across 45 Python source files.
+- Strict mypy: pass across 48 Python source files.
 - Ruff: pass.
 - Named security/governance mutants: 14/14 killed.
 - Source distribution and wheel builds: pass; hosted jobs perform isolated wheel
@@ -75,12 +79,20 @@ complete.
   across three real providers, a verified receipt chain, bounded configured
   cost, and `application_performed: false`. The committed chain can be checked
   with `torq evidence verify --run-root docs/evidence/t33-governed-live-2026-07-24/run --trusted-public-key docs/evidence/t33-governed-live-2026-07-24/.torq-receipt-signing-key.pub`.
+- T-35 clean-machine evidence on 2026-07-24: hosted run
+  [`30104750363`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30104750363)
+  passed build-wheel, native-macos, and native-linux. Both native jobs verified
+  and installed the same wheel hash, then recorded successful store, resolve,
+  revoke, and absence checks with `secret_persisted: false`. Machine reports:
+  `docs/evidence/native-credential-macos-2026-07-24.json` (SHA-256
+  `F93E15395D0CF0168D80894EA65BEF90004CC1E45208353622E5B4E75B52BC5A`)
+  and `docs/evidence/native-credential-linux-2026-07-24.json` (SHA-256
+  `36A586506437C6A667A2E7D3F2986F1D4941BD9F3CFD862BD644C6FD565F34BA`).
 
 ## Remaining closure work and ownership
 
 | Task | Required closure evidence | Operator-owned prerequisite | Codex scope after authorization |
 | --- | --- | --- | --- |
-| T-35 | Clean-machine install, artifact verification, and native credential round trips on Windows, macOS, and Linux | Supply clean macOS/Linux machines or VMs and attended keychain prompts; decide whether the separately gated headless encrypted-file contract is required for v0.1.0 | Drive installs and collect secret-free evidence. Windows native access is locally verified; macOS/Linux effectiveness is not yet claimed. |
 | T-36 | Refreshed T-32 audit, signed `v0.1.0` tag, immutable artifacts/hashes, and release/branch evidence | Explicitly authorize signing and publication after all prerequisite gates pass | Prepare, verify, tag, and publish only within that authorization. |
 
 External evidence production is therefore in scope for Codex once King Flowers
