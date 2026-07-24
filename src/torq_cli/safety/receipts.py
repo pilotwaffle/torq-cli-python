@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import stat
 from collections.abc import Mapping
@@ -23,6 +24,18 @@ _PRIVATE_KEY_NAME = ".torq-receipt-signing-key"
 _PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
 
 
+def _windows_dll(name: str) -> Any:
+    import ctypes
+
+    return getattr(ctypes, "WinDLL")(name, use_last_error=True)
+
+
+def _windows_last_error() -> int:
+    import ctypes
+
+    return int(getattr(ctypes, "get_last_error")())
+
+
 def _windows_current_user_sid() -> str:
     import ctypes
     from ctypes import wintypes
@@ -33,8 +46,8 @@ def _windows_current_user_sid() -> str:
     class TokenUser(ctypes.Structure):
         _fields_ = (("user", SidAndAttributes),)
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = _windows_dll("advapi32")
+    kernel32 = _windows_dll("kernel32")
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     kernel32.CloseHandle.restype = wintypes.BOOL
@@ -61,12 +74,12 @@ def _windows_current_user_sid() -> str:
     advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
     token = wintypes.HANDLE()
     if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
-        raise OSError(ctypes.get_last_error(), "open_process_token_failed")
+        raise OSError(_windows_last_error(), "open_process_token_failed")
     try:
         size = wintypes.DWORD()
         advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
         if not size.value:
-            raise OSError(ctypes.get_last_error(), "token_user_size_failed")
+            raise OSError(_windows_last_error(), "token_user_size_failed")
         buffer = ctypes.create_string_buffer(size.value)
         if not advapi32.GetTokenInformation(
             token,
@@ -75,11 +88,11 @@ def _windows_current_user_sid() -> str:
             size,
             ctypes.byref(size),
         ):
-            raise OSError(ctypes.get_last_error(), "token_user_read_failed")
+            raise OSError(_windows_last_error(), "token_user_read_failed")
         user = ctypes.cast(buffer, ctypes.POINTER(TokenUser)).contents
         rendered = wintypes.LPWSTR()
         if not advapi32.ConvertSidToStringSidW(user.user.sid, ctypes.byref(rendered)):
-            raise OSError(ctypes.get_last_error(), "sid_render_failed")
+            raise OSError(_windows_last_error(), "sid_render_failed")
         try:
             if rendered.value is None:
                 raise OSError("sid_render_empty")
@@ -94,8 +107,8 @@ def _set_windows_owner_only_acl(path: Path) -> None:
     import ctypes
     from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = _windows_dll("advapi32")
+    kernel32 = _windows_dll("kernel32")
     kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
     kernel32.LocalFree.restype = wintypes.HLOCAL
     advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = (
@@ -130,7 +143,7 @@ def _set_windows_owner_only_acl(path: Path) -> None:
         ctypes.byref(descriptor),
         None,
     ):
-        raise OSError(ctypes.get_last_error(), "security_descriptor_create_failed")
+        raise OSError(_windows_last_error(), "security_descriptor_create_failed")
     try:
         present = wintypes.BOOL()
         defaulted = wintypes.BOOL()
@@ -141,7 +154,7 @@ def _set_windows_owner_only_acl(path: Path) -> None:
             ctypes.byref(dacl),
             ctypes.byref(defaulted),
         ) or not present.value:
-            raise OSError(ctypes.get_last_error(), "security_descriptor_dacl_failed")
+            raise OSError(_windows_last_error(), "security_descriptor_dacl_failed")
         result = advapi32.SetNamedSecurityInfoW(
             str(path),
             1,
@@ -161,8 +174,8 @@ def _windows_acl_sddl(path: Path) -> str:
     import ctypes
     from ctypes import wintypes
 
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = _windows_dll("advapi32")
+    kernel32 = _windows_dll("kernel32")
     kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
     kernel32.LocalFree.restype = wintypes.HLOCAL
     advapi32.GetNamedSecurityInfoW.argtypes = (
@@ -207,7 +220,7 @@ def _windows_acl_sddl(path: Path) -> str:
             ctypes.byref(rendered),
             None,
         ):
-            raise OSError(ctypes.get_last_error(), "private_key_acl_render_failed")
+            raise OSError(_windows_last_error(), "private_key_acl_render_failed")
         try:
             if rendered.value is None:
                 raise OSError("private_key_acl_empty")
@@ -222,14 +235,16 @@ def private_key_permissions_are_restricted(path: Path) -> bool:
     """Return whether the private key is limited to the current OS user."""
     if os.name == "nt":
         sid = _windows_current_user_sid()
-        # Windows may retain the AI (auto-inherited) control bit after replacing
-        # the DACL. P still protects it from inheritance; require the exact one
-        # current-user full-control ACE so no broader principal is accepted.
-        expected = {
-            f"D:P(A;;FA;;;{sid})",
-            f"D:PAI(A;;FA;;;{sid})",
-        }
-        return _windows_acl_sddl(path) in expected
+        rendered = _windows_acl_sddl(path)
+        ace_start = rendered.find("(")
+        if ace_start < 0:
+            return False
+        control = rendered[2:ace_start] if rendered.startswith("D:") else ""
+        # P is the protected-DACL flag. Other control metadata (for example AI)
+        # varies across Windows versions and filesystems, but the ACE list must
+        # still be exactly one allow/full-control entry for the current SID.
+        owner_ace = rf"\(A;;(?:FA|GA|0x1f01ff);;;{re.escape(sid)}\)"
+        return "P" in control and re.fullmatch(owner_ace, rendered[ace_start:]) is not None
     return path.stat(follow_symlinks=False).st_mode & 0o077 == 0
 
 
