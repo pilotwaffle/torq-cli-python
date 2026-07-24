@@ -113,12 +113,21 @@ policy v3.1.3, and redaction match their frozen reference projections. The
 named mutation suite includes a deliberately divergent normalization mutant
 and 13 other security/governance mutants.
 
-## Open findings and release disposition
+## Release disposition
 
-- **High — release identity and immutable artifacts absent.** No signed
-  `v0.1.0` tag or published artifact hashes exist. Resolve only after the source
-  and evidence gates now recorded on protected `main` and King Flowers
-  explicitly authorizes signing/publication.
+T-36 completed on 2026-07-24. Signed annotated tag `v0.1.0` points to protected-
+main commit `f6df23ea9f6c3428e9a257ab3b20a8cf21acf20d`; GitHub independently reports
+the registered Ed25519 signature as verified with reason `valid`. The public
+release is `https://github.com/pilotwaffle/torq-cli-python/releases/tag/v0.1.0`.
+The published wheel SHA-256 is
+`b84a54d5c951ca3afbe0260100b49a926a77f0dd091168fa4e9de50b3f0a0d9e`;
+the source archive SHA-256 is
+`8fbfc0e20e9e8e512ec59669593dfb549763600776fcef3ff51e70a8b50b9bf7`.
+`SHA256SUMS` and its Ed25519 SSH signature are release assets. A clean
+re-download matched both hashes, the checksum signature verified, and the
+downloaded wheel passed the isolated installation smoke test.
+
+## Accepted residual findings
 - **Medium — local signing identity is exportable.** Same-principal compromise
   can replace and reuse the private identity. Accepted for v0.1.0 with the
   documented limitation; non-exportable key storage and remote receipt
