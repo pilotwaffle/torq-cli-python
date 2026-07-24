@@ -122,6 +122,7 @@ def _parser() -> argparse.ArgumentParser:
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
     verify = evidence_sub.add_parser("verify")
     verify.add_argument("--run-root", required=True)
+    verify.add_argument("--trusted-public-key")
     return parser
 
 
@@ -229,7 +230,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": "internal_error"}, sort_keys=True))
             return 5
     if args.command == "evidence":
-        result = verify_receipt_store(Path(args.run_root))
+        trusted_public_key = None
+        if args.trusted_public_key is not None:
+            try:
+                encoded = Path(args.trusted_public_key).read_text(encoding="ascii").strip()
+                trusted_public_key = bytes.fromhex(encoded)
+                if len(trusted_public_key) != 32:
+                    raise ValueError
+            except (OSError, UnicodeError, ValueError):
+                print(json.dumps({
+                    "status": "tampered",
+                    "finding": "trusted_public_key_invalid",
+                }, sort_keys=True))
+                return 3
+        result = verify_receipt_store(
+            Path(args.run_root), trusted_public_key=trusted_public_key
+        )
         print(json.dumps({"status": result.status, "finding": result.finding}, sort_keys=True))
         return result.exit_code
     if args.command == "auth":

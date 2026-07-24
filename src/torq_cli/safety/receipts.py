@@ -379,6 +379,11 @@ def _restrict_trust_anchor(path: Path) -> None:
     _restrict_signing_file(path, "receipt_trust_anchor_permissions_unsafe")
 
 
+def restrict_receipt_trust_anchor(path: Path) -> None:
+    """Apply the receipt verifier's platform-specific public-anchor policy."""
+    _restrict_trust_anchor(path)
+
+
 class RunKeyStore(Protocol):
     def get_or_create(self, run_id: str) -> bytes: ...
 
