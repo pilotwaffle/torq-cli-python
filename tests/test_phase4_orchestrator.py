@@ -16,7 +16,12 @@ from torq_cli.connectors import Connector, MemoryVault, MockSurface, all_connect
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
+from torq_cli.safety.receipts import (
+    FileRunKeyStore,
+    MemoryRunKeyStore,
+    ReceiptChain,
+    verify_receipt_store,
+)
 
 
 def _payload(provider: str, model: str, body: Mapping[str, object]) -> dict[str, object]:
@@ -43,10 +48,11 @@ def _connector(
 
 def test_dry_run_plans_governed_graph_without_provider_dispatch(tmp_path: Path) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
+    evidence_root = tmp_path / "evidence"
     chain = ReceiptChain(
-        tmp_path / "evidence",
+        evidence_root,
         "dry-run",
-        MemoryRunKeyStore(),
+        FileRunKeyStore(evidence_root),
         profile_version=profile.profile_version,
         policy_version="3.1.3",
     )
@@ -116,10 +122,11 @@ def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approv
             tmp_path / "sessions",
         ),
     }
+    evidence_root = tmp_path / "evidence"
     chain = ReceiptChain(
-        tmp_path / "evidence",
+        evidence_root,
         "live-run",
-        MemoryRunKeyStore(),
+        FileRunKeyStore(evidence_root),
         profile_version=profile.profile_version,
         policy_version="3.1.3",
     )
