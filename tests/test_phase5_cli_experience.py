@@ -7,7 +7,7 @@ import pytest
 from torq_cli.application.run_command import ResumeMismatch, RunController, RunIdentity
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.application.status_effective import effective_status
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
+from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
 def _answers() -> dict:
@@ -92,7 +92,7 @@ def test_effective_status_zero_only_when_all_lanes_effective() -> None:
 
 
 def test_evidence_verify_names_tamper_and_incomplete_without_network(tmp_path: Path) -> None:
-    chain = ReceiptChain(tmp_path, "run", MemoryRunKeyStore(), profile_version="1.0.0", policy_version="3.1.3")
+    chain = ReceiptChain(tmp_path, "run", FileRunKeyStore(tmp_path), profile_version="1.0.0", policy_version="3.1.3")
     chain.append("design", {"ok": True})
     manifest = chain.seal()
     assert verify_receipt_store(chain.root).status == "verified"
