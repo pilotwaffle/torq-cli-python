@@ -9,6 +9,9 @@ torq status --config PATH --require-effective --runtime ATTESTATION.json
 torq config import-v5-normalized --config ABSOLUTE_PATH
 torq config import-v5-console --config ABSOLUTE_PATH
 torq auth status --credential-file E:\TORQ-CONSOLE\.env
+torq auth store --provider deepseek --credential-ref credref_<32-lowercase-hex>
+torq auth verify-access --provider deepseek --credential-ref credref_<32-lowercase-hex>
+torq auth revoke --provider deepseek --credential-ref credref_<32-lowercase-hex>
 torq harness inspect --expected PROFILE.json --actual LIVE.json
 torq setup --config .torq/config.yaml --answers examples/torq-v5-6-live.answers.json --credential-file E:\TORQ-CONSOLE\.env
 torq run --goal "..." --run-root RUNS --identity ID.json --expected PROFILE.json --actual LIVE.json
@@ -38,5 +41,14 @@ external provider env file without copying its values into TORQ configuration.
 For the Console harness it maps `DEEPSEEK_API_KEY`, `KIMI_CODE_API_KEY`
 (falling back to `KIMI_API_KEY`), and `GLM_API_KEY` into isolated
 Claude-compatible child environments. See `docs/external-credential-source.md`.
+
+Native provider credentials are stored through `keyring` 25.7 in the current
+user's Windows Credential Manager, macOS Keychain, or Linux Secret Service.
+`auth store` accepts the value only from an attended no-echo terminal and
+refuses redirected input. Configuration contains only opaque
+`credref_<32-lowercase-hex>` handles. `auth verify-access` deliberately resolves
+the selected record inside TORQ but emits only coarse success/failure state; it
+does not call a provider or print the value. The headless encrypted-file format
+remains a requirements contract and is not an automatic fallback.
 
 Local mock/conformance results do not prove provider effectiveness, hosted multi-OS CI, clean-machine installation, branch protection, or release readiness. Those are separate release gates and are recorded honestly in the production-readiness audit.

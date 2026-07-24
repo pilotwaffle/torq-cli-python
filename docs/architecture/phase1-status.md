@@ -17,7 +17,7 @@ for context only.
 | T-01 | Complete / Foundation-approved | Offline Foundation slice only. |
 | T-02 | Complete | Extraction audit and REUSE/WRAP/REBUILD verdicts are recorded. |
 | T-03 | Implemented; live evidence gated | Provider matrix and integration decisions are complete; exact live grants remain operator-gated. |
-| T-04 | Complete / requirements-only approved | No credential backend or runtime secret capability exists. |
+| T-04 | Complete / requirements approved | Native credential operations were added later under T-35; the attended encrypted-file contract remains unimplemented. |
 | T-05 | Complete | Python standalone repository and wheel/pipx distribution decision implemented. |
 | T-06 | Implemented / locally verified | T-06A normalized import, T-06B v1 schema, and T-06C raw Console import remain read-only and offline; no new independent gate approval is claimed. |
 | T-07 | Complete | Hermetic four-job CI and protected `main` are active. |
@@ -28,10 +28,10 @@ T-36 remains correctly withheld until those live gates are complete.
 
 ## Explicit non-claims
 
-Credential backends, headless fallback, signing, receipts, governed execution,
+Native credential backends, signing, receipts, governed execution,
 approval/apply, and packaging are now implemented. Live provider effectiveness,
-clean-machine keychain verification, and release/tagging remain external release
-gates and are not claimed complete.
+clean-machine keychain verification, headless encrypted-file storage, and
+release/tagging remain external release gates and are not claimed complete.
 
 The remaining residual risks are the documented limits on rollback, lost
 passphrases, local administration, metadata privacy, OS synchronization,

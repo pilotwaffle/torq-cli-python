@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from pathlib import Path
@@ -18,6 +19,11 @@ from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.application.status_effective import effective_status
 from torq_cli.connectors.status import inspect_harness
 from torq_cli.connectors.credential_sources import CredentialSourceError, ExplicitEnvVault
+from torq_cli.connectors.native_credentials import (
+    NativeCredentialError,
+    native_store_for_current_platform,
+)
+from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
 from torq_cli.safety.receipts import verify_receipt_store
@@ -89,6 +95,10 @@ def _parser() -> argparse.ArgumentParser:
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
     auth_status_parser = auth_sub.add_parser("status")
     auth_status_parser.add_argument("--credential-file")
+    for action in ("store", "verify-access", "revoke"):
+        native = auth_sub.add_parser(action)
+        native.add_argument("--provider", required=True)
+        native.add_argument("--credential-ref", required=True)
     harness = sub.add_parser("harness")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     inspect = harness_sub.add_parser("inspect")
@@ -146,6 +156,15 @@ def _matrix_auth_status(credential_file: str | None = None) -> dict[str, Any]:
         }
     blocked = any(row["state"] != "available" for row in rows.values())
     return {"providers": rows, "exit_code": 3 if blocked else 0}
+
+
+def _read_attended_secret() -> str:
+    if not sys.stdin.isatty():
+        raise NativeCredentialError("attended_secret_input_required")
+    try:
+        return getpass.getpass("Credential: ")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise NativeCredentialError("attended_secret_input_required") from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -209,12 +228,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         return result.exit_code
     if args.command == "auth":
         try:
-            report = _matrix_auth_status(args.credential_file)
-        except CredentialSourceError as exc:
+            if args.auth_command == "status":
+                report = _matrix_auth_status(args.credential_file)
+                print(json.dumps(report, sort_keys=True))
+                return int(report["exit_code"])
+            store = native_store_for_current_platform()
+            if args.auth_command == "store":
+                secret = _read_attended_secret()
+                try:
+                    store.store(args.provider, args.credential_ref, secret)
+                finally:
+                    secret = ""
+                report = {"status": "stored", "backend": store.backend}
+                code = 0
+            elif args.auth_command == "verify-access":
+                present = store.contains(args.provider, args.credential_ref)
+                report = {
+                    "status": "access_verified" if present else "absent",
+                    "backend": store.backend,
+                }
+                code = 0 if present else 3
+            else:
+                revoked = store.revoke(args.provider, args.credential_ref)
+                report = {
+                    "status": "revoked" if revoked else "absent",
+                    "backend": store.backend,
+                }
+                code = 0 if revoked else 3
+        except (BackendUnavailable, CredentialSourceError, NativeCredentialError) as exc:
             print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
             return 3
         print(json.dumps(report, sort_keys=True))
-        return int(report["exit_code"])
+        return code
     if args.command == "harness":
         try:
             expected_raw = json.loads(Path(args.expected).read_text(encoding="utf-8"))
