@@ -23,6 +23,26 @@ from torq_cli.core.redaction import PatternRegistry
 
 _PRIVATE_KEY_NAME = ".torq-receipt-signing-key"
 _PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
+_LEGACY_RECEIPT_SCHEMA_VERSION = "1.0.0"
+_RECEIPT_SCHEMA_VERSION = "1.1.0"
+_RECEIPT_AUTHORITIES = frozenset({"worker", "supervisor_derived"})
+_SUPERVISOR_TRANSITIONS = frozenset({"stage_interrupted", "run_decision"})
+
+
+def _receipt_authority_finding(
+    schema_version: object,
+    transition: object,
+    authority: object,
+) -> str | None:
+    if schema_version == _LEGACY_RECEIPT_SCHEMA_VERSION:
+        return "receipt_authority_version_invalid" if authority is not None else None
+    if schema_version != _RECEIPT_SCHEMA_VERSION:
+        return "receipt_schema_unsupported"
+    if not isinstance(authority, str) or authority not in _RECEIPT_AUTHORITIES:
+        return "receipt_authority_invalid"
+    if authority == "supervisor_derived" and transition not in _SUPERVISOR_TRANSITIONS:
+        return "receipt_authority_transition_invalid"
+    return None
 
 
 def _windows_dll(name: str) -> Any:
@@ -463,7 +483,7 @@ class StoreVerification:
 
 
 class ReceiptChain:
-    schema_version = "1.0.0"
+    schema_version = _RECEIPT_SCHEMA_VERSION
 
     def __init__(self, evidence_root: Path, run_id: str, keys: RunKeyStore, *, profile_version: str, policy_version: str) -> None:
         self.run_id = run_id
@@ -521,7 +541,20 @@ class ReceiptChain:
             raise TypeError("receipt payload must be an object")
         return value
 
-    def append(self, transition: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def append(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        authority: str = "worker",
+    ) -> dict[str, Any]:
+        authority_finding = _receipt_authority_finding(
+            self.schema_version,
+            transition,
+            authority,
+        )
+        if authority_finding is not None:
+            raise ValueError(authority_finding)
         with self._lock:
             clean = self._sanitize(payload)
             self._sequence += 1
@@ -532,6 +565,7 @@ class ReceiptChain:
                 "sequence": self._sequence,
                 "previous_receipt_hash": self._previous,
                 "transition": transition,
+                "authority": authority,
                 "payload": clean,
                 "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             }
@@ -644,6 +678,13 @@ def verify_receipt_store(
                 return StoreVerification("tampered", "receipt_chain_broken")
             if ReceiptChain._hash(envelope) != receipt_hash:
                 return StoreVerification("tampered", "receipt_hash_mismatch")
+            authority_finding = _receipt_authority_finding(
+                envelope.get("schema_version"),
+                envelope.get("transition"),
+                envelope.get("authority"),
+            )
+            if authority_finding is not None:
+                return StoreVerification("tampered", authority_finding)
             current_versions = (envelope.get("schema_version"), envelope.get("profile_version"), envelope.get("policy_version"))
             if versions is not None and current_versions != versions:
                 return StoreVerification("tampered", "version_inconsistency")

@@ -166,6 +166,35 @@ def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.Cap
     assert output["run"]["run_id"] == "run-cli"
 
 
+def test_fleet_projects_worker_and_supervisor_authority_without_upgrading_legacy(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-authority")
+    _planned(chain)
+    chain.append("stage_started", {"role": "g1d"})
+    chain.append(
+        "stage_interrupted",
+        {"role": "g1d", "reason": "worker_lease_expired"},
+        authority="supervisor_derived",
+    )
+    chain.append(
+        "run_decision",
+        {"status": "recovery_required"},
+        authority="supervisor_derived",
+    )
+    chain.seal()
+
+    snapshot = FleetProjector(chain.root).snapshot()
+    lane = next(row for row in snapshot["lanes"] if row["role"] == "g1d")
+
+    assert snapshot["run"]["decision_authority"] == "supervisor_derived"
+    assert lane["latest_authority"] == "supervisor_derived"
+    assert [row["authority"] for row in lane["transitions"]] == [
+        "worker",
+        "supervisor_derived",
+    ]
+
+
 def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-http")
     _planned(chain)
