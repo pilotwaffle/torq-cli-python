@@ -28,8 +28,8 @@ report. T-33 is complete with a receipt-backed, three-provider governed live
 run against an immutable proposal-only target. T-35 is complete for the
 attended Windows, macOS, and Linux native credential backends, with fresh hosted
 installed-wheel evidence on all three systems. The refreshed T-32 audit is
-complete for PR #12 baseline `b34ff31`; T-36 remains withheld until PR #12 is
-merged through protected `main`, final checks pass, and signing/publication is
+complete for protected-main baseline `6d4d564`, whose four-platform quality run
+passed. T-36 is ready but remains withheld until signing/publication is
 explicitly authorized.
 
 ## Explicit non-claims
