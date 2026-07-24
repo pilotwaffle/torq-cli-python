@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import secrets
 import stat
 from collections.abc import Mapping
@@ -231,20 +230,130 @@ def _windows_acl_sddl(path: Path) -> str:
         kernel32.LocalFree(descriptor)
 
 
+def _windows_acl_is_owner_only(path: Path) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    class AclSizeInformation(ctypes.Structure):
+        _fields_ = (
+            ("ace_count", wintypes.DWORD),
+            ("acl_bytes_in_use", wintypes.DWORD),
+            ("acl_bytes_free", wintypes.DWORD),
+        )
+
+    class AceHeader(ctypes.Structure):
+        _fields_ = (
+            ("ace_type", ctypes.c_ubyte),
+            ("ace_flags", ctypes.c_ubyte),
+            ("ace_size", wintypes.WORD),
+        )
+
+    class AccessAllowedAce(ctypes.Structure):
+        _fields_ = (
+            ("header", AceHeader),
+            ("mask", wintypes.DWORD),
+            ("sid_start", wintypes.DWORD),
+        )
+
+    advapi32 = _windows_dll("advapi32")
+    kernel32 = _windows_dll("kernel32")
+    kernel32.LocalFree.argtypes = (wintypes.HLOCAL,)
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+    advapi32.GetNamedSecurityInfoW.argtypes = (
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi32.GetSecurityDescriptorControl.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi32.GetAclInformation.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    )
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = (
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.GetAce.restype = wintypes.BOOL
+    advapi32.ConvertStringSidToSidW.argtypes = (
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+    )
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi32.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    advapi32.EqualSid.restype = wintypes.BOOL
+
+    descriptor = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    result = advapi32.GetNamedSecurityInfoW(
+        str(path),
+        1,
+        0x00000004,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if result != 0:
+        raise OSError(result, "private_key_acl_read_failed")
+    expected_sid = ctypes.c_void_p()
+    if not advapi32.ConvertStringSidToSidW(
+        _windows_current_user_sid(), ctypes.byref(expected_sid)
+    ):
+        kernel32.LocalFree(descriptor)
+        raise OSError(_windows_last_error(), "private_key_sid_create_failed")
+    try:
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        if not advapi32.GetSecurityDescriptorControl(
+            descriptor, ctypes.byref(control), ctypes.byref(revision)
+        ):
+            raise OSError(_windows_last_error(), "private_key_acl_control_failed")
+        if not control.value & 0x1000 or not dacl.value:
+            return False
+        info = AclSizeInformation()
+        if not advapi32.GetAclInformation(
+            dacl, ctypes.byref(info), ctypes.sizeof(info), 2
+        ):
+            raise OSError(_windows_last_error(), "private_key_acl_info_failed")
+        if info.ace_count != 1:
+            return False
+        ace_pointer = ctypes.c_void_p()
+        if not advapi32.GetAce(dacl, 0, ctypes.byref(ace_pointer)):
+            raise OSError(_windows_last_error(), "private_key_acl_ace_failed")
+        ace = ctypes.cast(ace_pointer, ctypes.POINTER(AccessAllowedAce)).contents
+        if ace.header.ace_type != 0 or ace.header.ace_flags & 0x10:
+            return False
+        if ace.mask != 0x001F01FF:
+            return False
+        sid_pointer = ctypes.c_void_p(
+            int(ace_pointer.value or 0) + AccessAllowedAce.sid_start.offset
+        )
+        return bool(advapi32.EqualSid(sid_pointer, expected_sid))
+    finally:
+        kernel32.LocalFree(expected_sid)
+        kernel32.LocalFree(descriptor)
+
+
 def private_key_permissions_are_restricted(path: Path) -> bool:
     """Return whether the private key is limited to the current OS user."""
     if os.name == "nt":
-        sid = _windows_current_user_sid()
-        rendered = _windows_acl_sddl(path)
-        ace_start = rendered.find("(")
-        if ace_start < 0:
-            return False
-        control = rendered[2:ace_start] if rendered.startswith("D:") else ""
-        # P is the protected-DACL flag. Other control metadata (for example AI)
-        # varies across Windows versions and filesystems, but the ACE list must
-        # still be exactly one allow/full-control entry for the current SID.
-        owner_ace = rf"\(A;;(?:FA|GA|0x1f01ff);;;{re.escape(sid)}\)"
-        return "P" in control and re.fullmatch(owner_ace, rendered[ace_start:]) is not None
+        return _windows_acl_is_owner_only(path)
     return path.stat(follow_symlinks=False).st_mode & 0o077 == 0
 
 
