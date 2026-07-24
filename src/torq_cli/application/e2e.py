@@ -38,7 +38,7 @@ def run_governed_fixture(root: Path, *, date: str) -> Path:
     try:
         _claude, design = _connector("claude", "claude-fable-5", "g1d", root / "sessions")
         _deepseek, build = _connector("deepseek", "deepseek-v4-pro", "builder", root / "sessions")
-        _kimi, repair = _connector("kimi", "kimi-k3", "refine_bug", root / "sessions")
+        _kimi, repair = _connector("kimi", "k3", "refine_bug", root / "sessions")
         content = (
             "\"\"\"Small deterministic flag parser fixture.\"\"\"\n"
             "def parse_flag(value: str) -> bool:\n"

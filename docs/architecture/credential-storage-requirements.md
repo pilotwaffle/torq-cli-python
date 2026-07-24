@@ -75,7 +75,7 @@ capability.
 - `metadata.credential_ref` uses the exact `credref_[0-9a-f]{32}` syntax.
 - `metadata.generation` is an integer in the inclusive range
   `1..9007199254740991`.
-- `metadata.provider_id` is exactly one of `anthropic`, `openai`, `grok`,
+- `metadata.provider_id` is exactly one of `anthropic`, `openai`, `qwen`,
   `moonshot`, `zai`, or `deepseek`.
 - Metadata contains no accounts, endpoints, models, labels, timestamps,
   paths, usage data, or secret hashes.

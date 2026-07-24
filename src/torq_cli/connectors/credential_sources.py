@@ -18,10 +18,13 @@ _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _PROVIDER_KEYS: Mapping[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY",),
     "codex": ("OPENAI_API_KEY",),
-    "grok": ("XAI_API_KEY", "GROK_API_KEY"),
+    "qwen": ("QWEN_TOKEN_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY"),
     "deepseek": ("DEEPSEEK_API_KEY",),
     "kimi": ("KIMI_CODE_API_KEY", "KIMI_API_KEY"),
     "zai": ("GLM_API_KEY", "ZAI_API_KEY"),
+}
+_PROVIDER_BASE_URL_KEYS: Mapping[str, tuple[str, ...]] = {
+    "qwen": ("QWEN_TOKEN_PLAN_BASE_URL",),
 }
 _SAFE_CHILD_KEYS = frozenset({
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
@@ -29,9 +32,19 @@ _SAFE_CHILD_KEYS = frozenset({
 })
 _CLAUDE_COMPAT = {
     "deepseek": ("https://api.deepseek.com/anthropic", "deepseek-v4-pro"),
-    "kimi": ("https://api.moonshot.ai/anthropic/", "kimi-k3"),
+    "kimi": ("https://api.kimi.com/coding/", "k3"),
+    "qwen": ("", "qwen3.8-max-preview"),
     "zai": ("https://api.z.ai/api/anthropic", ""),
 }
+
+
+def safe_child_environment(base_environment: Mapping[str, str]) -> dict[str, str]:
+    """Retain only non-secret operating-system variables for a provider child."""
+    return {
+        key: value
+        for key, value in base_environment.items()
+        if key.upper() in _SAFE_CHILD_KEYS
+    }
 
 
 class CredentialSourceError(ValueError):
@@ -103,6 +116,13 @@ class ExplicitEnvVault:
     def configured_providers(self) -> frozenset[str]:
         return frozenset(provider for provider in _PROVIDER_KEYS if self.get(provider) is not None)
 
+    def base_url(self, provider: str) -> str | None:
+        for key in _PROVIDER_BASE_URL_KEYS.get(provider.casefold(), ()):
+            value = self._values.get(key)
+            if value:
+                return value
+        return None
+
 
 def claude_compatible_environment(
     provider: str,
@@ -117,16 +137,40 @@ def claude_compatible_environment(
     if credential is None:
         raise CredentialSourceError("provider_credential_missing")
     base_url, model = _CLAUDE_COMPAT[normalized]
-    child = {
-        key: value
-        for key, value in base_environment.items()
-        if key.upper() in _SAFE_CHILD_KEYS
-    }
+    if normalized == "qwen":
+        reader = getattr(vault, "base_url", None)
+        if not callable(reader):
+            raise CredentialSourceError("provider_base_url_missing")
+        base_url = reader(normalized)
+        if not isinstance(base_url, str) or not base_url.startswith("https://"):
+            raise CredentialSourceError("provider_base_url_missing")
+    child = safe_child_environment(base_environment)
     child.update({
         "ANTHROPIC_AUTH_TOKEN": credential,
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_MODEL": model,
         "ANTHROPIC_API_KEY": "",
+    })
+    return child
+
+
+def openai_compatible_environment(
+    provider: str,
+    vault: CredentialVault,
+    base_environment: Mapping[str, str],
+) -> dict[str, str]:
+    """Build one OpenAI-compatible child environment without ambient secrets."""
+    normalized = provider.casefold()
+    if normalized != "codex":
+        raise CredentialSourceError("provider_unsupported")
+    credential = vault.get(normalized)
+    if credential is None:
+        raise CredentialSourceError("provider_credential_missing")
+    child = safe_child_environment(base_environment)
+    child.update({
+        "OPENAI_API_KEY": credential,
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "OPENAI_MODEL": "gpt-5.5",
     })
     return child
 
@@ -162,6 +206,8 @@ def provider_environment_from_config(
         vault = ConfiguredNativeVault(native_store_for_current_platform(), references)
     else:
         raise CredentialSourceError("credential_source_invalid")
+    if provider.casefold() == "codex":
+        return openai_compatible_environment(provider, vault, base_environment)
     return claude_compatible_environment(provider, vault, base_environment)
 
 
@@ -171,5 +217,7 @@ __all__ = [
     "ExplicitEnvVault",
     "MAX_CREDENTIAL_SOURCE_BYTES",
     "claude_compatible_environment",
+    "openai_compatible_environment",
     "provider_environment_from_config",
+    "safe_child_environment",
 ]

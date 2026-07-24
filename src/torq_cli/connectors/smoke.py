@@ -27,6 +27,16 @@ class LiveSmokeRunner:
             results[name] = result
         target = self.report_root / f"live-smoke-{date}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"date": date, "mode": "manual_only", "providers": results}, sort_keys=True), encoding="utf-8")
+        report = {
+            "schema": "torq-live-smoke-report-v1",
+            "date": date,
+            "mode": "manual_only",
+            "provenance": {
+                "kind": "machine_generated_live_runner",
+                "machine_generated": True,
+                "receipt_backed": False,
+            },
+            "providers": results,
+        }
+        target.write_text(json.dumps(report, sort_keys=True), encoding="utf-8")
         return target
-

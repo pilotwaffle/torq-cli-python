@@ -148,6 +148,12 @@ def _matrix_auth_status(credential_file: str | None = None) -> dict[str, Any]:
             auth = "configured"
             state = "unavailable"
             identity = "unattestable"
+        else:
+            # The packaged matrix is dated decision evidence, not proof that
+            # this invocation currently holds credentials or a live grant.
+            auth = "unavailable"
+            state = "unavailable"
+            identity = "unattestable"
         rows[provider] = {
             "state": state,
             "authentication": auth,
