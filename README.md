@@ -38,9 +38,11 @@ The T-06C Console import command accepts the bounded raw Console V5 YAML shape a
 
 The optional `--credential-file` compatibility source reuses an explicit
 external provider env file without copying its values into TORQ configuration.
-For the Console harness it maps `DEEPSEEK_API_KEY`, `KIMI_CODE_API_KEY`
-(falling back to `KIMI_API_KEY`), and `GLM_API_KEY` into isolated
-Claude-compatible child environments. See `docs/external-credential-source.md`.
+For the Console harness it maps `QWEN_TOKEN_PLAN_API_KEY` (which covers both
+the Qwen and DeepSeek lanes, since both bill to one Alibaba Token Plan),
+`KIMI_CODE_API_KEY` (falling back to `KIMI_API_KEY`), and `GLM_API_KEY` into
+isolated Claude-compatible child environments. See
+`docs/external-credential-source.md`.
 
 Native provider credentials are stored through `keyring` 25.7 in the current
 user's Windows Credential Manager, macOS Keychain, or Linux Secret Service.

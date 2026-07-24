@@ -241,9 +241,9 @@ directly; injected context goes through the orchestrator, which seals it.
 |---|---|---|
 | Split token counts in receipts | FR-10, FR-9 | **landed 2026-07-24** |
 | `stage_blocked` receipt + sealed refusal | FR-7, FR-8 | **landed 2026-07-24** |
-| Pinned rate table (`list_prices.v1.yaml`) | FR-9, FR-12 | not started |
-| `EntitlementLedger` + account map | FR-14, FR-15, FR-16 | not started |
-| `billed_usd` / `metered_usd` / `settlement` fields | FR-9, ledger headlines | not started |
+| Pinned rate table (`list_prices.v1.yaml`) | FR-9, FR-12 | implemented on backend feature branch; merge pending |
+| `EntitlementLedger` + account map | FR-14, FR-15, FR-16 | implemented on backend feature branch; merge pending |
+| `billed_usd` / `metered_usd` / `settlement` fields | FR-9, ledger headlines | implemented on backend feature branch; merge pending |
 | `context_injected` receipt | FR-19 | not started |
 | DeepSeek/Qwen routing resolution | FR-14 correctness | **open question** |
 
@@ -304,9 +304,10 @@ cost surface; the cost surface is not trustworthy without its backend.
 
 ## 11. Open questions
 
-1. **DeepSeek routing.** Does that lane bill to the Qwen plan in fact, or only
-   in intent? The transport still points at `api.deepseek.com` with
-   `DEEPSEEK_API_KEY`. FR-14 is not implementable until this is settled.
+1. ~~**DeepSeek routing.**~~ Settled 2026-07-24: the lane bills to the Alibaba
+   Token Plan in fact, and the transport now says so — it resolves
+   `QWEN_TOKEN_PLAN_API_KEY` against the Token Plan host rather than
+   `api.deepseek.com`. FR-14 is unblocked.
 2. **The `g2a` lane's settlement.** As built it uses a platform API key and is
    genuinely metered, regardless of the ChatGPT subscription tier. Does it move
    to a subscription-authenticated CLI, or stay the one metered lane?

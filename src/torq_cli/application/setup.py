@@ -11,6 +11,7 @@ import yaml
 from torq_cli.connectors.credential_sources import ExplicitEnvVault
 from torq_cli.domain.config_schema import validate_credential_ref
 from torq_cli.domain.registry_schema import load_registry
+from torq_cli.safety.entitlements import InMemoryEntitlementLedger
 
 
 class SetupError(ValueError):
@@ -141,6 +142,29 @@ class SetupService:
                 },
             },
         }
+        raw_entitlements = answers.get("entitlement_accounts")
+        if raw_entitlements is not None:
+            if not isinstance(raw_entitlements, Mapping):
+                raise SetupError("entitlement_accounts_invalid")
+            try:
+                ledger = InMemoryEntitlementLedger.from_config(raw_entitlements)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SetupError("entitlement_accounts_invalid") from exc
+            bound_provider_ids = {
+                profile.bindings[str(role)].provider_id for role in bindings
+            }
+            unknown = sorted(
+                provider
+                for provider in bound_provider_ids
+                if ledger.window(provider).settlement == "unknown"
+            )
+            if unknown:
+                raise SetupError("entitlement_provider_missing:" + ",".join(unknown))
+            document["entitlement_accounts"] = {
+                str(account): dict(value)
+                for account, value in raw_entitlements.items()
+                if isinstance(value, Mapping)
+            }
         if credential_source is not None:
             document["credential_source"] = credential_source
         target.parent.mkdir(parents=True, exist_ok=True)

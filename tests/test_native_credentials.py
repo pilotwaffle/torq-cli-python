@@ -150,6 +150,11 @@ def test_setup_persists_only_native_refs_and_runtime_resolves_selected_provider(
         {"PATH": "safe", "KIMI_API_KEY": "must-not-pass"},
     )
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "test-only-value"
+    # The keychain holds secrets only, so it declares no Token Plan region and
+    # the documented default host stands.
+    assert environment["ANTHROPIC_BASE_URL"] == (
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+    )
     assert "KIMI_API_KEY" not in environment
 
     missing = _answers()

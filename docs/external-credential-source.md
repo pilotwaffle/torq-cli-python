@@ -20,7 +20,7 @@ memory and are neither printed nor written to generated configuration.
 
 | TORQ provider | Source key | Claude-compatible child variables |
 | --- | --- | --- |
-| DeepSeek Builder | `DEEPSEEK_API_KEY` | token + `https://api.deepseek.com/anthropic` + `deepseek-v4-pro` |
+| DeepSeek Builder | `QWEN_TOKEN_PLAN_API_KEY`, fallback `BAILIAN_CODING_PLAN_API_KEY` | Token Plan Anthropic-compatible endpoint + `deepseek-v4-pro` |
 | OpenAI / Codex | `OPENAI_API_KEY` | API credential + `gpt-5.5`; ChatGPT subscription billing is separate |
 | Kimi Refine Bug | `KIMI_CODE_API_KEY`, fallback `KIMI_API_KEY` | subscription token + `https://api.kimi.com/coding/` + `k3` |
 | Z.ai Refine UI | `GLM_API_KEY`, fallback `ZAI_API_KEY` | token + `https://api.z.ai/api/anthropic`; model flag `glm-5.2` |
@@ -30,6 +30,16 @@ Claude retains its first-party authenticated session. Codex can use the
 explicit `OPENAI_API_KEY`; this is an API credential and is not treated as
 proof of ChatGPT subscription entitlement. Qwen replaces the former Grok
 challenge lane and receives only its Token Plan key and configured base URL.
+
+DeepSeek is billed to the same Alibaba Token Plan as Qwen rather than to a
+direct DeepSeek account, so both lanes resolve one credential and one regional
+host. `DEEPSEEK_API_KEY` is deliberately not consulted, even as a fallback:
+using it would silently move the lane from plan-covered to metered settlement
+and make the entitlement ledger wrong. `QWEN_TOKEN_PLAN_BASE_URL` governs both
+lanes when present; sources that declare no region — the native keychain, which
+holds secrets only — keep the documented default
+`https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic`. A declared
+value that is not an `https://` URL fails closed rather than falling back.
 
 Each direct-provider child receives only the selected credential plus the
 small safe operating-system environment allowlist. Credentials for the other

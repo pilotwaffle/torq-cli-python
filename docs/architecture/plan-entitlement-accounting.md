@@ -1,7 +1,8 @@
 # Plan entitlement accounting
 
-Status: **specification only — not implemented.** Written 2026-07-24 against
-`orchestrator.py`, `adapters/live_provider.py`, and `scripts/run_governed_live.py`.
+Status: **implemented on `feat/plan-entitlement-accounting`; merge pending.**
+Written and implemented 2026-07-24 against `orchestrator.py`,
+`adapters/live_provider.py`, and `scripts/run_governed_live.py`.
 
 Every provider lane now runs on a paid subscription rather than metered API
 keys. That inverts the scarce resource: dollars are fixed and prepaid, while
@@ -49,13 +50,14 @@ entitlement_accounts:
 The map is `operator_declared` and must be stated, not inferred. A provider with
 no account entry resolves to `entitlement_unknown` and fails closed.
 
-Note the credential layer already disagrees with this arrangement:
-`_PROVIDER_KEYS["deepseek"]` still reads `DEEPSEEK_API_KEY` and
-`_CLAUDE_COMPAT["deepseek"]` still points at `api.deepseek.com`
-(`credential_sources.py:22,34`). If the DeepSeek lane is genuinely billed to the
-Qwen plan, it should be routed through the Qwen base URL and credential;
-otherwise the entitlement map claims a settlement the transport does not
-actually use. **Resolve the routing before the ledger is trusted.**
+**Resolved 2026-07-24.** The credential layer used to disagree with this
+arrangement — `_PROVIDER_KEYS["deepseek"]` read `DEEPSEEK_API_KEY` and
+`_CLAUDE_COMPAT["deepseek"]` pointed at `api.deepseek.com`, so the entitlement
+map claimed a settlement the transport did not use. The transport now matches:
+both lanes resolve `QWEN_TOKEN_PLAN_API_KEY` and the Token Plan
+Anthropic-compatible host, and `DEEPSEEK_API_KEY` is not consulted even as a
+fallback, because falling back to it would silently reclassify the lane as
+metered. See `docs/external-credential-source.md`.
 
 ### The OpenAI lane is metered regardless of subscription tier
 
@@ -368,16 +370,25 @@ made the PR #3 surface results unverifiable.
 2. ~~**F4 / C5** — blocked receipts.~~ **Landed 2026-07-24.** `stage_blocked`
    before the raise, terminal `run_decision {status: "blocked"}`, and
    `RunController.start` seals the refusal so it verifies.
-3. **Provider routing** — settle whether the DeepSeek lane actually bills to the
-   Qwen plan, and fix `_CLAUDE_COMPAT` / `_PROVIDER_KEYS` to match. The ledger
-   cannot be correct while the transport contradicts the account map.
-4. **C2** — rate table with provenance.
-5. **C3 / C4** — entitlement ledger and the preflight sibling; stop fabricating
-   ceilings for the plan-covered lanes.
-6. **F3 / C6 / C7** — receipt fields and the settlement summary.
+3. ~~**Provider routing.**~~ **Landed 2026-07-24.** The DeepSeek lane bills to
+   the Alibaba Token Plan, and `_PROVIDER_KEYS` / `_CLAUDE_COMPAT` now say so:
+   `QWEN_TOKEN_PLAN_API_KEY` against the Token Plan host, with no
+   `DEEPSEEK_API_KEY` fallback. `QWEN_TOKEN_PLAN_BASE_URL` overrides the region
+   for both plan lanes; the native keychain declares none and keeps the default.
+4. ~~**C2.**~~ **Implemented 2026-07-24.** The packaged, versioned rate table
+   records its source and produces explicit `rate_unknown` results for models
+   without a pinned rate.
+5. ~~**C3 / C4.**~~ **Implemented 2026-07-24.** Account-keyed entitlement
+   windows share Qwen/DeepSeek consumption, reserve/reconcile calls, and bypass
+   dollar ceilings only for `plan_covered` lanes.
+6. ~~**F3 / C6 / C7.**~~ **Implemented 2026-07-24.** Completed-stage receipts
+   seal settlement, billed and metered values, pricing status, rate-table
+   version, and entitlement provenance; summaries preserve the split.
 
 1 and 2 were defect fixes that stood on their own merits and landed before the
-next governed live run. 3 is a correctness precondition. 4–6 are the feature.
+next governed live run. 3 was the correctness precondition for the ledger and is
+now met. 4–6 are implemented on the feature branch and awaiting protected-main
+review.
 
 **Runs sealed before item 1 landed are permanently unpriceable.** That includes
 `docs/evidence/t33-governed-live-2026-07-24/`, whose four `stage_completed`

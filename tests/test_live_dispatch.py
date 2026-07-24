@@ -13,7 +13,14 @@ from torq_cli.connectors.live_dispatch import LiveStageDispatcher
 
 def _vault(tmp_path: Path) -> ExplicitEnvVault:
     source = tmp_path / ".env"
-    source.write_text("DEEPSEEK_API_KEY=test-only\nOPENAI_API_KEY=test-openai\n", encoding="utf-8")
+    # DeepSeek bills to the Alibaba/Qwen Token Plan. A stale direct-account key
+    # is left in place so the dispatcher is proven not to fall back to it.
+    source.write_text(
+        "QWEN_TOKEN_PLAN_API_KEY=test-only\n"
+        "DEEPSEEK_API_KEY=must-not-be-used\n"
+        "OPENAI_API_KEY=test-openai\n",
+        encoding="utf-8",
+    )
     return ExplicitEnvVault(source)
 
 
@@ -48,6 +55,10 @@ def test_live_dispatcher_scopes_claude_compatible_environment(
     environment = captured["env"]
     assert isinstance(environment, dict)
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "test-only"
+    assert environment["ANTHROPIC_BASE_URL"] == (
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+    )
+    assert "must-not-be-used" not in environment.values()
     assert "OPENAI_API_KEY" not in environment
     assert response.provenance.provider == "deepseek"
     assert response.provenance.model == "deepseek-v4-pro"
