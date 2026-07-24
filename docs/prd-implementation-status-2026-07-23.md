@@ -45,8 +45,8 @@ complete.
 
 ## Verification
 
-- Test collection: 460 tests across 23 test files; the refreshed local suite
-  passes with four intentional live/environment skips (456
+- Test collection: 461 tests across 23 test files; the refreshed local suite
+  passes with four intentional live/environment skips (457
   executed tests).
 - Strict mypy: pass across 45 Python source files.
 - Ruff: pass.

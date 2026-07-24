@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import platform
 import re
 from collections.abc import Mapping
@@ -183,10 +184,14 @@ class ConfiguredNativeVault:
 def native_store_for_current_platform() -> NativeCredentialStore:
     """Create the verified native backend for the current attended OS session."""
     platform_name = platform.system()
+    is_linux = platform_name.casefold() == "linux"
+    desktop_session = bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    )
     return NativeCredentialStore(
         platform_name,
-        headless=False,
-        secret_service_available=platform_name.casefold() == "linux",
+        headless=is_linux and not desktop_session,
+        secret_service_available=is_linux and desktop_session,
     )
 
 

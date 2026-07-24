@@ -37,7 +37,13 @@ def test_production_imports_forbid_subprocess() -> None:
             local_allow = {"os", "stat", "ctypes"}
         elif source_path.as_posix().endswith("torq_cli/adapters/process.py"):
             local_allow = {"os", "subprocess"}
-        elif source_path.as_posix().endswith(("torq_cli/safety/workspace.py", "torq_cli/safety/receipts.py")):
+        elif source_path.as_posix().endswith(
+            ("torq_cli/safety/workspace.py", "torq_cli/safety/receipts.py")
+        ):
+            local_allow = {"os"}
+        elif source_path.as_posix().endswith("torq_cli/connectors/native_credentials.py"):
+            # DISPLAY/WAYLAND_DISPLAY are explicit session-type facts only;
+            # this adapter never enumerates credential-bearing environment keys.
             local_allow = {"os"}
         else:
             local_allow = set()

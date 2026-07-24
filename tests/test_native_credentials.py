@@ -7,6 +7,7 @@ import pytest
 
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.connectors import credential_sources
+from torq_cli.connectors import native_credentials
 from torq_cli.connectors.native_credentials import (
     ConfiguredNativeVault,
     NativeCredentialError,
@@ -97,6 +98,17 @@ def test_native_backend_identity_and_headless_fallback_fail_closed() -> None:
             driver=_MemoryKeyring(),
             verify_backend=False,
         )
+
+
+def test_current_linux_session_facts_do_not_promote_headless_to_secret_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(native_credentials.platform, "system", lambda: "Linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+
+    with pytest.raises(BackendUnavailable, match="attended_encrypted_file_not_implemented"):
+        native_credentials.native_store_for_current_platform()
 
 
 def test_configured_vault_resolves_only_mapped_provider_reference() -> None:
