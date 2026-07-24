@@ -57,8 +57,19 @@ def test_run_prime_directive_default_dry_double_opt_in_and_resume_divergences(tm
         controller.start(identity, {"model": None}, expected={"model": "fable-5"})
     started = controller.start(identity, {"model": "fable-5"}, expected={"model": "fable-5"})
     assert started["mode"] == "dry_run"
+    assert started["verdict"] == "dry_run_complete"
+    assert started["planned_roles"] == ("g1d", "g1r", "builder", "g2a")
     with pytest.raises(ValueError, match="double_opt_in_required"):
         controller.start(identity, {"model": "fable-5"}, expected={"model": "fable-5"}, live=True, live_opt_in=True)
+    with pytest.raises(ValueError, match="live_dispatcher_required"):
+        controller.start(
+            identity,
+            {"model": "fable-5"},
+            expected={"model": "fable-5"},
+            live=True,
+            live_opt_in=True,
+            policy_opt_in=True,
+        )
     checkpoint = controller.cancel("run-1", identity, completed=("g1d",))
     assert checkpoint.exists()
     assert controller.resume(checkpoint, identity, stages=("g1d", "g1r", "builder")) == ("g1r", "builder")

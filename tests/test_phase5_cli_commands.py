@@ -25,12 +25,15 @@ def test_run_command_dry_default_and_evidence_verify_exit_codes(tmp_path, capsys
     identity = tmp_path / "identity.json"
     expected = tmp_path / "expected.json"
     actual = tmp_path / "actual.json"
-    identity.write_text(json.dumps({"profile_version": "1", "policy_version": "3.1.3", "prompt_binding": "p", "model_resolution": "claude:fable-5", "sandbox_identity": "s", "config_version": 1, "receipt_chain_hash": "h"}), encoding="utf-8")
+    identity.write_text(json.dumps({"profile_version": "1.0.0", "policy_version": "3.1.3", "prompt_binding": "p", "model_resolution": "claude:fable-5", "sandbox_identity": "s", "config_version": 1, "receipt_chain_hash": "h"}), encoding="utf-8")
     expected.write_text(json.dumps({"model": "fable-5"}), encoding="utf-8")
     actual.write_text(json.dumps({"model": "fable-5"}), encoding="utf-8")
     assert main(["run", "--goal", "test", "--run-root", str(tmp_path / "runs"), "--identity", str(identity), "--expected", str(expected), "--actual", str(actual)]) == 0
     run_output = json.loads(capsys.readouterr().out)
     assert run_output["mode"] == "dry_run"
+    assert run_output["verdict"] == "dry_run_complete"
+    assert run_output["dispatched_roles"] == []
+    assert [event["status"] for event in run_output["timeline"]] == ["planned"] * 4
     receipt_root = tmp_path / "runs" / run_output["run_id"]
     assert run_output["receipts"] == str(receipt_root)
     assert verify_receipt_store(receipt_root).status == "verified"

@@ -18,6 +18,15 @@ torq --version
 
 Dry-run is the default. Live execution requires both `--allow-live` and `--policy-allow-live`. Agents never commit, push, or merge. The primary worktree remains unchanged until an audited, tree-pinned proposal receives explicit approval.
 
+`torq run` now invokes the governed orchestration boundary. Dry-run records the
+four-stage plan without provider calls. A live application embedding an
+injected `ConnectorDispatcher` executes G1D -> G1R -> Builder -> G2A, routes
+HIGH defects through the bound repair lane, and performs a targeted G2A
+re-audit before returning `awaiting_approval`. The standalone CLI currently
+has no production transport factory, so `--live` fails closed as
+`live_dispatcher_required`; mock-transport conformance is not described as a
+live provider run. See `docs/architecture/governed-orchestration.md`.
+
 The T-06A import command reads only the authenticated normalized V5 fixture shape and emits a fixed registry-authoritative stdout projection. It does not read raw Console configuration, write files, resolve credentials, access providers, or claim T-06/Phase 1 completion.
 
 The T-06C Console import command accepts the bounded raw Console V5 YAML shape and emits the same canonical `torq-v5-repo-compat` v1 projection without manual translation. It is read-only: it does not discover a default Console path, write configuration, copy endpoints or wrapper names, resolve credentials, or access providers.
