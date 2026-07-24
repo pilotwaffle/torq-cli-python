@@ -211,6 +211,8 @@ Pre-publication independent verifier packet SHA-256 `314fd667716b135c49caae8313c
 
 Post-publication repository publication state: branch `agent/t06a-t06b-verified` was pushed; draft PR #1 exists at `https://github.com/pilotwaffle/Torq-CLI/pull/1`; `main` remains unchanged at `be676e987163baa2b06ce9df49ba6c1110149c0c`; no merge, deploy, or release occurred.
 
+**Superseded 2026-07-24:** PR #1 was merged as `498cfbe`. The `Torq-CLI` repository was archived 2026-07-24T22:02:20Z and is read-only. Canonical development is `pilotwaffle/torq-cli-python` (this repo), which holds T-02–T-36 and the signed v0.1.0 release.
+
 Post-publication exact-SHA CI: push run `29671988290` passed 4/4; pull request run `29671989395` passed 4/4. Windows, macOS, Linux, and headless Linux each passed the workflow sequence: Ruff, mypy, full pytest, named mutants, build, and wheel smoke.
 
 Post-publication final independent evidence at `993efbebc08c6fdb8668c7d74d7f1d819a3027f1`: focused pytest `96 passed`; full pytest `360 passed, 4 skipped`, `364 collected`; Ruff pass; mypy pass for 16 sources; named mutants `14/14` in default and explicit-root modes; offline build, wheel smoke, and archive/resource audit passed.
