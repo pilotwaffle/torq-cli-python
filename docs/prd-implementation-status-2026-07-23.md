@@ -1,15 +1,19 @@
 # PRD r5 implementation status — 2026-07-24
 
-Merged implementation baseline: `9b5e77b174626c794bfe76fe3940b09b3c5efb9e`
-(`main`, merged PR #5). Receipt/security base: `9bac9246faf93c00c7b69b6828d397347e48a536`
-(merged PR #4). T-35 native-credential implementation commit:
-`39aef301cf677c6cec88a5efdd7539b68ed64266` (PR #6). Its hosted quality runs
-completed successfully:
+Current assessed implementation baseline:
+`767b1db5d70a83aee1e98b1ebc93360bb471ecae` on the stacked release-candidate
+branch `feat/t35-clean-machine-credentials`. It is not merged `main`: draft PR
+#7 is based on `main`, draft PR #8 is based on #7, and draft PR #9 is based on
+#8. `main` remains at `148175cfb6fc677b5a8f97da38af115aee912ab3`.
 
-- pull request: [`30091702831`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30091702831);
-- push: [`30091686718`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30091686718).
+The final T-35 native-credential workflow at the assessed baseline completed
+successfully:
 
-Both T-35 runs passed Windows, macOS, Linux, and headless Linux.
+- native evidence: [`30105467956`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30105467956);
+- quality push: [`30105470143`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30105470143).
+
+The quality run passed Windows, macOS, Linux, and headless Linux. The native
+evidence run passed wheel build, macOS Keychain, and Linux Secret Service.
 
 T-35 clean-machine native evidence later completed successfully at source commit
 `3b3bb957a055d989eeb41b6a1eff88966d9f3390` in hosted run
@@ -41,11 +45,11 @@ complete.
 | T-21 | Complete | The manual-only runner produced `docs/evidence/live-smoke-2026-07-24.json`: all six provider smokes passed with resolved-model identity and usage metadata. The report is machine-generated, secret-free, and explicitly non-receipt-backed. SHA-256: `9B09AC38AAA4092860EFA4FE8AF9241D7C3F0C876ADE1852FC92F88F5290EE17`. |
 | T-22–T-27 | Complete | Isolation, execution policy, governed orchestration, bounded repair/re-audit, approval, usage, encrypted artifacts, and receipt verification pass. The `.pub`-swap exploit is replayed end-to-end and rejected as `trust_anchor_substituted`; unsafe/missing identity variants also fail closed. |
 | T-28–T-31 | Complete at the implemented boundary | Setup, dry-run, injected live orchestration, cancellation/resume, effective status, and evidence verification exist. Standalone `torq run --live` fails before creating a run with `live_dispatcher_required`. |
-| T-32 | Complete for this source baseline | The production-readiness audit records resolved and open findings. It must be rerun after external evidence or implementation changes. |
+| T-32 | Complete for stacked baseline `767b1db` | The refreshed audit resolves live-provider and macOS/Linux native evidence, verifies the receipt bundle and repository controls, and records three High T-36 blockers: unmerged draft stack, missing fresh-machine Windows credential evidence under the current release criterion, and absent signed release identity/artifacts. |
 | T-33 | Complete | The authorized proposal-only runner dispatched G1D/G1R/Builder/G2A across Anthropic, DeepSeek, and OpenAI, verified exact profile-bound model identities, and stopped at `awaiting_approval`. The portable signed receipt bundle verifies against its separately exported public key; no application transition occurred. Report SHA-256: `77CE748C5054DE8B525835287CA32F7DCB17B79101C66E71A99B8E450016B262`. |
 | T-34 | Complete | `SECURITY.md` distinguishes the authenticated private identity from the mutable public-key cache and states the same-principal/private-identity limitation. |
 | T-35 | Complete for native attended backends | One exact wheel (`24C0286B6B1E8D981AF577FB4DEBB8A2D60B312412F0D6E36A3FFCF53E96AD32`) was transferred to fresh hosted macOS and Linux runners, hash-verified, installed into isolated environments, and exercised through native store/resolve/revoke/absence operations. Windows was previously verified locally from both editable and isolated wheel installs. The separately gated headless encrypted-file contract remains unimplemented and fails closed. |
-| T-36 | Correctly withheld | Signed tag, release publication, and final branch/release evidence remain gated by a refreshed T-32 audit and explicit operator authorization. |
+| T-36 | Correctly withheld | The refreshed T-32 audit is complete, but publication remains gated by merging PRs #7–#9 through protected `main`, satisfying or explicitly narrowing the fresh-machine Windows release criterion, passing the final mainline matrix, and receiving explicit operator authorization for signing/publication. |
 
 ## Verification
 
@@ -93,7 +97,7 @@ complete.
 
 | Task | Required closure evidence | Operator-owned prerequisite | Codex scope after authorization |
 | --- | --- | --- | --- |
-| T-36 | Refreshed T-32 audit, signed `v0.1.0` tag, immutable artifacts/hashes, and release/branch evidence | Explicitly authorize signing and publication after all prerequisite gates pass | Prepare, verify, tag, and publish only within that authorization. |
+| T-36 | Merge the draft dependency stack through protected `main`; produce fresh-machine Windows installed-artifact credential evidence or explicitly narrow the release criterion; pass the resulting mainline checks; then create a signed `v0.1.0` tag and immutable artifact hashes | Review/merge authority, decision on the Windows release criterion, and explicit signing/publication authorization | Prepare and verify remaining evidence; tag and publish only within explicit authorization. |
 
 External evidence production is therefore in scope for Codex once King Flowers
 provides the required authority and systems. Credential ownership, model grants,
