@@ -24,16 +24,17 @@ for context only.
 
 The implementation gate passed. T-08 through T-35 are implemented and tested;
 T-21 is complete with a machine-generated, secret-free six-provider live-smoke
-report. The live portion of T-33 still requires an approved application target.
-T-36 remains correctly withheld until the remaining live/release gates complete.
+report. T-33 is complete with a receipt-backed, three-provider governed live
+run against an immutable proposal-only target. T-36 remains correctly withheld
+until the remaining clean-machine and release gates complete.
 
 ## Explicit non-claims
 
 Native credential backends, signing, receipts, governed execution,
 approval/apply, packaging, and bounded six-provider live effectiveness are now
 implemented or evidenced. Clean-machine keychain verification, headless
-encrypted-file storage, the governed T-33 application run, and release/tagging
-remain external release gates and are not claimed complete.
+encrypted-file storage, and release/tagging remain external release gates and
+are not claimed complete.
 
 The remaining residual risks are the documented limits on rollback, lost
 passphrases, local administration, metadata privacy, OS synchronization,

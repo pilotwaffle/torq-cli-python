@@ -46,3 +46,31 @@ def test_run_command_dry_default_and_evidence_verify_exit_codes(tmp_path, capsys
     assert json.loads(capsys.readouterr().out)["status"] == "verified"
     (chain.root / "receipts.jsonl").write_text("", encoding="utf-8")
     assert main(["evidence", "verify", "--run-root", str(chain.root)]) == 4
+
+
+def test_evidence_verify_accepts_external_public_key(tmp_path, capsys) -> None:
+    evidence_root = tmp_path / "evidence"
+    chain = ReceiptChain(
+        evidence_root,
+        "portable",
+        FileRunKeyStore(evidence_root),
+        profile_version="1.0.0",
+        policy_version="3.1.3",
+    )
+    chain.append("run_decision", {"status": "awaiting_approval"})
+    chain.seal()
+    public_key = evidence_root / ".torq-receipt-signing-key.pub"
+
+    assert main([
+        "evidence", "verify", "--run-root", str(chain.root),
+        "--trusted-public-key", str(public_key),
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "verified"
+
+    invalid = tmp_path / "invalid.pub"
+    invalid.write_text("not-a-key", encoding="ascii")
+    assert main([
+        "evidence", "verify", "--run-root", str(chain.root),
+        "--trusted-public-key", str(invalid),
+    ]) == 3
+    assert json.loads(capsys.readouterr().out)["finding"] == "trusted_public_key_invalid"
