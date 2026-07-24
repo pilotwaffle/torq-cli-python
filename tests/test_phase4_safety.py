@@ -132,7 +132,8 @@ def test_receipt_chain_artifact_tamper_signature_redaction_and_permissions(tmp_p
 def test_receipt_verifier_rejects_artifact_path_escape_before_read(tmp_path: Path) -> None:
     outside = tmp_path / "outside.bin"
     outside.write_bytes(b"do-not-read")
-    chain = ReceiptChain(tmp_path / "evidence", "run-escape", MemoryRunKeyStore(), profile_version="1", policy_version="3.1.3")
+    evidence_root = tmp_path / "evidence"
+    chain = ReceiptChain(evidence_root, "run-escape", FileRunKeyStore(evidence_root), profile_version="1", policy_version="3.1.3")
     chain.append("audit", {"artifact": "../../outside.bin", "artifact_hash": chain.hash_file(outside)})
     chain.seal()
     result = verify_receipt_store(chain.root)
@@ -144,7 +145,7 @@ def test_receipt_verifier_rejects_chain_resigned_by_untrusted_key(tmp_path: Path
     trusted = ReceiptChain(
         tmp_path / "evidence",
         "run-1",
-        MemoryRunKeyStore(),
+        FileRunKeyStore(tmp_path / "evidence"),
         profile_version="1",
         policy_version="3.1.3",
     )
@@ -155,7 +156,7 @@ def test_receipt_verifier_rejects_chain_resigned_by_untrusted_key(tmp_path: Path
     forged = ReceiptChain(
         tmp_path / "attacker",
         "run-1",
-        MemoryRunKeyStore(),
+        FileRunKeyStore(tmp_path / "attacker"),
         profile_version="1",
         policy_version="3.1.3",
     )
@@ -169,6 +170,52 @@ def test_receipt_verifier_rejects_chain_resigned_by_untrusted_key(tmp_path: Path
     result = verify_receipt_store(trusted.root)
     assert result.status == "tampered"
     assert result.finding == "manifest_signer_untrusted"
+
+
+def test_receipt_verifier_rejects_anchor_substitution_with_forged_chain(
+    tmp_path: Path,
+) -> None:
+    trusted_root = tmp_path / "trusted"
+    trusted = ReceiptChain(
+        trusted_root,
+        "run",
+        FileRunKeyStore(trusted_root),
+        profile_version="1",
+        policy_version="3.1.3",
+    )
+    trusted.append("run_attested", {"mode": "dry_run"})
+    trusted.seal()
+
+    attacker_root = tmp_path / "attacker"
+    forged = ReceiptChain(
+        attacker_root,
+        "run",
+        FileRunKeyStore(attacker_root),
+        profile_version="1",
+        policy_version="3.1.3",
+    )
+    forged.append("run_attested", {"mode": "live"})
+    forged.seal()
+
+    trusted_private_before = (trusted_root / ".torq-receipt-signing-key").read_bytes()
+    (trusted_root / ".torq-receipt-signing-key.pub").write_bytes(
+        (attacker_root / ".torq-receipt-signing-key.pub").read_bytes()
+    )
+    (trusted.root / "receipts.jsonl").write_bytes(
+        (forged.root / "receipts.jsonl").read_bytes()
+    )
+    (trusted.root / "terminal-manifest.json").write_bytes(
+        (forged.root / "terminal-manifest.json").read_bytes()
+    )
+    assert (trusted_root / ".torq-receipt-signing-key").read_bytes() == trusted_private_before
+    assert signing_file_permissions_are_restricted(
+        trusted_root / ".torq-receipt-signing-key.pub"
+    )
+
+    result = verify_receipt_store(trusted.root)
+
+    assert result.status == "tampered"
+    assert result.finding == "trust_anchor_substituted"
 
 
 def test_file_key_store_persists_one_signing_identity_outside_run_directories(

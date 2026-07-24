@@ -566,11 +566,41 @@ class ReceiptChain:
         return target
 
     def verify(self, manifest_path: Path) -> Verification:
-        result = verify_receipt_store(manifest_path.parent)
+        trusted_public_key = (
+            Ed25519PrivateKey.from_private_bytes(self.key)
+            .public_key()
+            .public_bytes_raw()
+        )
+        result = verify_receipt_store(
+            manifest_path.parent,
+            trusted_public_key=trusted_public_key,
+        )
         return Verification(result.status == "verified", result.finding)
 
 
-def verify_receipt_store(root: Path) -> StoreVerification:
+def _trusted_public_key_from_private_identity(evidence_root: Path) -> bytes:
+    private_path = evidence_root / _PRIVATE_KEY_NAME
+    metadata = private_path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError("receipt_signing_key_unsafe")
+    if not signing_file_permissions_are_restricted(private_path):
+        raise PermissionError("receipt_signing_key_permissions_unsafe")
+    encoded = private_path.read_bytes().strip()
+    if len(encoded) != 64:
+        raise ValueError("receipt_signing_key_invalid")
+    private_key = bytes.fromhex(encoded.decode("ascii"))
+    return (
+        Ed25519PrivateKey.from_private_bytes(private_key)
+        .public_key()
+        .public_bytes_raw()
+    )
+
+
+def verify_receipt_store(
+    root: Path,
+    *,
+    trusted_public_key: bytes | None = None,
+) -> StoreVerification:
     receipts_path = root / "receipts.jsonl"
     manifest_path = root / "terminal-manifest.json"
     if not receipts_path.exists() or not manifest_path.exists():
@@ -620,7 +650,16 @@ def verify_receipt_store(root: Path) -> StoreVerification:
         if not anchor_restricted:
             return StoreVerification("tampered", "trust_anchor_unsafe")
         pinned_public_key = bytes.fromhex(pin_path.read_text(encoding="ascii").strip())
-        if not hmac.compare_digest(public_key, pinned_public_key):
+        if trusted_public_key is None:
+            try:
+                trusted_public_key = _trusted_public_key_from_private_identity(root.parent)
+            except FileNotFoundError:
+                return StoreVerification("incomplete", "trust_identity_missing")
+            except (OSError, PermissionError, ValueError):
+                return StoreVerification("tampered", "trust_identity_unsafe")
+        if not hmac.compare_digest(pinned_public_key, trusted_public_key):
+            return StoreVerification("tampered", "trust_anchor_substituted")
+        if not hmac.compare_digest(public_key, trusted_public_key):
             return StoreVerification("tampered", "manifest_signer_untrusted")
         if signed.get("terminal_receipt_hash") != previous or signed.get("receipt_count") != len(lines):
             return StoreVerification("incomplete", "manifest_coverage_mismatch")

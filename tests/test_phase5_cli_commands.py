@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from torq_cli.interfaces.cli import main
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
+from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 from test_phase5_cli_experience import _answers
 
@@ -36,7 +36,7 @@ def test_run_command_dry_default_and_evidence_verify_exit_codes(tmp_path, capsys
     assert verify_receipt_store(receipt_root).status == "verified"
     assert main(["evidence", "verify", "--run-root", run_output["receipts"]]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "verified"
-    chain = ReceiptChain(tmp_path, "evidence", MemoryRunKeyStore(), profile_version="1", policy_version="3.1.3")
+    chain = ReceiptChain(tmp_path, "evidence", FileRunKeyStore(tmp_path), profile_version="1", policy_version="3.1.3")
     chain.append("done", {})
     chain.seal()
     assert main(["evidence", "verify", "--run-root", str(chain.root)]) == 0

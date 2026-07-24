@@ -9,7 +9,7 @@ from pathlib import Path
 from torq_cli.connectors import Connector, MemoryVault, MockSurface, all_connector_specs
 from torq_cli.safety.approval import ApprovalBoundary, ChangeProposal
 from torq_cli.safety.governed import EvidenceBundle, GovernedRun
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain, verify_receipt_store
+from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 from torq_cli.safety.usage import summarize_usage
 from torq_cli.safety.workspace import WorkspaceManager
 
@@ -53,7 +53,8 @@ def run_governed_fixture(root: Path, *, date: str) -> Path:
         diff_hash = _sha256(content)
         evidence = EvidenceBundle(("flag_parser.py",), diff_hash, "pytest -q", "passed", {"flag_parser.py": _sha256(content)})
         governed = GovernedRun(loop_budget=1).execute(evidence=evidence, defect={"severity": "HIGH", "class": "bug"})
-        chain = ReceiptChain(root / "evidence", "e2e", MemoryRunKeyStore(), profile_version="1.0.0", policy_version="3.1.3")
+        evidence_root = root / "evidence"
+        chain = ReceiptChain(evidence_root, "e2e", FileRunKeyStore(evidence_root), profile_version="1.0.0", policy_version="3.1.3")
         artifact = chain.write_artifact("flag-parser.diff", content.decode())
         chain.append("design", {"provider": "claude", "result": design})
         chain.append("build", {"provider": "deepseek", "result": build})
