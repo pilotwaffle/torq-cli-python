@@ -9,6 +9,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
+from torq_cli.core.graph import ExecutionMode
+from torq_cli.domain.registry_schema import ProfileSpec, load_registry
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
@@ -35,8 +38,13 @@ class Checkpoint:
 
 
 class RunController:
-    def __init__(self, run_root: Path) -> None:
+    def __init__(
+        self,
+        run_root: Path,
+        orchestrator: GovernedOrchestrator | None = None,
+    ) -> None:
         self.run_root = run_root
+        self.orchestrator = orchestrator or GovernedOrchestrator()
 
     def start(
         self,
@@ -47,6 +55,8 @@ class RunController:
         live: bool = False,
         live_opt_in: bool = False,
         policy_opt_in: bool = False,
+        goal: str = "",
+        profile: ProfileSpec | None = None,
     ) -> dict[str, Any]:
         for field, expected_value in expected.items():
             observed = actual.get(field)
@@ -56,6 +66,9 @@ class RunController:
                 raise ValueError(f"attestation_mismatch:{field}")
         if live and not (live_opt_in and policy_opt_in):
             raise ValueError("double_opt_in_required")
+        if live and self.orchestrator.dispatcher is None:
+            raise OrchestrationBlocked("live_dispatcher_required")
+        selected_profile = profile or self._profile(identity.profile_version)
         mode = "live" if live else "dry_run"
         run_id = "run-" + uuid.uuid4().hex
         chain = ReceiptChain(
@@ -73,6 +86,12 @@ class RunController:
                 "attested_fields": sorted(expected),
             },
         )
+        result = self.orchestrator.execute(
+            goal=goal,
+            profile=selected_profile,
+            mode=ExecutionMode.LIVE if live else ExecutionMode.DRY_RUN,
+            chain=chain,
+        )
         chain.seal()
         verification = verify_receipt_store(chain.root)
         if verification.status != "verified":
@@ -82,7 +101,26 @@ class RunController:
             "attested": True,
             "run_id": run_id,
             "receipts": str(chain.root),
+            "verdict": result.status,
+            "planned_roles": result.planned_roles,
+            "dispatched_roles": result.dispatched_roles,
+            "usage": result.usage,
+            "proposal": result.proposal,
+            "repair_cycles": result.repair_cycles,
+            "timeline": result.timeline,
         }
+
+    @staticmethod
+    def _profile(profile_version: str) -> ProfileSpec:
+        registry = load_registry()
+        matches = [
+            profile
+            for profile in registry.profiles.values()
+            if profile.default and profile.profile_version == profile_version
+        ]
+        if len(matches) != 1:
+            raise ValueError("profile_version_unknown")
+        return matches[0]
 
     def cancel(self, run_id: str, identity: RunIdentity, *, completed: tuple[str, ...]) -> Path:
         directory = self.run_root / run_id
