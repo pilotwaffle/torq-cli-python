@@ -1,5 +1,9 @@
 schema: torq-provider-surface-matrix-v1
 observed_at: '2026-07-23'
+surface_evidence_provenance:
+  kind: operator_transcribed_observation
+  machine_generated: false
+  receipt_backed: false
 providers:
   claude:
     surfaces:

@@ -187,7 +187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
                 actual = json.loads(Path(args.actual).read_text(encoding="utf-8"))
                 report = controller.start(identity, actual, expected=expected, live=args.live, live_opt_in=args.allow_live, policy_opt_in=args.policy_allow_live)
-                report.update({"verdict": "dry_run_complete" if not args.live else "awaiting_approval", "usage": "unreported", "proposal": None, "receipts": str(Path(args.run_root))})
+                report.update({"verdict": "dry_run_complete" if not args.live else "awaiting_approval", "usage": "unreported", "proposal": None})
             print(json.dumps(report, sort_keys=True))
             return 0
         except ValueError as exc:

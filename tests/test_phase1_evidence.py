@@ -63,6 +63,11 @@ def test_provider_matrix_is_closed_complete_and_consumable() -> None:
     matrix = load_provider_matrix()
 
     assert set(matrix["providers"]) == set(PROVIDERS)
+    assert matrix["surface_evidence_provenance"] == {
+        "kind": "operator_transcribed_observation",
+        "machine_generated": False,
+        "receipt_backed": False,
+    }
     assert validate_provider_matrix(matrix) == ()
     for provider in matrix["providers"].values():
         assert set(provider["surfaces"]) == set(REQUIRED_SURFACES)
@@ -122,3 +127,5 @@ def test_provider_matrix_document_names_every_provider_and_security_boundary() -
     assert "2026-07-23" in text
     assert "explicit external credential source" in text
     assert "unattestable" in text
+    assert "not machine-generated attestation" in text
+    assert "not receipt-backed" in text

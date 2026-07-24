@@ -30,6 +30,11 @@ _DECISION_FLAGS = {
     "deepseek": "deepseek_mmh_primary",
 }
 _CELL_STATUSES = {"verified", "unavailable", "blocked", "unattestable", "unreported"}
+_SURFACE_EVIDENCE_PROVENANCE = {
+    "kind": "operator_transcribed_observation",
+    "machine_generated": False,
+    "receipt_backed": False,
+}
 
 
 def load_provider_matrix() -> dict[str, Any]:
@@ -42,7 +47,11 @@ def load_provider_matrix() -> dict[str, Any]:
 
 def validate_provider_matrix(matrix: Mapping[str, Any]) -> tuple[str, ...]:
     errors: list[str] = []
-    if set(matrix) != {"schema", "observed_at", "providers"} or matrix.get("schema") != "torq-provider-surface-matrix-v1":
+    if (
+        set(matrix) != {"schema", "observed_at", "surface_evidence_provenance", "providers"}
+        or matrix.get("schema") != "torq-provider-surface-matrix-v1"
+        or matrix.get("surface_evidence_provenance") != _SURFACE_EVIDENCE_PROVENANCE
+    ):
         errors.append("root_invalid")
     providers = matrix.get("providers")
     if not isinstance(providers, Mapping) or set(providers) != set(PROVIDERS):
