@@ -15,6 +15,7 @@ from torq_cli.safety.receipts import (
     FileRunKeyStore,
     MemoryRunKeyStore,
     ReceiptChain,
+    private_key_permissions_are_restricted,
     verify_receipt_store,
 )
 from torq_cli.safety.usage import summarize_usage
@@ -195,7 +196,9 @@ def test_file_key_store_persists_one_signing_identity_outside_run_directories(
     assert first_manifest["public_key"] == second_manifest["public_key"]
     assert verify_receipt_store(first.root).status == "verified"
     assert verify_receipt_store(second.root).status == "verified"
-    assert (evidence_root / ".torq-receipt-signing-key").is_file()
+    private_key = evidence_root / ".torq-receipt-signing-key"
+    assert private_key.is_file()
+    assert private_key_permissions_are_restricted(private_key)
     assert (evidence_root / ".torq-receipt-signing-key.pub").is_file()
 
 
