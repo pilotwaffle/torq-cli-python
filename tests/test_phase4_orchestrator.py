@@ -10,6 +10,7 @@ from torq_cli.application.orchestrator import (
     ConnectorDispatcher,
     GovernedOrchestrator,
     OrchestrationBlocked,
+    StageDispatcher,
 )
 from torq_cli.application.run_command import RunController, RunIdentity
 from torq_cli.connectors import Connector, MemoryVault, MockSurface, all_connector_specs
@@ -22,6 +23,30 @@ from torq_cli.safety.receipts import (
     ReceiptChain,
     verify_receipt_store,
 )
+
+
+_COST_CEILINGS = {
+    "g1d": 0.10,
+    "g1r": 0.10,
+    "builder": 0.10,
+    "g2a": 0.10,
+    "refine_bug": 0.10,
+    "refine_ui": 0.10,
+}
+
+
+def _orchestrator(
+    dispatcher: StageDispatcher,
+    *,
+    loop_budget: int = 1,
+    budget_usd: float = 1.0,
+) -> GovernedOrchestrator:
+    return GovernedOrchestrator(
+        dispatcher,
+        loop_budget=loop_budget,
+        budget_usd=budget_usd,
+        cost_ceiling_usd_by_role=_COST_CEILINGS,
+    )
 
 
 def _payload(provider: str, model: str, body: Mapping[str, object]) -> dict[str, object]:
@@ -131,7 +156,7 @@ def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approv
         policy_version="3.1.3",
     )
 
-    result = GovernedOrchestrator(ConnectorDispatcher(connectors)).execute(
+    result = _orchestrator(ConnectorDispatcher(connectors)).execute(
         goal="Implement the requested change",
         profile=profile,
         mode=ExecutionMode.LIVE,
@@ -144,11 +169,15 @@ def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approv
     assert result.proposal is not None
     assert result.proposal["source_role"] == "builder"
     assert result.usage["agents"]["builder"]["usage"]["tokens"] == 5
+    assert result.usage["budget"] == {
+        "consumed_usd": 0.4,
+        "remaining_usd": 0.6,
+    }
     assert verify_receipt_store(chain.root).status == "verified"
 
     controller = RunController(
         tmp_path / "controller-evidence",
-        GovernedOrchestrator(ConnectorDispatcher(connectors)),
+        _orchestrator(ConnectorDispatcher(connectors)),
     )
     identity = RunIdentity(
         profile.profile_version,
@@ -222,7 +251,7 @@ def test_high_bug_routes_to_refine_bug_and_targeted_reaudit(tmp_path: Path) -> N
         policy_version="3.1.3",
     )
 
-    result = GovernedOrchestrator(dispatcher, loop_budget=1).execute(
+    result = _orchestrator(dispatcher, loop_budget=1).execute(
         goal="Fix the defect",
         profile=profile,
         mode=ExecutionMode.LIVE,
@@ -243,6 +272,97 @@ def test_high_bug_routes_to_refine_bug_and_targeted_reaudit(tmp_path: Path) -> N
         and receipt["payload"]["role"] == "g2a"
         for receipt in receipts
     ) == 2
+
+
+def test_critical_defect_preempts_earlier_repairable_defect(tmp_path: Path) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    dispatcher = _ScriptedDispatcher(
+        {
+            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
+            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+            "g2a": [
+                _response(
+                    "openai",
+                    "gpt-5.5-thinking",
+                    {
+                        "verdict": "reject",
+                        "defects": [
+                            {"severity": "HIGH", "class": "bug"},
+                            {"severity": "CRITICAL", "class": "security"},
+                        ],
+                    },
+                )
+            ],
+        }
+    )
+    chain = ReceiptChain(
+        tmp_path / "critical",
+        "run",
+        MemoryRunKeyStore(),
+        profile_version=profile.profile_version,
+        policy_version="3.1.3",
+    )
+
+    result = _orchestrator(dispatcher).execute(
+        goal="Escalate the critical defect",
+        profile=profile,
+        mode=ExecutionMode.LIVE,
+        chain=chain,
+    )
+
+    assert result.status == "human_escalation"
+    assert dispatcher.calls == ["g1d", "g1r", "builder", "g2a"]
+
+
+def test_live_cost_budget_is_checked_before_provider_dispatch(tmp_path: Path) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    dispatcher = _ScriptedDispatcher(
+        {"g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})]}
+    )
+    chain = ReceiptChain(
+        tmp_path / "budget",
+        "run",
+        MemoryRunKeyStore(),
+        profile_version=profile.profile_version,
+        policy_version="3.1.3",
+    )
+
+    with pytest.raises(OrchestrationBlocked, match="budget_preflight_blocked:g1d"):
+        _orchestrator(dispatcher, budget_usd=0.05).execute(
+            goal="Do not exceed the budget",
+            profile=profile,
+            mode=ExecutionMode.LIVE,
+            chain=chain,
+        )
+
+    assert dispatcher.calls == []
+
+
+def test_run_controller_rejects_policy_label_mismatch_before_receipts(
+    tmp_path: Path,
+) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    controller = RunController(tmp_path)
+    identity = RunIdentity(
+        profile.profile_version,
+        "4.0.0",
+        "registry-v1",
+        "profile-bound",
+        "sandbox-test",
+        1,
+        "prior-chain",
+    )
+
+    with pytest.raises(ValueError, match="policy_version_mismatch"):
+        controller.start(
+            identity,
+            {"profile": profile.profile_id},
+            expected={"profile": profile.profile_id},
+            profile=profile,
+        )
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_loop_exhaustion_and_off_contract_output_halt_fail_closed(tmp_path: Path) -> None:
@@ -271,7 +391,7 @@ def test_loop_exhaustion_and_off_contract_output_halt_fail_closed(tmp_path: Path
         profile_version=profile.profile_version,
         policy_version="3.1.3",
     )
-    exhausted = GovernedOrchestrator(exhausted_dispatcher, loop_budget=0).execute(
+    exhausted = _orchestrator(exhausted_dispatcher, loop_budget=0).execute(
         goal="Bound the repair loop",
         profile=profile,
         mode=ExecutionMode.LIVE,
@@ -293,7 +413,7 @@ def test_loop_exhaustion_and_off_contract_output_halt_fail_closed(tmp_path: Path
         policy_version="3.1.3",
     )
     with pytest.raises(OrchestrationBlocked, match="off_contract_stage:g1d:status"):
-        GovernedOrchestrator(off_contract).execute(
+        _orchestrator(off_contract).execute(
             goal="Reject ambiguous stage output",
             profile=profile,
             mode=ExecutionMode.LIVE,
@@ -328,7 +448,7 @@ def test_live_orchestration_fails_closed_without_dispatcher_or_model_attestation
         }
     )
     with pytest.raises(OrchestrationBlocked, match="resolved_model_mismatch:g1d"):
-        GovernedOrchestrator(mismatch).execute(
+        _orchestrator(mismatch).execute(
             goal="Do not fake attestation",
             profile=profile,
             mode=ExecutionMode.LIVE,

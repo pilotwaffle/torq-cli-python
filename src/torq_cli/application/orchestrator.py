@@ -83,12 +83,18 @@ class GovernedOrchestrator:
         *,
         loop_budget: int = 1,
         budget_usd: float = 0.0,
+        cost_ceiling_usd_by_role: Mapping[str, float] | None = None,
     ) -> None:
         if loop_budget < 0:
             raise ValueError("loop_budget_must_be_nonnegative")
+        if budget_usd < 0:
+            raise ValueError("budget_usd_must_be_nonnegative")
         self.dispatcher = dispatcher
         self.loop_budget = loop_budget
         self.budget_usd = budget_usd
+        self.cost_ceiling_usd_by_role = dict(cost_ceiling_usd_by_role or {})
+        if any(cost < 0 for cost in self.cost_ceiling_usd_by_role.values()):
+            raise ValueError("cost_ceiling_must_be_nonnegative")
         self.registry = PatternRegistry.default()
         self.policy = G2APolicy()
 
@@ -225,6 +231,7 @@ class GovernedOrchestrator:
         binding = profile.bindings.get(role)
         if binding is None:
             raise OrchestrationBlocked(f"profile_binding_missing:{role}")
+        cost_usd = self._preflight_cost(role, usage_rows)
         prompt = self._prompt(role, goal, context, binding)
         clean_prompt, findings = self.registry.scan(prompt)
         chain.append(
@@ -265,7 +272,8 @@ class GovernedOrchestrator:
         usage_rows.append({
             "provider": binding.provider_id,
             "agent": role,
-            "cost_usd": 0.0,
+            "cost_usd": cost_usd,
+            "cost_basis": "configured_worst_case",
             "usage": usage,
         })
         dispatched.append(role)
@@ -277,11 +285,24 @@ class GovernedOrchestrator:
                 "model": provenance.model,
                 "fallback_used": provenance.fallback_used,
                 "usage": usage,
+                "cost_usd": cost_usd,
+                "cost_basis": "configured_worst_case",
                 "artifact": str(artifact.relative_to(chain.root)),
                 "artifact_hash": artifact_hash,
             },
         )
         return body
+
+    def _preflight_cost(
+        self, role: str, usage_rows: list[dict[str, Any]]
+    ) -> float:
+        if role not in self.cost_ceiling_usd_by_role:
+            raise OrchestrationBlocked(f"cost_ceiling_required:{role}")
+        ceiling = float(self.cost_ceiling_usd_by_role[role])
+        consumed = sum(float(row["cost_usd"]) for row in usage_rows)
+        if consumed + ceiling > self.budget_usd:
+            raise OrchestrationBlocked(f"budget_preflight_blocked:{role}")
+        return ceiling
 
     @staticmethod
     def _prompt(
@@ -332,6 +353,7 @@ class GovernedOrchestrator:
         defects = audit.get("defects", ())
         if not isinstance(defects, list):
             raise OrchestrationBlocked("malformed_audit_defects")
+        repair_lane: str | None = None
         for index, raw in enumerate(defects):
             if not isinstance(raw, Mapping):
                 raise OrchestrationBlocked("malformed_audit_defect")
@@ -342,11 +364,11 @@ class GovernedOrchestrator:
                 status=str(raw.get("status", "open")),
             )
             route = self.policy.route(defect)
-            if route.lane in {"refine_bug", "refine_ui"}:
-                return route.lane
             if route.lane == "human_escalation":
                 return "human_escalation"
-        return None
+            if repair_lane is None and route.lane in {"refine_bug", "refine_ui"}:
+                repair_lane = route.lane
+        return repair_lane
 
     def _finish(
         self,

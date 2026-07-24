@@ -69,6 +69,10 @@ class RunController:
         if live and self.orchestrator.dispatcher is None:
             raise OrchestrationBlocked("live_dispatcher_required")
         selected_profile = profile or self._profile(identity.profile_version)
+        if selected_profile.profile_version != identity.profile_version:
+            raise ValueError("profile_version_mismatch")
+        if identity.policy_version != self.orchestrator.policy.version:
+            raise ValueError("policy_version_mismatch")
         mode = "live" if live else "dry_run"
         run_id = "run-" + uuid.uuid4().hex
         chain = ReceiptChain(
