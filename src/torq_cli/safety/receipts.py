@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import secrets
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,16 +19,66 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from torq_cli.core.redaction import PatternRegistry
 
 
+_PRIVATE_KEY_NAME = ".torq-receipt-signing-key"
+_PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
+
+
 class RunKeyStore(Protocol):
     def get_or_create(self, run_id: str) -> bytes: ...
 
 
 class MemoryRunKeyStore:
     def __init__(self) -> None:
-        self._keys: dict[str, bytes] = {}
+        self._key = secrets.token_bytes(32)
 
     def get_or_create(self, run_id: str) -> bytes:
-        return self._keys.setdefault(run_id, secrets.token_bytes(32))
+        del run_id
+        return self._key
+
+
+class FileRunKeyStore:
+    """Persistent run-root signing identity protected by local filesystem ACLs."""
+
+    def __init__(self, evidence_root: Path) -> None:
+        self.evidence_root = evidence_root
+        self.private_key_path = evidence_root / _PRIVATE_KEY_NAME
+
+    @staticmethod
+    def _read_regular_key(path: Path) -> bytes:
+        metadata = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("receipt_signing_key_unsafe")
+        encoded = path.read_bytes().strip()
+        if len(encoded) != 64:
+            raise ValueError("receipt_signing_key_invalid")
+        try:
+            return bytes.fromhex(encoded.decode("ascii"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("receipt_signing_key_invalid") from exc
+
+    def get_or_create(self, run_id: str) -> bytes:
+        del run_id
+        self.evidence_root.mkdir(parents=True, exist_ok=True)
+        try:
+            return self._read_regular_key(self.private_key_path)
+        except FileNotFoundError:
+            key = secrets.token_bytes(32)
+            encoded = key.hex().encode("ascii")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(self.private_key_path, flags, 0o600)
+            except FileExistsError:
+                return self._read_regular_key(self.private_key_path)
+            try:
+                if os.write(descriptor, encoded) != len(encoded):
+                    raise OSError("receipt_signing_key_short_write")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.chmod(self.private_key_path, 0o600)
+            return key
 
 
 @dataclass(frozen=True)
@@ -55,11 +106,36 @@ class ReceiptChain:
         self.root.mkdir(parents=True, exist_ok=True)
         self.receipts_path = self.root / "receipts.jsonl"
         self.key = keys.get_or_create(run_id)
+        self._pin_signing_identity(evidence_root)
         self.profile_version = profile_version
         self.policy_version = policy_version
         self.registry = PatternRegistry.default()
         self._sequence = 0
         self._previous: str | None = None
+
+    def _pin_signing_identity(self, evidence_root: Path) -> None:
+        public_key = Ed25519PrivateKey.from_private_bytes(self.key).public_key().public_bytes_raw()
+        pin_path = evidence_root / _PUBLIC_KEY_NAME
+        encoded = public_key.hex().encode("ascii")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(pin_path, flags, 0o600)
+        except FileExistsError:
+            metadata = pin_path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("receipt_trust_anchor_unsafe")
+            if not hmac.compare_digest(pin_path.read_bytes().strip(), encoded):
+                raise ValueError("receipt_signing_key_mismatch")
+            return
+        try:
+            if os.write(descriptor, encoded) != len(encoded):
+                raise OSError("receipt_trust_anchor_short_write")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.chmod(pin_path, 0o600)
 
     @staticmethod
     def hash_file(path: Path) -> str:
@@ -171,6 +247,16 @@ def verify_receipt_store(root: Path) -> StoreVerification:
         signed = json.loads(manifest_path.read_text(encoding="utf-8"))
         signature = bytes.fromhex(str(signed.pop("signature")))
         public_key = bytes.fromhex(str(signed.pop("public_key")))
+        pin_path = root.parent / _PUBLIC_KEY_NAME
+        try:
+            pin_metadata = pin_path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return StoreVerification("incomplete", "trust_anchor_missing")
+        if not stat.S_ISREG(pin_metadata.st_mode) or pin_metadata.st_nlink != 1:
+            return StoreVerification("tampered", "trust_anchor_unsafe")
+        pinned_public_key = bytes.fromhex(pin_path.read_text(encoding="ascii").strip())
+        if not hmac.compare_digest(public_key, pinned_public_key):
+            return StoreVerification("tampered", "manifest_signer_untrusted")
         if signed.get("terminal_receipt_hash") != previous or signed.get("receipt_count") != len(lines):
             return StoreVerification("incomplete", "manifest_coverage_mismatch")
         body = json.dumps(signed, sort_keys=True, separators=(",", ":")).encode()

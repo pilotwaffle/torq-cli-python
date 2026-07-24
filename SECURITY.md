@@ -29,12 +29,18 @@ audited diff against its pinned starting tree hash.
 The shared pattern registry runs before provider egress and again before
 persistence. Receipts are sequence-numbered and hash-chained; artifacts carry
 content hashes and are encrypted at rest; an Ed25519 terminal manifest seals
-the chain. `torq evidence verify` checks the store offline.
+the chain. The CLI persists one signing identity in the run root, outside each
+per-run receipt directory, and pins its public key beside the private key.
+`torq evidence verify` checks the manifest signer against that external trust
+anchor before accepting the signature. Replacing a receipt directory with a
+newly generated and self-signed chain therefore fails as
+`manifest_signer_untrusted`.
 
 TORQ receipts are tamper-resistant, not tamper-proof. The receipt hash chain,
 artifact hashes, restrictive file permissions, encryption at rest, and signed
-terminal manifest make casual or partial editing detectable. An attacker with
-the operator's own OS privileges and keychain access can rewrite and re-sign a
+terminal manifest make casual or receipt-directory-only replacement detectable.
+An attacker with the operator's own OS privileges who can also read or replace
+the run-root signing key and trust anchor can still rewrite and re-sign a
 complete local chain. Remote anchoring is future work and is not implied.
 
 Provider credentials must live behind the platform keychain or the documented
