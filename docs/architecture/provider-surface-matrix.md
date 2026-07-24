@@ -15,9 +15,9 @@ validation rather than silently gaining capabilities.
 | `claude` | Agent SDK / first-party CLI | Authentication, structured output, resume, and usage were verified. Cancellation, tool-event fidelity, working-directory control, and rate-limit behavior remain unavailable; resolved model identity is unattestable. |
 | `codex` | SDK / first-party CLI | Authentication, structured event output, and tool events were verified. Usage was not reported; resume, cancellation, working-directory control, and rate-limit behavior remain unavailable; resolved model identity is unattestable. |
 | `grok` | ACP when explicitly authorized | The installed CLI was unauthenticated. The current xAI acceptable-use boundary excludes an automated consumer fallback, so the provider remains unavailable until an approved integration is demonstrated. |
-| `kimi` | Direct API after approved credential setup | No approved vault-backed credential is currently available. |
-| `zai` | Direct API after approved credential setup | No approved vault-backed credential is available. Legacy wrappers are prohibited. |
-| `deepseek` | MMH/direct adapter after approved credential setup | No approved vault-backed credential is available. Legacy wrappers are prohibited. |
+| `kimi` | Direct API via the explicit external credential source | Credential discovery is configured. A bounded Claude-compatible live probe timed out before returning an attested response. |
+| `zai` | Direct API via the explicit external credential source | A tool-disabled live JSON probe succeeded and independently reported `glm-5.2` in `modelUsage`. |
+| `deepseek` | MMH/Claude-compatible adapter via the explicit external credential source | A tool-disabled live JSON probe succeeded and independently reported `deepseek-v4-pro` in `modelUsage`. |
 
 ## Security and release boundary
 

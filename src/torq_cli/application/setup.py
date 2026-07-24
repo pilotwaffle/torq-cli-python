@@ -8,6 +8,9 @@ from typing import Any
 
 import yaml
 
+from torq_cli.connectors.credential_sources import ExplicitEnvVault
+from torq_cli.domain.registry_schema import load_registry
+
 
 class SetupError(ValueError):
     pass
@@ -15,6 +18,13 @@ class SetupError(ValueError):
 
 _REQUIRED_ROLES = {"g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui"}
 _ELIGIBILITY = {"builder": {"deepseek", "codex"}, "refine_bug": {"kimi"}, "refine_ui": {"zai", "codex"}}
+_REGISTRY_PROVIDER = {
+    "claude": "anthropic",
+    "codex": "openai",
+    "deepseek": "deepseek",
+    "kimi": "moonshot",
+    "zai": "zai",
+}
 
 
 class SetupService:
@@ -40,16 +50,69 @@ class SetupService:
         policy = answers.get("policy")
         if not isinstance(policy, Mapping) or policy.get("independence_mode") not in {"profile_minimum", "vendor_strict"}:
             raise SetupError("policy_invalid:independence_mode")
-        document = {
+        credential_source: dict[str, str] | None = None
+        raw_credential_file = answers.get("credential_file")
+        if raw_credential_file is not None:
+            source = Path(str(raw_credential_file))
+            vault = ExplicitEnvVault(source)
+            direct_providers = {
+                str(raw.get("provider"))
+                for raw in bindings.values()
+                if isinstance(raw, Mapping) and raw.get("provider") in {"deepseek", "kimi", "zai"}
+            }
+            missing = sorted(provider for provider in direct_providers if vault.get(provider) is None)
+            if missing:
+                raise SetupError("provider_credential_missing:" + ",".join(missing))
+            credential_source = {"kind": "external_env", "path": str(source)}
+        registry = load_registry()
+        profile_id = str(answers.get("profile"))
+        profile_version = str(answers.get("profile_version"))
+        profile = registry.profiles.get(profile_id)
+        if profile is None or profile.profile_version != profile_version:
+            raise SetupError("profile_unknown")
+        overrides: dict[str, dict[str, object]] = {}
+        connectors: dict[str, dict[str, object]] = {}
+        for role, raw in sorted(bindings.items()):
+            assert isinstance(raw, Mapping)
+            expected = profile.bindings[str(role)]
+            provider = str(raw.get("provider"))
+            model = str(raw.get("model"))
+            if _REGISTRY_PROVIDER.get(provider) != expected.provider_id or model != expected.model_id:
+                raise SetupError(f"binding_profile_mismatch:{role}")
+            connector_id = str(role).replace("_", "-") + "-main"
+            overrides[str(role)] = {"connector_id": connector_id, "enabled": True}
+            connectors[connector_id] = {
+                "provider_id": expected.provider_id,
+                "surface": expected.connector_surface,
+                "enabled": True,
+            }
+        ceilings = policy.get("ceilings")
+        if not isinstance(ceilings, Mapping):
+            raise SetupError("policy_invalid:ceilings")
+        cost_usd = ceilings.get("cost_usd")
+        if not isinstance(cost_usd, (int, float)) or isinstance(cost_usd, bool):
+            raise SetupError("policy_invalid:cost_usd")
+        document: dict[str, Any] = {
             "config_version": int(answers.get("config_version", 1)),
-            "profile": {"id": str(answers.get("profile")), "version": str(answers.get("profile_version"))},
-            "policy_version": str(answers.get("policy_version")),
-            "bindings": {str(key): dict(value) for key, value in sorted(bindings.items())},
-            "policy": dict(policy),
+            "profile": {"id": profile_id, "version": profile_version},
+            "binding_overrides": overrides,
+            "connectors": connectors,
+            "policy": {
+                "independence_mode": policy["independence_mode"],
+                "unattestable_action": "deny",
+                "loop_budget": policy.get("loop_budget"),
+                "resource_limits": {
+                    "max_runtime_seconds": ceilings.get("runtime_seconds"),
+                    "max_cost_cents": round(float(cost_usd) * 100),
+                    "max_file_count": ceilings.get("file_count"),
+                    "max_changed_lines": ceilings.get("changed_lines"),
+                },
+            },
         }
+        if credential_source is not None:
+            document["credential_source"] = credential_source
         target.parent.mkdir(parents=True, exist_ok=True)
         rendered = yaml.safe_dump(document, sort_keys=True)
         if not target.exists() or target.read_text(encoding="utf-8") != rendered:
             target.write_text(rendered, encoding="utf-8")
         return document
-

@@ -36,7 +36,7 @@ def run_governed_fixture(root: Path, *, date: str) -> Path:
     (primary / "README.md").write_text("fixture\n", encoding="utf-8")
     handle = WorkspaceManager(root / "sandboxes").create(primary, "e2e", dirty=False)
     try:
-        _claude, design = _connector("claude", "fable-5", "g1d", root / "sessions")
+        _claude, design = _connector("claude", "claude-fable-5", "g1d", root / "sessions")
         _deepseek, build = _connector("deepseek", "deepseek-v4-pro", "builder", root / "sessions")
         _kimi, repair = _connector("kimi", "kimi-k3", "refine_bug", root / "sessions")
         content = (
@@ -91,4 +91,3 @@ def run_governed_fixture(root: Path, *, date: str) -> Path:
         return target
     finally:
         handle.release()
-

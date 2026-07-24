@@ -17,6 +17,7 @@ from torq_cli.application.resolve import envelope_to_dict, resolve_path
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.application.status_effective import effective_status
 from torq_cli.connectors.status import inspect_harness
+from torq_cli.connectors.credential_sources import CredentialSourceError, ExplicitEnvVault
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
 from torq_cli.safety.receipts import verify_receipt_store
@@ -86,7 +87,8 @@ def _parser() -> argparse.ArgumentParser:
     import_v5_console_parser.add_argument("--config", required=True)
     auth = sub.add_parser("auth")
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
-    auth_sub.add_parser("status")
+    auth_status_parser = auth_sub.add_parser("status")
+    auth_status_parser.add_argument("--credential-file")
     harness = sub.add_parser("harness")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     inspect = harness_sub.add_parser("inspect")
@@ -95,6 +97,7 @@ def _parser() -> argparse.ArgumentParser:
     setup = sub.add_parser("setup")
     setup.add_argument("--config", required=True)
     setup.add_argument("--answers", required=True)
+    setup.add_argument("--credential-file")
     run = sub.add_parser("run")
     run.add_argument("--goal")
     run.add_argument("--resume")
@@ -112,8 +115,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _matrix_auth_status() -> dict[str, Any]:
+def _matrix_auth_status(credential_file: str | None = None) -> dict[str, Any]:
     matrix = load_provider_matrix()
+    configured = (
+        ExplicitEnvVault(Path(credential_file)).configured_providers()
+        if credential_file is not None
+        else frozenset()
+    )
     rows: dict[str, Any] = {}
     for provider in PROVIDERS:
         surfaces = matrix["providers"][provider]["surfaces"]
@@ -125,7 +133,17 @@ def _matrix_auth_status() -> dict[str, Any]:
             state = "available"
         else:
             state = "unavailable"
-        rows[provider] = {"state": state, "authentication": auth, "resolved_model_identity": identity}
+        credential_configured = provider in configured
+        if credential_configured:
+            auth = "configured"
+            state = "unavailable"
+            identity = "unattestable"
+        rows[provider] = {
+            "state": state,
+            "authentication": auth,
+            "resolved_model_identity": identity,
+            "credential_configured": credential_configured,
+        }
     blocked = any(row["state"] != "available" for row in rows.values())
     return {"providers": rows, "exit_code": 3 if blocked else 0}
 
@@ -144,11 +162,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "setup":
         try:
             answers = json.loads(Path(args.answers).read_text(encoding="utf-8"))
+            if args.credential_file is not None:
+                answers = {**answers, "credential_file": args.credential_file}
             document = SetupService().configure(Path(args.config), answers)
             report = {"status": "configured", "config": str(Path(args.config)), "config_version": document["config_version"]}
             print(json.dumps(report, sort_keys=True))
             return 0
-        except SetupError as exc:
+        except (SetupError, CredentialSourceError) as exc:
             print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
             return 3
         except Exception:
@@ -181,7 +201,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"status": result.status, "finding": result.finding}, sort_keys=True))
         return result.exit_code
     if args.command == "auth":
-        report = _matrix_auth_status()
+        try:
+            report = _matrix_auth_status(args.credential_file)
+        except CredentialSourceError as exc:
+            print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
+            return 3
         print(json.dumps(report, sort_keys=True))
         return int(report["exit_code"])
     if args.command == "harness":

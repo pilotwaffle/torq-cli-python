@@ -17,15 +17,15 @@ def _answers() -> dict:
         "profile_version": "1.0.0",
         "policy_version": "3.1.3",
         "bindings": {
-            "g1d": {"provider": "claude", "model": "fable-5"},
-            "g1r": {"provider": "claude", "model": "opus-4.8"},
+            "g1d": {"provider": "claude", "model": "claude-fable-5"},
+            "g1r": {"provider": "claude", "model": "claude-opus-4-8"},
             "builder": {"provider": "deepseek", "model": "deepseek-v4-pro"},
             "g2a": {"provider": "codex", "model": "gpt-5.5-thinking"},
             "refine_bug": {"provider": "kimi", "model": "kimi-k3"},
             "refine_ui": {"provider": "zai", "model": "glm-5.2"},
         },
         "grants": {
-            "claude": ["fable-5", "opus-4.8"], "deepseek": ["deepseek-v4-pro"],
+            "claude": ["claude-fable-5", "claude-opus-4-8"], "deepseek": ["deepseek-v4-pro"],
             "codex": ["gpt-5.5-thinking"], "kimi": ["kimi-k3"], "zai": ["glm-5.2"],
         },
         "policy": {"independence_mode": "profile_minimum", "loop_budget": 2, "ceilings": {"runtime_seconds": 300, "cost_usd": 5, "file_count": 50, "changed_lines": 1000}},
@@ -43,8 +43,8 @@ def test_setup_zero_to_valid_idempotent_and_named_failures(tmp_path: Path) -> No
     with pytest.raises(SetupError, match="eligibility:ru_only"):
         service.configure(target, bad)
     ungranted = _answers()
-    ungranted["grants"]["claude"] = ["opus-4.8"]
-    with pytest.raises(SetupError, match="model_not_granted:fable-5"):
+    ungranted["grants"]["claude"] = ["claude-opus-4-8"]
+    with pytest.raises(SetupError, match="model_not_granted:claude-fable-5"):
         service.configure(target, ungranted)
 
 

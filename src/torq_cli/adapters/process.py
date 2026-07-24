@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 
 class ManagedProcess:
@@ -24,6 +25,22 @@ class ManagedProcess:
             text=True,
         )
 
+    @classmethod
+    def for_provider_config(
+        cls,
+        command: Sequence[str],
+        *,
+        cwd: str,
+        provider: str,
+        config: Mapping[str, Any],
+        base_environment: Mapping[str, str],
+    ) -> ManagedProcess:
+        """Start a provider child using only its config-resolved credential."""
+        from torq_cli.connectors.credential_sources import provider_environment_from_config
+
+        environment = provider_environment_from_config(config, provider, base_environment)
+        return cls(command, cwd=cwd, env=environment)
+
     def cancel_tree(self) -> None:
         if self.process.poll() is not None:
             return
@@ -37,4 +54,3 @@ class ManagedProcess:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.process.kill()
-

@@ -6,8 +6,10 @@
 never extract their underlying tokens. `Grok` uses an authenticated ACP surface
 when policy permits. `Kimi`, `Z.ai`, and `DeepSeek` use direct adapters whose
 tokens are retrieved only through the credential backend; plaintext config
-fields are rejected. Suspected exposure requires immediate rotation and blocks
-the connector until a replacement credential is captured and model-validated.
+fields are rejected. An explicitly supplied external env file may be used as a
+local compatibility credential source. TORQ never copies that file, serializes
+its values, or exposes more than the selected provider credential to a child
+process.
 
 The supported backends are Windows Credential Manager, macOS Keychain, and
 Linux Secret Service. Headless Linux uses an attended encrypted-file fallback;

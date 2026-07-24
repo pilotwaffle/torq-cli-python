@@ -46,6 +46,22 @@ def test_valid_closed_config_has_no_findings() -> None:
     assert findings == ()
 
 
+def test_optional_external_credential_source_is_closed_and_absolute() -> None:
+    config = valid_config()
+    config["credential_source"] = {"kind": "external_env", "path": r"C:\secure\.env"}
+    assert validate_config(config, load_registry()) == ()
+
+    for source in (
+        {"kind": "wrong", "path": r"C:\secure\.env"},
+        {"kind": "external_env", "path": "relative.env"},
+        {"kind": "external_env", "path": r"C:\secure\.env", "extra": True},
+    ):
+        changed = valid_config()
+        changed["credential_source"] = source
+        findings = validate_config(changed, load_registry())
+        assert any(finding.path.startswith("/credential_source") for finding in findings)
+
+
 def test_nfc_equivalent_duplicate_mapping_keys_are_parser_invalid() -> None:
     text = """config_version: 1
 profile:

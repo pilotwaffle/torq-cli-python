@@ -18,6 +18,7 @@ from .registry_schema import Registry
 
 _CRED_REF = re.compile(r"credref_[0-9a-f]{32}")
 _CONNECTOR_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:[\\/]")
 _FORBIDDEN_KEYS = {
     "api_key", "apikey", "secret", "secret_key", "access_token", "auth_token", "token",
     "password", "private_key", "credential", "credentials", "client_secret", "bearer_token",
@@ -233,7 +234,11 @@ def validate_config_shape(config: Mapping[str, Any], registry: Registry) -> tupl
     findings: list[Finding] = []
     if not isinstance(config, Mapping):
         return (FindingCatalog.make("config_schema_invalid", path="/"),)
-    findings.extend(reject_unknown_keys(config, {"config_version", "profile", "binding_overrides", "connectors", "policy"}, "/"))
+    findings.extend(reject_unknown_keys(
+        config,
+        {"config_version", "profile", "binding_overrides", "connectors", "policy", "credential_source"},
+        "/",
+    ))
     findings.extend(validate_config_version(config))
     for required in ("profile", "binding_overrides", "connectors", "policy"):
         if required not in config:
@@ -276,6 +281,25 @@ def validate_config_shape(config: Mapping[str, Any], registry: Registry) -> tupl
             findings.append(FindingCatalog.make("config_schema_invalid", path=path))
         elif connector["provider_id"] not in {"anthropic", "deepseek", "openai", "moonshot", "zai"} or connector["surface"] not in {"agent_sdk", "codex_sdk", "acp", "direct_api"}:
             findings.append(FindingCatalog.make("config_schema_invalid", path=path))
+    credential_source = config.get("credential_source")
+    if credential_source is not None:
+        if not isinstance(credential_source, Mapping):
+            findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source"))
+        else:
+            findings.extend(reject_unknown_keys(
+                credential_source,
+                {"kind", "path"},
+                "/credential_source",
+            ))
+            source_path = credential_source.get("path")
+            if credential_source.get("kind") != "external_env":
+                findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/kind"))
+            if (
+                not isinstance(source_path, str)
+                or not source_path
+                or not (source_path.startswith("/") or _WINDOWS_ABSOLUTE.match(source_path))
+            ):
+                findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/path"))
     policy = config.get("policy")
     if not isinstance(policy, Mapping):
         findings.append(FindingCatalog.make("config_schema_invalid", path="/policy"))
