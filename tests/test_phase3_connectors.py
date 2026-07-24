@@ -28,7 +28,10 @@ def _payload(model: str, *, usage: object = "unreported") -> dict:
 
 def test_all_six_connectors_conform_with_optional_unreported_usage(tmp_path: Path) -> None:
     specs = all_connector_specs()
-    assert set(specs) == {"claude", "codex", "grok", "kimi", "zai", "deepseek"}
+    assert set(specs) == {"claude", "codex", "qwen", "kimi", "zai", "deepseek"}
+    assert specs["codex"].required_models[0] == "gpt-5.5"
+    assert specs["qwen"].required_models == ("qwen3.8-max-preview",)
+    assert specs["kimi"].required_models[0] == "k3"
     assert specs["claude"].required_models == (
         "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5b"
     )
@@ -57,11 +60,11 @@ def test_auth_states_grants_and_session_isolation_fail_closed(tmp_path: Path) ->
 
 def test_codex_primary_fallback_resume_cancel_and_missing_auth(tmp_path: Path) -> None:
     spec = all_connector_specs()["codex"]
-    primary = MockSurface("sdk", _payload("gpt-5.5-thinking"), auth=AuthState.LOGGED_OUT)
-    fallback = MockSurface("cli_json", _payload("gpt-5.5-thinking"), grants=set(spec.required_models))
-    connector = Connector(spec, (primary, fallback), MemoryVault(), work_root=tmp_path)
+    primary = MockSurface("direct_api", _payload("gpt-5.5"), auth=AuthState.LOGGED_OUT)
+    fallback = MockSurface("cli_json", _payload("gpt-5.5"), grants=set(spec.required_models))
+    connector = Connector(spec, (primary, fallback), MemoryVault({"codex": "opaque"}), work_root=tmp_path)
     session = connector.open_session("g2a")
-    connector.call(model="gpt-5.5-thinking", prompt="x", agent="g2a", session_id=session.session_id)
+    connector.call(model="gpt-5.5", prompt="x", agent="g2a", session_id=session.session_id)
     assert connector.resume(session.session_id).session_id == session.session_id
     connector.cancel(session.session_id)
     assert connector.resume(session.session_id).cancelled is True
@@ -71,11 +74,11 @@ def test_codex_primary_fallback_resume_cancel_and_missing_auth(tmp_path: Path) -
 
 def test_direct_connectors_use_vault_classify_429_and_enforce_eligibility(tmp_path: Path) -> None:
     kimi_spec = all_connector_specs()["kimi"]
-    rate = MockSurface("direct_api", {}, grants={"kimi-k3"}, failure=ConnectorError("rate", FailureClass.RATE_LIMIT, retryable=True))
+    rate = MockSurface("direct_api", {}, grants={"k3"}, failure=ConnectorError("rate", FailureClass.RATE_LIMIT, retryable=True))
     kimi = Connector(kimi_spec, (rate,), MemoryVault({"kimi": "opaque"}), work_root=tmp_path, degradation_threshold=2)
     for _ in range(2):
         with pytest.raises(ConnectorError):
-            kimi.call(model="kimi-k3", prompt="x", agent="refine_bug")
+            kimi.call(model="k3", prompt="x", agent="refine_bug")
     assert kimi.health().state is LaneHealth.DEGRADED
     zai_spec = all_connector_specs()["zai"]
     zai = Connector(zai_spec, (MockSurface("direct_api", _payload("glm-5.2"), grants={"glm-5.2"}),), MemoryVault({"zai": "opaque"}), work_root=tmp_path)
@@ -100,10 +103,10 @@ def test_status_and_attestation_report_mixed_states_without_secrets(tmp_path: Pa
     connectors = {
         "claude": Connector(specs["claude"], (MockSurface("agent_sdk", _payload("fable-5"), grants=set(specs["claude"].required_models)),), MemoryVault(), work_root=tmp_path),
         "codex": Connector(specs["codex"], (), MemoryVault(), work_root=tmp_path),
-        "grok": Connector(specs["grok"], (MockSurface("acp", {}, auth=AuthState.LOGGED_OUT),), MemoryVault(), work_root=tmp_path),
+        "qwen": Connector(specs["qwen"], (MockSurface("anthropic_compatible", {}, auth=AuthState.LOGGED_OUT),), MemoryVault(), work_root=tmp_path),
         "kimi": Connector(specs["kimi"], (), MemoryVault({"kimi": "secret-never-print"}), work_root=tmp_path, blocked_reason="operator_policy_hold"),
     }
-    report = auth_status(connectors, {"g1d": ("claude", "fable-5"), "g2a": ("codex", "gpt-5.5-thinking")})
+    report = auth_status(connectors, {"g1d": ("claude", "fable-5"), "g2a": ("codex", "gpt-5.5")})
     rendered = json.dumps(report)
     assert "secret-never-print" not in rendered
     assert report["profiles"]["selected"]["state"] == "blocked"
@@ -116,4 +119,10 @@ def test_live_smoke_runner_is_manual_and_writes_dated_independent_report(tmp_pat
     assert runner.ci_allowed is False
     report = runner.run_independently({"claude": lambda: {"model": "fable-5", "usage": "unreported"}}, date="2026-07-23")
     assert report.name == "live-smoke-2026-07-23.json"
-    assert json.loads(report.read_text(encoding="utf-8"))["providers"]["claude"]["model"] == "fable-5"
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["providers"]["claude"]["model"] == "fable-5"
+    assert payload["provenance"] == {
+        "kind": "machine_generated_live_runner",
+        "machine_generated": True,
+        "receipt_backed": False,
+    }

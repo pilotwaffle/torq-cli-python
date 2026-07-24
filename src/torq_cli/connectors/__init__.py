@@ -127,9 +127,9 @@ def all_connector_specs() -> dict[str, ConnectorSpec]:
             None,
             ("claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5b"),
         ),
-        "codex": ConnectorSpec("codex", "sdk", "cli_json", ("gpt-5.5-thinking", "gpt-5.6-sol-high", "gpt-5.6-terra-high")),
-        "grok": ConnectorSpec("grok", "acp", "headless_cli", ("grok-build",)),
-        "kimi": ConnectorSpec("kimi", "direct_api", None, ("kimi-k3", "kimi-k2.7-code"), True, frozenset({"refine_bug"})),
+        "codex": ConnectorSpec("codex", "direct_api", "cli_json", ("gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"), True),
+        "qwen": ConnectorSpec("qwen", "anthropic_compatible", None, ("qwen3.8-max-preview",), True),
+        "kimi": ConnectorSpec("kimi", "direct_api", None, ("k3", "kimi-for-coding"), True, frozenset({"refine_bug"})),
         "zai": ConnectorSpec("zai", "direct_api", None, ("glm-5.2",), True, frozenset({"refine_ui", "ru"}), "ru_only"),
         "deepseek": ConnectorSpec("deepseek", "mmh_adapter", None, ("deepseek-v4-pro",), True, frozenset({"builder"})),
     }

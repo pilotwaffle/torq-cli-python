@@ -11,6 +11,7 @@ from torq_cli.connectors.credential_sources import (
     CredentialSourceError,
     ExplicitEnvVault,
     claude_compatible_environment,
+    openai_compatible_environment,
     provider_environment_from_config,
 )
 from torq_cli.domain.config_schema import parse_config_text, validate_config
@@ -29,6 +30,8 @@ def _credential_file(tmp_path: Path) -> Path:
                 "KIMI_CODE_API_KEY='current-kimi-secret'",
                 'GLM_API_KEY="glm-secret"',
                 "OPENAI_API_KEY=openai-secret",
+                "QWEN_TOKEN_PLAN_API_KEY=qwen-secret",
+                "QWEN_TOKEN_PLAN_BASE_URL=https://token-plan.example/apps/anthropic",
             )
         ),
         encoding="utf-8",
@@ -43,10 +46,11 @@ def test_explicit_env_vault_maps_current_provider_names_without_leaking(tmp_path
     assert vault.get("kimi") == "current-kimi-secret"
     assert vault.get("zai") == "glm-secret"
     assert vault.get("codex") == "openai-secret"
+    assert vault.get("qwen") == "qwen-secret"
     assert vault.get("unknown") is None
     rendered = repr(vault)
     assert "secret" not in rendered
-    assert vault.configured_providers() == frozenset({"codex", "deepseek", "kimi", "zai"})
+    assert vault.configured_providers() == frozenset({"codex", "deepseek", "kimi", "qwen", "zai"})
 
 
 def test_source_is_explicit_bounded_regular_and_duplicate_keys_fail_closed(tmp_path: Path) -> None:
@@ -76,14 +80,28 @@ def test_provider_child_environment_contains_only_selected_secret(tmp_path: Path
     }
     kimi = claude_compatible_environment("kimi", vault, base)
     assert kimi["ANTHROPIC_AUTH_TOKEN"] == "current-kimi-secret"
-    assert kimi["ANTHROPIC_BASE_URL"] == "https://api.moonshot.ai/anthropic/"
+    assert kimi["ANTHROPIC_BASE_URL"] == "https://api.kimi.com/coding/"
+    assert kimi["ANTHROPIC_MODEL"] == "k3"
     assert "deep-secret" not in kimi.values()
     zai = claude_compatible_environment("zai", vault, base)
     assert zai["ANTHROPIC_AUTH_TOKEN"] == "glm-secret"
     assert zai["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert zai["ANTHROPIC_MODEL"] == ""
+    qwen = claude_compatible_environment("qwen", vault, base)
+    assert qwen["ANTHROPIC_AUTH_TOKEN"] == "qwen-secret"
+    assert qwen["ANTHROPIC_BASE_URL"] == "https://token-plan.example/apps/anthropic"
+    assert qwen["ANTHROPIC_MODEL"] == "qwen3.8-max-preview"
+    assert "openai-secret" not in qwen.values()
     with pytest.raises(CredentialSourceError, match="provider_unsupported"):
         claude_compatible_environment("codex", vault, base)
+    codex = openai_compatible_environment("codex", vault, base)
+    assert codex == {
+        "PATH": "safe",
+        "OPENAI_API_KEY": "openai-secret",
+        "OPENAI_BASE_URL": "https://api.openai.com/v1",
+        "OPENAI_MODEL": "gpt-5.5",
+    }
+    assert "qwen-secret" not in codex.values()
 
 
 def test_auth_status_accepts_explicit_external_store_without_printing_values(
@@ -95,9 +113,9 @@ def test_auth_status_accepts_explicit_external_store_without_printing_values(
     report = json.loads(output)
 
     assert code == 3  # Credentials are configured, but live model identity is not yet attested.
-    for provider in ("deepseek", "kimi", "zai"):
+    for provider in ("codex", "deepseek", "kimi", "qwen", "zai"):
         assert report["providers"][provider]["credential_configured"] is True
-    for provider in ("deepseek", "kimi", "zai"):
+    for provider in ("codex", "deepseek", "kimi", "qwen", "zai"):
         assert report["providers"][provider]["authentication"] == "configured"
         assert report["providers"][provider]["resolved_model_identity"] == "unattestable"
     assert "deep-secret" not in output
@@ -129,6 +147,9 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
     environment = provider_environment_from_config(parsed, "deepseek", {"PATH": "safe"})
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "deep-secret"
     assert environment["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
+    codex_environment = provider_environment_from_config(parsed, "codex", {"PATH": "safe"})
+    assert codex_environment["OPENAI_API_KEY"] == "openai-secret"
+    assert codex_environment["OPENAI_MODEL"] == "gpt-5.5"
 
     incomplete = tmp_path / "incomplete.env"
     incomplete.write_text("DEEPSEEK_API_KEY=only-one\n", encoding="utf-8")
@@ -166,5 +187,5 @@ def test_managed_process_loads_saved_source_and_scopes_child_environment(
     environment = captured["env"]
     assert isinstance(environment, dict)
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "current-kimi-secret"
-    assert environment["ANTHROPIC_BASE_URL"] == "https://api.moonshot.ai/anthropic/"
+    assert environment["ANTHROPIC_BASE_URL"] == "https://api.kimi.com/coding/"
     assert "DEEPSEEK_API_KEY" not in environment

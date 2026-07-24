@@ -20,13 +20,13 @@ def _answers() -> dict:
             "g1d": {"provider": "claude", "model": "claude-fable-5"},
             "g1r": {"provider": "claude", "model": "claude-opus-4-8"},
             "builder": {"provider": "deepseek", "model": "deepseek-v4-pro"},
-            "g2a": {"provider": "codex", "model": "gpt-5.5-thinking"},
-            "refine_bug": {"provider": "kimi", "model": "kimi-k3"},
+            "g2a": {"provider": "codex", "model": "gpt-5.5"},
+            "refine_bug": {"provider": "kimi", "model": "k3"},
             "refine_ui": {"provider": "zai", "model": "glm-5.2"},
         },
         "grants": {
             "claude": ["claude-fable-5", "claude-opus-4-8"], "deepseek": ["deepseek-v4-pro"],
-            "codex": ["gpt-5.5-thinking"], "kimi": ["kimi-k3"], "zai": ["glm-5.2"],
+            "codex": ["gpt-5.5"], "kimi": ["k3"], "zai": ["glm-5.2"],
         },
         "policy": {"independence_mode": "profile_minimum", "loop_budget": 2, "ceilings": {"runtime_seconds": 300, "cost_usd": 5, "file_count": 50, "changed_lines": 1000}},
     }

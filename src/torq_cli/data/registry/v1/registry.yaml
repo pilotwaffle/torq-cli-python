@@ -85,8 +85,8 @@ profiles:
       - {role_id: g1d, provider_id: anthropic, model_id: claude-fable-5, prompt_id: live.g1d.design, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: agent_sdk}
       - {role_id: g1r, provider_id: anthropic, model_id: claude-opus-4-8, prompt_id: live.g1r.review, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: agent_sdk}
       - {role_id: builder, provider_id: deepseek, model_id: deepseek-v4-pro, prompt_id: live.builder.execute, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: direct_api}
-      - {role_id: g2a, provider_id: openai, model_id: gpt-5.5-thinking, prompt_id: live.g2a.audit, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: codex_sdk}
-      - {role_id: refine_bug, provider_id: moonshot, model_id: kimi-k3, prompt_id: live.refine_bug.repair, prompt_version: "1.0.0", effort_id: effort.standard, connector_surface: direct_api}
+      - {role_id: g2a, provider_id: openai, model_id: gpt-5.5, prompt_id: live.g2a.audit, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: direct_api}
+      - {role_id: refine_bug, provider_id: moonshot, model_id: k3, prompt_id: live.refine_bug.repair, prompt_version: "1.0.0", effort_id: effort.standard, connector_surface: direct_api}
       - {role_id: refine_ui, provider_id: zai, model_id: glm-5.2, prompt_id: live.refine_ui.repair, prompt_version: "1.0.0", effort_id: effort.high, connector_surface: direct_api}
     independence_rules:
       - {reviewer_role: g1r, reviewed_role: g1d, minimum: model}

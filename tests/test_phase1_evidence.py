@@ -73,13 +73,13 @@ def test_provider_matrix_is_closed_complete_and_consumable() -> None:
         assert set(provider["surfaces"]) == set(REQUIRED_SURFACES)
         assert provider["decision"]["primary"]
         assert "usage_expectation" in provider["decision"]
-        assert provider["tos"]["checked_at"] == "2026-07-23"
+        assert provider["tos"]["checked_at"] <= matrix["observed_at"]
 
 
 def test_provider_matrix_rejects_missing_surface_and_missing_decision_flag() -> None:
     matrix = load_provider_matrix()
     matrix["providers"]["claude"]["surfaces"].pop("cancellation")
-    matrix["providers"]["codex"]["decision"].pop("codex_sdk_primary")
+    matrix["providers"]["codex"]["decision"].pop("codex_direct_api_primary")
 
     errors = validate_provider_matrix(matrix)
 
