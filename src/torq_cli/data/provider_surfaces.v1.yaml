@@ -1,5 +1,5 @@
 schema: torq-provider-surface-matrix-v1
-observed_at: '2026-07-23'
+observed_at: '2026-07-24'
 surface_evidence_provenance:
   kind: operator_transcribed_observation
   machine_generated: false
@@ -13,7 +13,7 @@ providers:
       cancellation: {status: unavailable, evidence: 'no provider-side cancellation acknowledgement was safely exercised', observed_at: '2026-07-23'}
       tool_events: {status: unavailable, evidence: 'stream JSON is documented by the installed CLI but no live tool event was induced', observed_at: '2026-07-23'}
       usage: {status: verified, evidence: 'live JSON result included a usage object', observed_at: '2026-07-23'}
-      resolved_model_identity: {status: unattestable, evidence: 'requested model was accepted but the retained probe did not independently attest resolved identity', observed_at: '2026-07-23'}
+      resolved_model_identity: {status: verified, evidence: 'live modelUsage independently included claude-fable-5', observed_at: '2026-07-24'}
       working_directory_isolation: {status: unavailable, evidence: 'single safe-directory probe does not prove cross-session filesystem isolation', observed_at: '2026-07-23'}
       rate_limit_behavior: {status: unavailable, evidence: 'rate limiting was not intentionally induced', observed_at: '2026-07-23'}
     tos:
@@ -23,51 +23,51 @@ providers:
     decision: {primary: agent_sdk, fallback: cli_json, usage_expectation: reported, claude_agent_sdk_primary: true}
   codex:
     surfaces:
-      authentication: {status: verified, evidence: 'codex login status reported an authenticated ChatGPT session without exposing credentials', observed_at: '2026-07-23'}
-      machine_readable_output: {status: verified, evidence: 'codex exec JSON mode exited 0 with thread and turn events', observed_at: '2026-07-23'}
+      authentication: {status: verified, evidence: 'explicit OPENAI_API_KEY completed a bounded Responses API request without retaining identifying fields', observed_at: '2026-07-24'}
+      machine_readable_output: {status: verified, evidence: 'live Responses API call returned the exact bounded smoke token', observed_at: '2026-07-24'}
       session_resume: {status: unavailable, evidence: 'resume was present in CLI help but not exercised in the retained probe', observed_at: '2026-07-23'}
       cancellation: {status: unavailable, evidence: 'provider-side cancellation acknowledgement was not exercised', observed_at: '2026-07-23'}
       tool_events: {status: verified, evidence: 'JSON execution emitted typed item and turn events', observed_at: '2026-07-23'}
-      usage: {status: unreported, evidence: 'the retained JSON event summary did not establish a stable usage object', observed_at: '2026-07-23'}
-      resolved_model_identity: {status: unattestable, evidence: 'retained events did not independently attest the resolved model identity', observed_at: '2026-07-23'}
+      usage: {status: verified, evidence: 'live response included a usage object', observed_at: '2026-07-24'}
+      resolved_model_identity: {status: verified, evidence: 'live response independently reported gpt-5.5-2026-04-23 for requested gpt-5.5', observed_at: '2026-07-24'}
       working_directory_isolation: {status: unavailable, evidence: 'read-only sandbox execution alone does not prove independent session workdirs', observed_at: '2026-07-23'}
       rate_limit_behavior: {status: unavailable, evidence: 'rate limiting was not intentionally induced', observed_at: '2026-07-23'}
     tos:
       posture: 'official CLI subscription login was observed; automated use remains subject to OpenAI terms and usage policies'
       citation: 'https://openai.com/policies/terms-of-use/'
       checked_at: '2026-07-23'
-    decision: {primary: codex_sdk, fallback: cli_json, usage_expectation: unreported, codex_sdk_primary: true}
-  grok:
+    decision: {primary: direct_api, fallback: cli_json, usage_expectation: reported, codex_direct_api_primary: true}
+  qwen:
     surfaces:
-      authentication: {status: unavailable, evidence: 'installed Grok CLI reported not authenticated', observed_at: '2026-07-23'}
-      machine_readable_output: {status: unavailable, evidence: 'headless output was not called without authentication', observed_at: '2026-07-23'}
-      session_resume: {status: unavailable, evidence: 'resume capability appears in CLI help but could not be exercised without authentication', observed_at: '2026-07-23'}
-      cancellation: {status: unavailable, evidence: 'not exercisable without an authenticated session', observed_at: '2026-07-23'}
-      tool_events: {status: unavailable, evidence: 'not exercisable without an authenticated session', observed_at: '2026-07-23'}
-      usage: {status: unreported, evidence: 'no authenticated result was available', observed_at: '2026-07-23'}
-      resolved_model_identity: {status: unattestable, evidence: 'model listing is not runtime resolved-model attestation', observed_at: '2026-07-23'}
-      working_directory_isolation: {status: unavailable, evidence: 'worktree option is documented by CLI help but not exercised', observed_at: '2026-07-23'}
-      rate_limit_behavior: {status: unavailable, evidence: 'not exercisable without authentication', observed_at: '2026-07-23'}
+      authentication: {status: verified, evidence: 'explicit Token Plan credential reached the configured Anthropic-compatible endpoint; exact requested model was rejected after authentication', observed_at: '2026-07-24'}
+      machine_readable_output: {status: verified, evidence: 'bounded tool-disabled request returned the exact smoke token in a JSON result envelope', observed_at: '2026-07-24'}
+      session_resume: {status: unavailable, evidence: 'subscription endpoint resume contract was not established', observed_at: '2026-07-24'}
+      cancellation: {status: unavailable, evidence: 'no successful request was started', observed_at: '2026-07-24'}
+      tool_events: {status: unavailable, evidence: 'no successful response was retained', observed_at: '2026-07-24'}
+      usage: {status: verified, evidence: 'live JSON result included usage and modelUsage objects', observed_at: '2026-07-24'}
+      resolved_model_identity: {status: verified, evidence: 'live modelUsage independently reported qwen3.8-max-preview', observed_at: '2026-07-24'}
+      working_directory_isolation: {status: unavailable, evidence: 'Anthropic-compatible HTTP surface has no filesystem workdir contract', observed_at: '2026-07-24'}
+      rate_limit_behavior: {status: unavailable, evidence: 'rate limiting was not intentionally induced', observed_at: '2026-07-24'}
     tos:
-      posture: 'consumer automated/non-human access is hostile under the current xAI AUP; require an expressly permitted enterprise/API surface'
-      citation: 'https://x.ai/legal/acceptable-use-policy'
-      checked_at: '2026-07-23'
-    decision: {primary: acp, fallback: excluded_until_authorized, usage_expectation: unreported, grok_acp_primary: true}
+      posture: 'Alibaba Cloud Token Plan supports headless environment configuration through its dedicated endpoint and subscription key; exact model grants remain account-specific'
+      citation: 'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/'
+      checked_at: '2026-07-24'
+    decision: {primary: anthropic_compatible, fallback: none, usage_expectation: unreported, qwen_anthropic_primary: true}
   kimi:
     surfaces:
-      authentication: {status: unavailable, evidence: 'explicit external credential source is configured; bounded live probe timed out before authentication could be attested', observed_at: '2026-07-23'}
-      machine_readable_output: {status: unavailable, evidence: 'bounded Claude-compatible probe timed out without a retained response', observed_at: '2026-07-23'}
+      authentication: {status: verified, evidence: 'KIMI_CODE_API_KEY completed a bounded request against the Kimi Code subscription endpoint', observed_at: '2026-07-24'}
+      machine_readable_output: {status: verified, evidence: 'live Claude-compatible request returned the exact bounded smoke token', observed_at: '2026-07-24'}
       session_resume: {status: unavailable, evidence: 'direct API resume contract not established', observed_at: '2026-07-23'}
       cancellation: {status: unavailable, evidence: 'no approved live request was started', observed_at: '2026-07-23'}
       tool_events: {status: unavailable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
-      usage: {status: unreported, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
-      resolved_model_identity: {status: unattestable, evidence: 'no approved live response was retained', observed_at: '2026-07-23'}
+      usage: {status: verified, evidence: 'live JSON result included usage and modelUsage objects', observed_at: '2026-07-24'}
+      resolved_model_identity: {status: verified, evidence: 'live modelUsage independently reported k3', observed_at: '2026-07-24'}
       working_directory_isolation: {status: unavailable, evidence: 'direct HTTP API has no filesystem workdir surface', observed_at: '2026-07-23'}
       rate_limit_behavior: {status: unavailable, evidence: 'not intentionally induced', observed_at: '2026-07-23'}
     tos:
-      posture: 'official API documentation supports programmatic API use; local use requires approved credential storage'
-      citation: 'https://platform.moonshot.ai/docs/guide/prompt-best-practice'
-      checked_at: '2026-07-23'
+      posture: 'Kimi Code documentation permits subscriber API keys on the dedicated coding endpoint for third-party development tools'
+      citation: 'https://www.kimi.com/code/docs/en/'
+      checked_at: '2026-07-24'
     decision: {primary: direct_api, fallback: none, usage_expectation: unreported, kimi_direct_api_primary: true}
   zai:
     surfaces:

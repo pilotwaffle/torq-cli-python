@@ -82,8 +82,8 @@ _EXPECTED_BINDINGS = {
         "g1d": ("anthropic", "claude-fable-5", "live.g1d.design", "effort.high", "agent_sdk"),
         "g1r": ("anthropic", "claude-opus-4-8", "live.g1r.review", "effort.high", "agent_sdk"),
         "builder": ("deepseek", "deepseek-v4-pro", "live.builder.execute", "effort.high", "direct_api"),
-        "g2a": ("openai", "gpt-5.5-thinking", "live.g2a.audit", "effort.high", "codex_sdk"),
-        "refine_bug": ("moonshot", "kimi-k3", "live.refine_bug.repair", "effort.standard", "direct_api"),
+        "g2a": ("openai", "gpt-5.5", "live.g2a.audit", "effort.high", "direct_api"),
+        "refine_bug": ("moonshot", "k3", "live.refine_bug.repair", "effort.standard", "direct_api"),
         "refine_ui": ("zai", "glm-5.2", "live.refine_ui.repair", "effort.high", "direct_api"),
     },
     "torq-v5-repo-compat": {

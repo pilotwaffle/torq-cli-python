@@ -140,8 +140,8 @@ def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approv
             (
                 MockSurface(
                     specs["codex"].primary_surface,
-                    _payload("openai", "gpt-5.5-thinking", {"verdict": "approve", "defects": []}),
-                    grants={"gpt-5.5-thinking"},
+                    _payload("openai", "gpt-5.5", {"verdict": "approve", "defects": []}),
+                    grants={"gpt-5.5"},
                 ),
             ),
             tmp_path / "sessions",
@@ -233,13 +233,13 @@ def test_high_bug_routes_to_refine_bug_and_targeted_reaudit(tmp_path: Path) -> N
             "g2a": [
                 _response(
                     "openai",
-                    "gpt-5.5-thinking",
+                    "gpt-5.5",
                     {"verdict": "reject", "defects": [{"severity": "HIGH", "class": "bug"}]},
                 ),
-                _response("openai", "gpt-5.5-thinking", {"verdict": "approve", "defects": []}),
+                _response("openai", "gpt-5.5", {"verdict": "approve", "defects": []}),
             ],
             "refine_bug": [
-                _response("moonshot", "kimi-k3", {"status": "repair_complete"})
+                _response("moonshot", "k3", {"status": "repair_complete"})
             ],
         }
     )
@@ -284,7 +284,7 @@ def test_critical_defect_preempts_earlier_repairable_defect(tmp_path: Path) -> N
             "g2a": [
                 _response(
                     "openai",
-                    "gpt-5.5-thinking",
+                    "gpt-5.5",
                     {
                         "verdict": "reject",
                         "defects": [
@@ -373,7 +373,7 @@ def test_loop_exhaustion_and_off_contract_output_halt_fail_closed(tmp_path: Path
         "g2a": [
             _response(
                 "openai",
-                "gpt-5.5-thinking",
+                "gpt-5.5",
                 {"verdict": "reject", "defects": [{"severity": "HIGH", "class": "bug"}]},
             )
         ],
