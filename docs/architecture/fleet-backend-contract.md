@@ -25,7 +25,10 @@ torq fleet --run-root .\export\run `
 
 The HTTP contract is `GET /api/v1/fleet`. `GET /healthz` reports the current
 verification result. Mutation methods return `405 read_only`. The server rejects
-non-loopback bind addresses.
+non-loopback bind addresses. Every request must also present exactly one `Host`
+header matching `127.0.0.1:<bound-port>`, `localhost:<bound-port>`, or the IPv6
+loopback equivalent; other host forms fail with `421 fleet_host_denied` to block
+DNS-rebinding access.
 
 ## Evidence behavior
 

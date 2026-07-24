@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import urllib.error
@@ -178,6 +179,27 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
             first = json.loads(response.read())
         assert first["verification"]["status"] == "verified"
 
+        connection = http.client.HTTPConnection(host, port)
+        connection.putrequest("GET", "/healthz", skip_host=True)
+        connection.putheader("Host", f"LOCALHOST:{port}")
+        connection.endheaders()
+        localhost_response = connection.getresponse()
+        assert localhost_response.status == 200
+        assert json.loads(localhost_response.read())["status"] == "ok"
+        connection.close()
+
+        connection = http.client.HTTPConnection(host, port)
+        connection.putrequest("GET", "/api/v1/fleet", skip_host=True)
+        connection.putheader("Host", f"attacker.example:{port}")
+        connection.endheaders()
+        rebound = connection.getresponse()
+        assert rebound.status == 421
+        assert json.loads(rebound.read()) == {
+            "finding": "fleet_host_denied",
+            "status": "blocked",
+        }
+        connection.close()
+
         receipts = chain.root / "receipts.jsonl"
         receipts.write_text(receipts.read_text(encoding="utf-8").replace("live", "forged"), encoding="utf-8")
         with urllib.request.urlopen(f"http://{host}:{port}/api/v1/fleet") as response:
@@ -193,6 +215,16 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
         with pytest.raises(urllib.error.HTTPError) as denied:
             urllib.request.urlopen(request)
         assert denied.value.code == 405
+
+        connection = http.client.HTTPConnection(host, port)
+        connection.putrequest("POST", "/api/v1/fleet", skip_host=True)
+        connection.putheader("Host", f"127.1:{port}")
+        connection.putheader("Content-Length", "2")
+        connection.endheaders(b"{}")
+        denied_rebound_post = connection.getresponse()
+        assert denied_rebound_post.status == 421
+        denied_rebound_post.read()
+        connection.close()
     finally:
         server.shutdown()
         server.server_close()

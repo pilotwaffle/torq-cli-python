@@ -33,6 +33,9 @@ def create_fleet_server(
         server_version = "TORQFleet/1"
 
         def do_GET(self) -> None:  # noqa: N802
+            if not self._host_allowed():
+                self._json(421, {"status": "blocked", "finding": "fleet_host_denied"})
+                return
             if self.path == "/healthz":
                 snapshot = projector.snapshot()
                 body = {
@@ -47,10 +50,26 @@ def create_fleet_server(
             self._json(404, {"status": "not_found"})
 
         def do_POST(self) -> None:  # noqa: N802
+            if not self._host_allowed():
+                self._json(421, {"status": "blocked", "finding": "fleet_host_denied"})
+                return
             self._json(405, {"status": "read_only"})
 
         def log_message(self, format: str, *args: object) -> None:
             del format, args
+
+        def _host_allowed(self) -> bool:
+            values = self.headers.get_all("Host", failobj=[])
+            address = self.server.server_address
+            if len(values) != 1 or not isinstance(address, tuple) or len(address) < 2:
+                return False
+            port_number = int(address[1])
+            allowed = {
+                f"127.0.0.1:{port_number}",
+                f"localhost:{port_number}",
+                f"[::1]:{port_number}",
+            }
+            return values[0].casefold() in allowed
 
         def _json(self, status: int, value: object) -> None:
             encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
