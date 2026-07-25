@@ -164,6 +164,39 @@ def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Pat
     assert "subscription account" in blocked["reason_gloss"]
 
 
+def test_open_lane_action_promotes_blocked_lane_to_needs_you(tmp_path: Path) -> None:
+    chain = _chain(tmp_path, "run-blocked-action")
+    _planned(chain)
+    attempt = _created(chain, "g1r")
+    blocked = chain.append(
+        "stage_blocked",
+        {
+            **attempt,
+            "reason": "operator_approval_required",
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "action_opened",
+        {
+            "action_id": "approve-g1r",
+            "type": "approval_required",
+            "scope": "lane",
+            "target": "g1r",
+            "summary": "Approve the blocked lane.",
+            "caused_by_sequence": blocked["sequence"],
+        },
+    )
+
+    snapshot = FleetProjector(chain.root).snapshot()
+    lane = next(row for row in snapshot["lanes"] if row["role"] == "g1r")
+
+    assert lane["state"] == "needs_you"
+    assert snapshot["summary"]["blocked"] == 0
+    assert snapshot["summary"]["needs_you"] == 1
+    assert snapshot["summary"]["open_actions"] == 1
+
+
 def test_tampered_chain_never_projects_plausible_fleet_data(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-tampered")
     _planned(chain)

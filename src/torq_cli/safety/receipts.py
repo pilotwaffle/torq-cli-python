@@ -100,6 +100,20 @@ def _canonical(value: Mapping[str, Any]) -> bytes:
     ).encode()
 
 
+def _canonical_for_verification(value: Mapping[str, Any]) -> bytes:
+    """Reproduce legacy signed bytes while keeping new writes strict JSON."""
+    try:
+        return _canonical(value)
+    except ValueError:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=True,
+        ).encode()
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     return _canonical(value).decode("ascii")
 
@@ -1118,7 +1132,10 @@ def verify_receipt_store(
                 return StoreVerification("tampered", "sequence_discontinuity")
             if envelope.get("previous_receipt_hash") != previous:
                 return StoreVerification("tampered", "receipt_chain_broken")
-            if ReceiptChain._hash(envelope) != receipt_hash:
+            verified_hash = "sha256:" + hashlib.sha256(
+                _canonical_for_verification(envelope)
+            ).hexdigest()
+            if verified_hash != receipt_hash:
                 return StoreVerification("tampered", "receipt_hash_mismatch")
             schema_version = envelope.get("schema_version")
             if schema_version in {
@@ -1262,7 +1279,7 @@ def verify_receipt_store(
                 try:
                     Ed25519PublicKey.from_public_bytes(writer_public).verify(
                         writer_signature,
-                        _canonical(writer_body),
+                    _canonical_for_verification(writer_body),
                     )
                 except InvalidSignature:
                     return StoreVerification("tampered", "receipt_writer_signature_invalid")

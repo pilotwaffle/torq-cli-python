@@ -358,6 +358,15 @@ def reduce_fleet_snapshot(
         lane_rows.values(),
         key=lane_order,
     )
+    actions = sorted(action_rows.values(), key=lambda row: int(row["opened_sequence"]))
+    open_actions = [action for action in actions if action["state"] == "open"]
+    for action in open_actions:
+        if action.get("scope") != "lane":
+            continue
+        target = action.get("target")
+        if isinstance(target, str) and target in lane_rows:
+            lane_rows[target]["state"] = "needs_you"
+
     states = (
         "dormant",
         "queued",
@@ -370,8 +379,6 @@ def reduce_fleet_snapshot(
         "abandoned",
     )
     counts = {state: sum(row["state"] == state for row in lanes) for state in states}
-    actions = sorted(action_rows.values(), key=lambda row: int(row["opened_sequence"]))
-    open_actions = [action for action in actions if action["state"] == "open"]
     first_time = receipts[0].get("observed_at") if receipts else None
     last_time = receipts[-1].get("observed_at") if receipts else None
     times_available = isinstance(first_time, str) and isinstance(last_time, str)

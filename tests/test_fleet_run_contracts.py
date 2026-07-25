@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from torq_cli.application.fleet import FleetProjector, reduce_fleet_snapshot
 from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
@@ -327,6 +329,44 @@ def test_non_finite_payload_is_a_pre_append_finding(
 
     assert chain.sequence == 0
     assert not chain.receipts_path.exists()
+
+
+def test_legacy_signed_non_finite_receipt_remains_verifiable(tmp_path: Path) -> None:
+    chain = _chain(tmp_path, "run-legacy-non-finite")
+    chain.append("run_attested", {"score": 1.0})
+
+    def legacy_canonical(value: Mapping[str, object]) -> bytes:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=True,
+        ).encode()
+
+    envelope = json.loads(chain.receipts_path.read_text(encoding="utf-8"))
+    envelope.pop("receipt_hash")
+    envelope["payload"] = {"score": float("nan")}
+    writer_body = dict(envelope)
+    writer_body.pop("writer_signature")
+    envelope["writer_signature"] = Ed25519PrivateKey.from_private_bytes(
+        chain.run_keys.orchestrator
+    ).sign(legacy_canonical(writer_body)).hex()
+    receipt_hash = "sha256:" + hashlib.sha256(legacy_canonical(envelope)).hexdigest()
+    chain.receipts_path.write_bytes(
+        legacy_canonical({**envelope, "receipt_hash": receipt_hash}) + b"\n"
+    )
+
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    manifest["terminal_receipt_hash"] = receipt_hash
+    manifest["signature"] = Ed25519PrivateKey.from_private_bytes(
+        chain.run_keys.manifest
+    ).sign(legacy_canonical(manifest)).hex()
+    manifest_path.write_bytes(legacy_canonical(manifest))
+
+    assert verify_receipt_store(chain.root).status == "verified"
 
 
 def test_non_ascii_receipt_line_is_the_canonical_hashed_encoding(tmp_path: Path) -> None:
