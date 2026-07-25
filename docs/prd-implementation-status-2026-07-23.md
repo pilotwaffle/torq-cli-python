@@ -58,7 +58,10 @@ complete.
   executed tests).
 - Strict mypy: pass across 48 Python source files.
 - Ruff: pass.
-- Named security/governance mutants: 14/14 killed.
+- Named security/governance mutants: 22/22 killed. M01-M14 cover config,
+  registry, and hermeticity; M15-M22 cover the evidence layer (signing encoder,
+  receipt sanitizer, transition authority, recovery-abandonment guard, lane
+  state projection, monetary accounting).
 - Source distribution and wheel builds: pass; hosted jobs perform isolated wheel
   smoke tests.
 - Hosted PR run `30064851658` and push run `30064849331`: all four jobs green at

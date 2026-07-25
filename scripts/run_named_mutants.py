@@ -2,6 +2,8 @@
 
 M01-M14 cover configuration, registry, and hermeticity. M15-M18 cover the
 schema-v2 evidence-authority guards added during Fleet Release 0 hardening.
+M19-M22 cover the rest of the evidence layer: the signing encoder (distinct
+from the sanitizer M15 covers), lane state projection, and monetary accounting.
 """
 
 from __future__ import annotations
@@ -90,6 +92,34 @@ MUTATIONS = (
         "if waiting_on_operator or open_actions:",
         "if waiting_on_operator or False:",
         "tests/test_fleet_run_contracts.py::test_open_operator_action_blocks_recovery_abandonment",
+    ),
+    Mutation(
+        "M19",
+        "src/torq_cli/safety/receipts.py",
+        "        ensure_ascii=True,\n        allow_nan=False,",
+        "        ensure_ascii=True,\n        allow_nan=True,",
+        "tests/test_evidence_encoder_contract.py::test_signing_encoder_refuses_non_finite_floats",
+    ),
+    Mutation(
+        "M20",
+        "src/torq_cli/safety/receipts.py",
+        "        ensure_ascii=True,\n        allow_nan=False,",
+        "        ensure_ascii=False,\n        allow_nan=False,",
+        "tests/test_evidence_encoder_contract.py::test_signing_encoder_escapes_non_ascii",
+    ),
+    Mutation(
+        "M21",
+        "src/torq_cli/application/fleet.py",
+        '            row["state"] = "blocked"\n            attempt["state"] = "blocked"',
+        '            row["state"] = "needs_you"\n            attempt["state"] = "needs_you"',
+        "tests/test_fleet_backend.py::test_completed_and_blocked_lanes_project_receipt_backed_values",
+    ),
+    Mutation(
+        "M22",
+        "src/torq_cli/safety/usage.py",
+        "amount = Decimal(str(value))",
+        "amount = Decimal(float(value))",
+        "tests/test_phase4_safety.py::test_usage_summary_reconstructs_totals_and_preserves_unreported",
     ),
 )
 

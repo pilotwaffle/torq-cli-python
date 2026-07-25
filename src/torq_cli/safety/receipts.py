@@ -906,6 +906,10 @@ class ReceiptChain:
             serialized = json.dumps(payload, sort_keys=True, allow_nan=False)
         except ValueError as exc:
             raise ValueError("receipt_payload_non_finite") from exc
+        except TypeError as exc:
+            # A payload the encoder cannot represent is a governed refusal like
+            # any other, not an escaping TypeError callers have to special-case.
+            raise ValueError("receipt_payload_unserializable") from exc
         clean, _ = self.registry.scan(serialized)
         value = json.loads(clean)
         if not isinstance(value, dict):
