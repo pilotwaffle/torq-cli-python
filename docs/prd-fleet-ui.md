@@ -1,10 +1,10 @@
 # PRD - TORQ Fleet UI
 
-Status: **Release 0 backend implemented; protected-main merge pending.** Revised 2026-07-25, Rev 5.4.
+Status: **Release 1 Fleet Read implemented in this change; protected-main merge pending.** Revised 2026-07-25, Rev 5.5.
 
-Production UI work begins only after the Release 0 gate in Section 11 passes.
-Feature-branch code is implementation evidence, not proof that the complete
-product contract has landed.
+The Release 0 gate in Section 11 has passed. Feature-branch code remains
+implementation evidence, not proof that the complete product contract has
+landed, until protected-main CI and merge complete.
 
 Rev 5 closes gaps found reviewing Rev 4 against the code: certificate role
 binding, the missing writer for post-action closure, key storage boundaries,
@@ -32,6 +32,13 @@ Rev 5.4 implements build-order steps 0-7, closes canonical-encoding decision 6
 in favor of the pinned standard-library encoder, and adds the Release 0
 adversarial fixtures. Fleet Read UI implementation remains the next release
 step; Release 2 accounting and Release 3 control dependencies remain gated.
+
+Rev 5.5 implements build-order step 8 as a wheel-bundled, loopback-only Fleet
+Read board. It adds the six-lane governance rail, orchestrator and action
+ledgers, in-place evidence detail, persistent monitor, deduplicated local
+notifications, secure static routes, responsive and reduced-motion treatments,
+and real-browser verification. Release 2 accounting and Release 3 control
+remain gated.
 
 Depends on:
 
@@ -923,8 +930,8 @@ command lifecycle, sanitizer, attempt boundaries, and replan receipts.
 
 ## 12. Build order
 
-Rev 5.4 implements and locally verifies steps 0-7. Step 8, Fleet Read UI, is
-next. Steps 9-10 remain gated as Release 2 and Release 3 work.
+Rev 5.4 implements and locally verifies steps 0-7. Rev 5.5 implements step 8,
+Fleet Read UI. Steps 9-10 remain gated as Release 2 and Release 3 work.
 
 0. One pinned canonical JSON encoder shared by hashing, signing, and storage.
    Everything below signs over its output, so it lands first. Partly done:
