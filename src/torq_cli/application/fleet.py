@@ -94,6 +94,7 @@ class FleetProjector:
         profile_id: str | None = None
         run_status = "running"
         decision_reason: str | None = None
+        context_injections = 0
         lane_rows: dict[str, dict[str, Any]] = {}
         usage_rows: list[dict[str, Any]] = []
 
@@ -140,6 +141,21 @@ class FleetProjector:
                 run_status = str(payload.get("status", "unknown"))
                 raw_reason = payload.get("reason")
                 decision_reason = str(raw_reason) if raw_reason is not None else None
+                continue
+            if transition == "context_injected":
+                context_injections += 1
+                target = payload.get("target_role")
+                if isinstance(target, str) and target != "lead":
+                    row = lane(target)
+                    if row["first_sequence"] is None:
+                        row["first_sequence"] = sequence
+                    row["latest_sequence"] = sequence
+                    row["latest_transition"] = transition
+                    row["transitions"].append({
+                        "sequence": sequence,
+                        "transition": transition,
+                        "observed_at": observed_at,
+                    })
                 continue
             role_value = payload.get("role")
             if not isinstance(role_value, str):
@@ -238,6 +254,7 @@ class FleetProjector:
                     if times_available
                     else "receipt_timestamps_unavailable"
                 ),
+                "context_injections": context_injections,
             },
             "summary": {
                 **counts,

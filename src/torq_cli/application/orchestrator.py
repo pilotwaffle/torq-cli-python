@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any, Protocol, cast
 
 from torq_cli.connectors import Connector
@@ -114,6 +116,65 @@ class GovernedOrchestrator:
         self.rate_table = rate_table or load_default_rate_table()
         self.registry = PatternRegistry.default()
         self.policy = G2APolicy()
+        self._context_lock = RLock()
+        self._pending_context: list[dict[str, str]] = []
+
+    def inject_context(
+        self,
+        chain: ReceiptChain,
+        content: str,
+        *,
+        target_role: str | None = None,
+        media_type: str = "text/plain",
+        source_name: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Seal sanitized operator context and queue it for governed dispatch."""
+        encoded = content.encode("utf-8")
+        if not content.strip():
+            raise OrchestrationBlocked("context_empty")
+        if len(encoded) > 1_048_576:
+            raise OrchestrationBlocked("context_too_large")
+        target = target_role or "lead"
+        if target != "lead" and target not in self._PLANNED_ROLES:
+            raise OrchestrationBlocked("context_target_invalid")
+        if not (
+            media_type.startswith("text/")
+            or media_type in {
+                "application/json",
+                "application/xml",
+                "application/yaml",
+                "application/x-yaml",
+            }
+        ):
+            raise OrchestrationBlocked("context_media_type_invalid")
+        clean, findings = self.registry.scan(content)
+        context_id = "ctx-" + secrets.token_hex(8)
+        artifact = chain.write_artifact(context_id, clean)
+        artifact_hash = chain.hash_file(artifact)
+        payload: dict[str, Any] = {
+            "context_id": context_id,
+            "target_role": target,
+            "route": "lead_replan" if target == "lead" else "direct_lane",
+            "media_type": media_type,
+            "source_name": source_name,
+            "content_bytes": len(clean.encode("utf-8")),
+            "redactions": findings,
+            "artifact": str(artifact.relative_to(chain.root)),
+            "artifact_hash": artifact_hash,
+            "provider_dispatch": False,
+        }
+        with self._context_lock:
+            receipt = chain.append("context_injected", payload)
+            self._pending_context.append({
+                "context_id": context_id,
+                "target_role": target,
+                "content": clean,
+            })
+        return {
+            **payload,
+            "sequence": receipt["sequence"],
+            "receipt_hash": receipt["receipt_hash"],
+        }
 
     def execute(
         self,
@@ -315,7 +376,14 @@ class GovernedOrchestrator:
                 },
             )
             raise
-        prompt = self._prompt(role, goal, context, binding)
+        injected = self._consume_context(role)
+        prompt_context: dict[str, Any] = dict(context)
+        if injected:
+            prompt_context["injected_context"] = [
+                {"context_id": item["context_id"], "content": item["content"]}
+                for item in injected
+            ]
+        prompt = self._prompt(role, goal, prompt_context, binding)
         clean_prompt, findings = self.registry.scan(prompt)
         chain.append(
             "stage_started",
@@ -325,6 +393,7 @@ class GovernedOrchestrator:
                 "model": binding.model_id,
                 "prompt_id": binding.prompt_id,
                 "redactions": findings,
+                "context_ids": tuple(item["context_id"] for item in injected),
                 "settlement": budget.settlement,
                 "entitlement": (
                     budget.window.as_receipt() if budget.window is not None else None
@@ -417,6 +486,22 @@ class GovernedOrchestrator:
             },
         )
         return body
+
+    def _consume_context(self, role: str) -> list[dict[str, str]]:
+        with self._context_lock:
+            selected = [
+                item
+                for item in self._pending_context
+                if item["target_role"] in {"lead", role}
+            ]
+            if selected:
+                selected_ids = {item["context_id"] for item in selected}
+                self._pending_context = [
+                    item
+                    for item in self._pending_context
+                    if item["context_id"] not in selected_ids
+                ]
+            return selected
 
     @staticmethod
     def _usage_record(reported: Mapping[str, Any]) -> dict[str, int]:

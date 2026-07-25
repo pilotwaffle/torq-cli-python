@@ -8,3 +8,7 @@ Python CLI. UI code consumes `torq-fleet-snapshot-v1` through
 not import CLI command handlers or read provider stdout.
 
 See `docs/architecture/fleet-backend-contract.md`.
+
+The optional input dock uses the attended `GovernedContextInjector` contract in
+`docs/architecture/context-injection-contract.md`. The standalone Fleet server
+does not enable mutation endpoints.

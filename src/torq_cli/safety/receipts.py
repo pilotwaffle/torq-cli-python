@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol
 
 from cryptography.exceptions import InvalidSignature
@@ -474,6 +475,7 @@ class ReceiptChain:
         self.profile_version = profile_version
         self.policy_version = policy_version
         self.registry = PatternRegistry.default()
+        self._lock = RLock()
         self._sequence = 0
         self._previous: str | None = None
 
@@ -520,44 +522,46 @@ class ReceiptChain:
         return value
 
     def append(self, transition: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        clean = self._sanitize(payload)
-        self._sequence += 1
-        receipt = {
-            "schema_version": self.schema_version,
-            "profile_version": self.profile_version,
-            "policy_version": self.policy_version,
-            "sequence": self._sequence,
-            "previous_receipt_hash": self._previous,
-            "transition": transition,
-            "payload": clean,
-            "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
-        receipt_hash = self._hash(receipt)
-        envelope = {**receipt, "receipt_hash": receipt_hash}
-        with self.receipts_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(envelope, sort_keys=True) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(self.receipts_path, 0o600)
-        self._previous = receipt_hash
-        self._write_manifest(sealed=False)
-        return envelope
+        with self._lock:
+            clean = self._sanitize(payload)
+            self._sequence += 1
+            receipt = {
+                "schema_version": self.schema_version,
+                "profile_version": self.profile_version,
+                "policy_version": self.policy_version,
+                "sequence": self._sequence,
+                "previous_receipt_hash": self._previous,
+                "transition": transition,
+                "payload": clean,
+                "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            receipt_hash = self._hash(receipt)
+            envelope = {**receipt, "receipt_hash": receipt_hash}
+            with self.receipts_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(envelope, sort_keys=True) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(self.receipts_path, 0o600)
+            self._previous = receipt_hash
+            self._write_manifest(sealed=False)
+            return envelope
 
     def write_artifact(self, name: str, content: str) -> Path:
-        clean, _ = self.registry.scan(content)
-        nonce = secrets.token_bytes(16)
-        plain = clean.encode()
-        stream = bytearray()
-        counter = 0
-        while len(stream) < len(plain):
-            stream.extend(hmac.new(self.key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest())
-            counter += 1
-        cipher = bytes(a ^ b for a, b in zip(plain, stream, strict=False))
-        target = self.root / "artifacts" / (name + ".enc")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(nonce + cipher)
-        os.chmod(target, 0o600)
-        return target
+        with self._lock:
+            clean, _ = self.registry.scan(content)
+            nonce = secrets.token_bytes(16)
+            plain = clean.encode()
+            stream = bytearray()
+            counter = 0
+            while len(stream) < len(plain):
+                stream.extend(hmac.new(self.key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest())
+                counter += 1
+            cipher = bytes(a ^ b for a, b in zip(plain, stream, strict=False))
+            target = self.root / "artifacts" / (name + ".enc")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(nonce + cipher)
+            os.chmod(target, 0o600)
+            return target
 
     def _write_manifest(self, *, sealed: bool) -> Path:
         manifest = {
@@ -582,7 +586,8 @@ class ReceiptChain:
         return target
 
     def seal(self) -> Path:
-        return self._write_manifest(sealed=True)
+        with self._lock:
+            return self._write_manifest(sealed=True)
 
     def verify(self, manifest_path: Path) -> Verification:
         trusted_public_key = (
