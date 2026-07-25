@@ -1,4 +1,8 @@
-"""Run the fourteen approved security/governance mutants in isolated copies."""
+"""Run the approved security/governance mutants in isolated copies.
+
+M01-M14 cover configuration, registry, and hermeticity. M15-M18 cover the
+schema-v2 evidence-authority guards added during Fleet Release 0 hardening.
+"""
 
 from __future__ import annotations
 
@@ -59,6 +63,34 @@ MUTATIONS = (
     Mutation("M12", "src/torq_cli/domain/hermetic.py", '"os", "subprocess", "socket"', '"os", "socket"', "tests/test_hermetic.py::test_production_imports_forbid_subprocess"),
     Mutation("M13", "src/torq_cli/application/resolve.py", "config = parse_config_text(text)", "config = yaml.safe_load(text)", "tests/test_resolution.py::test_duplicate_yaml_mapping_is_rejected_before_schema_validation"),
     Mutation("M14", "src/torq_cli/domain/config_schema.py", "if identity in identities:\n            _parser_fail()", "if False:\n            _parser_fail()", "tests/test_config_schema.py::test_nfc_equivalent_duplicate_mapping_keys_are_parser_invalid"),
+    Mutation(
+        "M15",
+        "src/torq_cli/safety/receipts.py",
+        "json.dumps(payload, sort_keys=True, allow_nan=False)",
+        "json.dumps(payload, sort_keys=True, allow_nan=True)",
+        "tests/test_fleet_run_contracts.py::test_non_finite_payload_is_a_pre_append_finding",
+    ),
+    Mutation(
+        "M16",
+        "src/torq_cli/domain/evidence_transitions.py",
+        "rule.permitted_statuses is not None\n        and payload.get(\"status\") not in rule.permitted_statuses",
+        "False\n        and payload.get(\"status\") not in rule.permitted_statuses",
+        "tests/test_fleet_run_contracts.py::test_invented_orchestrator_decision_status_is_rejected_before_append",
+    ),
+    Mutation(
+        "M17",
+        "src/torq_cli/domain/run_evidence.py",
+        "if waiting_on_operator or open_actions:",
+        "if False or open_actions:",
+        "tests/test_fleet_run_contracts.py::test_awaiting_approval_cannot_be_abandoned_even_without_open_attempts",
+    ),
+    Mutation(
+        "M18",
+        "src/torq_cli/domain/run_evidence.py",
+        "if waiting_on_operator or open_actions:",
+        "if waiting_on_operator or False:",
+        "tests/test_fleet_run_contracts.py::test_open_operator_action_blocks_recovery_abandonment",
+    ),
 )
 
 
@@ -106,8 +138,8 @@ def main() -> int:
                     print(result.stdout)
                     return 1
                 killed += 1
-        print(f"named_mutants: {killed}/14 killed")
-        return 0 if killed == 14 else 1
+        print(f"named_mutants: {killed}/{len(MUTATIONS)} killed")
+        return 0 if killed == len(MUTATIONS) else 1
     finally:
         try:
             temporary_parent.rmdir()
