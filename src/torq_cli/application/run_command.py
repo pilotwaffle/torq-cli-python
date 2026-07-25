@@ -90,13 +90,21 @@ class RunController:
                 "attested_fields": sorted(expected),
             },
         )
-        result = self.orchestrator.execute(
-            goal=goal,
-            profile=selected_profile,
-            mode=ExecutionMode.LIVE if live else ExecutionMode.DRY_RUN,
-            chain=chain,
-        )
-        chain.seal()
+        try:
+            result = self.orchestrator.execute(
+                goal=goal,
+                profile=selected_profile,
+                mode=ExecutionMode.LIVE if live else ExecutionMode.DRY_RUN,
+                chain=chain,
+            )
+        except OrchestrationBlocked:
+            # Seal the refusal so it verifies. An unsealed chain reports
+            # evidence_missing, which reads the same as a run that wrote
+            # nothing at all.
+            chain.seal()
+            raise
+        if result.status not in {"awaiting_approval", "human_escalation"}:
+            chain.seal()
         verification = verify_receipt_store(chain.root)
         if verification.status != "verified":
             raise RuntimeError(f"receipt_verification_failed:{verification.finding}")

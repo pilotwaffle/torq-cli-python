@@ -42,7 +42,8 @@ def _credential_file(tmp_path: Path) -> Path:
 def test_explicit_env_vault_maps_current_provider_names_without_leaking(tmp_path: Path) -> None:
     vault = ExplicitEnvVault(_credential_file(tmp_path))
 
-    assert vault.get("deepseek") == "deep-secret"
+    # DeepSeek bills to the Qwen Token Plan, so both lanes resolve one key.
+    assert vault.get("deepseek") == "qwen-secret"
     assert vault.get("kimi") == "current-kimi-secret"
     assert vault.get("zai") == "glm-secret"
     assert vault.get("codex") == "openai-secret"
@@ -71,13 +72,16 @@ def test_provider_child_environment_contains_only_selected_secret(tmp_path: Path
     base = {"PATH": "safe", "UNRELATED_API_KEY": "must-not-pass"}
 
     deepseek = claude_compatible_environment("deepseek", vault, base)
-    assert deepseek == {
-        "PATH": "safe",
-        "ANTHROPIC_AUTH_TOKEN": "deep-secret",
-        "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
-        "ANTHROPIC_MODEL": "deepseek-v4-pro",
-        "ANTHROPIC_API_KEY": "",
-    }
+    assert deepseek["PATH"] == "safe"
+    assert deepseek["ANTHROPIC_AUTH_TOKEN"] == "qwen-secret"
+    # The declared Token Plan region governs both plan lanes, not just qwen.
+    assert deepseek["ANTHROPIC_BASE_URL"] == "https://token-plan.example/apps/anthropic"
+    assert deepseek["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
+    assert deepseek["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "deepseek-v4-pro"
+    assert deepseek["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-v4-pro"
+    assert deepseek["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "262144"
+    assert deepseek["ANTHROPIC_API_KEY"] == ""
+    assert "deep-secret" not in deepseek.values()
     kimi = claude_compatible_environment("kimi", vault, base)
     assert kimi["ANTHROPIC_AUTH_TOKEN"] == "current-kimi-secret"
     assert kimi["ANTHROPIC_BASE_URL"] == "https://api.kimi.com/coding/"
@@ -145,7 +149,8 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
     parsed = parse_config_text(rendered)
     assert validate_config(parsed, load_registry()) == ()
     environment = provider_environment_from_config(parsed, "deepseek", {"PATH": "safe"})
-    assert environment["ANTHROPIC_AUTH_TOKEN"] == "deep-secret"
+    assert environment["ANTHROPIC_AUTH_TOKEN"] == "qwen-secret"
+    assert environment["ANTHROPIC_BASE_URL"] == "https://token-plan.example/apps/anthropic"
     assert environment["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
     codex_environment = provider_environment_from_config(parsed, "codex", {"PATH": "safe"})
     assert codex_environment["OPENAI_API_KEY"] == "openai-secret"
@@ -157,7 +162,9 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
         "setup", "--config", str(target), "--answers", str(answers),
         "--credential-file", str(incomplete),
     ]) == 3
-    assert json.loads(capsys.readouterr().out)["finding"] == "provider_credential_missing:kimi,zai"
+    assert json.loads(capsys.readouterr().out)["finding"] == (
+        "provider_credential_missing:deepseek,kimi,zai"
+    )
 
 
 def test_managed_process_loads_saved_source_and_scopes_child_environment(

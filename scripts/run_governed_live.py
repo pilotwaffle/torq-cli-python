@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +15,10 @@ from torq_cli.application.orchestrator import GovernedOrchestrator
 from torq_cli.application.run_command import RunController, RunIdentity
 from torq_cli.connectors.credential_sources import ExplicitEnvVault
 from torq_cli.connectors.live_dispatch import LiveStageDispatcher
+from torq_cli.domain.config_schema import parse_config_bytes, validate_config
 from torq_cli.domain.registry_schema import load_registry
+from torq_cli.safety.entitlements import InMemoryEntitlementLedger
 from torq_cli.safety.receipts import restrict_receipt_trust_anchor, verify_receipt_store
-
-
-_ROLES = ("g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui")
 
 
 def _sha256(path: Path) -> str:
@@ -40,6 +40,7 @@ def _target(path: Path) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--credential-file", type=Path, required=True)
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--export-root", type=Path, required=True)
@@ -56,13 +57,25 @@ def main() -> int:
 
     target = _target(args.target_manifest)
     target_hash = _sha256(args.target_manifest)
-    profile = load_registry().profiles["torq-v5-6-live"]
+    registry = load_registry()
+    config = parse_config_bytes(args.config.read_bytes())
+    findings = validate_config(config, registry)
+    if findings:
+        raise ValueError("governed_config_invalid")
+    entitlement_accounts = config.get("entitlement_accounts")
+    if not isinstance(entitlement_accounts, Mapping):
+        raise ValueError("entitlement_accounts_required")
+    entitlement_ledger = InMemoryEntitlementLedger.from_config(entitlement_accounts)
+    profile = registry.profiles["torq-v5-6-live"]
     vault = ExplicitEnvVault(args.credential_file)
     orchestrator = GovernedOrchestrator(
         LiveStageDispatcher(vault, os.environ),
         loop_budget=1,
         budget_usd=args.budget_usd,
-        cost_ceiling_usd_by_role={role: args.role_ceiling_usd for role in _ROLES},
+        # Only the OpenAI Responses API lane is metered. Subscription lanes are
+        # governed by the account-keyed entitlement ledger instead.
+        cost_ceiling_usd_by_role={"g2a": args.role_ceiling_usd},
+        entitlement_ledger=entitlement_ledger,
     )
     identity = RunIdentity(
         profile.profile_version,

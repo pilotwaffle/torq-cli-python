@@ -13,6 +13,7 @@ import yaml
 
 from torq_cli import __version__
 from torq_cli.application import import_v5_config, import_v5_console
+from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.run_command import RunController, RunIdentity
 from torq_cli.application.resolve import envelope_to_dict, resolve_path
 from torq_cli.application.setup import SetupError, SetupService
@@ -26,6 +27,7 @@ from torq_cli.connectors.native_credentials import (
 from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
+from torq_cli.interfaces.fleet_http import create_fleet_server
 from torq_cli.safety.receipts import verify_receipt_store
 
 
@@ -123,6 +125,12 @@ def _parser() -> argparse.ArgumentParser:
     verify = evidence_sub.add_parser("verify")
     verify.add_argument("--run-root", required=True)
     verify.add_argument("--trusted-public-key")
+    fleet = sub.add_parser("fleet")
+    fleet.add_argument("--run-root", required=True)
+    fleet.add_argument("--trusted-public-key")
+    fleet.add_argument("--serve", action="store_true")
+    fleet.add_argument("--host", default="127.0.0.1")
+    fleet.add_argument("--port", type=int, default=8765)
     return parser
 
 
@@ -172,6 +180,16 @@ def _read_attended_secret() -> str:
         return getpass.getpass("Credential: ")
     except (EOFError, KeyboardInterrupt) as exc:
         raise NativeCredentialError("attended_secret_input_required") from exc
+
+
+def _read_trusted_public_key(path: str | None) -> bytes | None:
+    if path is None:
+        return None
+    encoded = Path(path).read_text(encoding="ascii").strip()
+    trusted_public_key = bytes.fromhex(encoded)
+    if len(trusted_public_key) != 32:
+        raise ValueError("trusted_public_key_invalid")
+    return trusted_public_key
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -229,20 +247,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:
             print(json.dumps({"status": "internal_error"}, sort_keys=True))
             return 5
-    if args.command == "evidence":
-        trusted_public_key = None
-        if args.trusted_public_key is not None:
+    if args.command in {"evidence", "fleet"}:
+        try:
+            trusted_public_key = _read_trusted_public_key(args.trusted_public_key)
+        except (OSError, UnicodeError, ValueError):
+            print(json.dumps({
+                "status": "tampered",
+                "finding": "trusted_public_key_invalid",
+            }, sort_keys=True))
+            return 3
+    if args.command == "fleet":
+        projector = FleetProjector(
+            Path(args.run_root),
+            trusted_public_key=trusted_public_key,
+        )
+        if args.serve:
             try:
-                encoded = Path(args.trusted_public_key).read_text(encoding="ascii").strip()
-                trusted_public_key = bytes.fromhex(encoded)
-                if len(trusted_public_key) != 32:
-                    raise ValueError
-            except (OSError, UnicodeError, ValueError):
-                print(json.dumps({
-                    "status": "tampered",
-                    "finding": "trusted_public_key_invalid",
-                }, sort_keys=True))
+                server = create_fleet_server(
+                    projector,
+                    host=args.host,
+                    port=args.port,
+                )
+            except (OSError, ValueError) as exc:
+                print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
                 return 3
+            host, port = server.server_address[:2]
+            host_text = host.decode("ascii") if isinstance(host, bytes) else str(host)
+            print(json.dumps({
+                "status": "serving",
+                "url": f"http://{host_text}:{port}/api/v1/fleet",
+            }, sort_keys=True), flush=True)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+            return 0
+        snapshot = projector.snapshot()
+        print(json.dumps(snapshot, sort_keys=True))
+        return {"verified": 0, "tampered": 3, "incomplete": 4}[
+            str(snapshot["verification"]["status"])
+        ]
+    if args.command == "evidence":
         result = verify_receipt_store(
             Path(args.run_root), trusted_public_key=trusted_public_key
         )

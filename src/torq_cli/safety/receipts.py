@@ -10,17 +10,98 @@ import secrets
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from torq_cli.core.redaction import PatternRegistry
+from torq_cli.domain.run_evidence import (
+    validate_receipt_payload,
+    validate_v2_receipt_contract,
+)
 
 
 _PRIVATE_KEY_NAME = ".torq-receipt-signing-key"
 _PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
+_LEGACY_RECEIPT_SCHEMA_VERSION = "1.0.0"
+_AUTHORITY_RECEIPT_SCHEMA_VERSION = "1.1.0"
+_RECEIPT_SCHEMA_VERSION = "2.0.0"
+_RECEIPT_AUTHORITIES = frozenset({"worker", "supervisor_derived"})
+_SUPERVISOR_TRANSITIONS = frozenset({"stage_interrupted", "run_decision"})
+_WRITER_ROLES = frozenset({"orchestrator", "supervisor", "operator_gateway"})
+_EVIDENCE_BASES = frozenset({"observed", "derived", "submitted"})
+_SUPERVISOR_WRITES = frozenset({"stage_interrupted", "run_decision"})
+_OPERATOR_WRITES = frozenset({"context_injected", "action_resolved", "run_decision"})
+_RUN_CERTIFICATE_NAME = "run-certificate.json"
+_RUN_IDENTITIES_DIR = ".torq-run-identities"
+
+
+def _receipt_authority_finding(
+    schema_version: object,
+    transition: object,
+    authority: object,
+) -> str | None:
+    if schema_version == _LEGACY_RECEIPT_SCHEMA_VERSION:
+        return "receipt_authority_version_invalid" if authority is not None else None
+    if schema_version != _AUTHORITY_RECEIPT_SCHEMA_VERSION:
+        return "receipt_schema_unsupported"
+    if not isinstance(authority, str) or authority not in _RECEIPT_AUTHORITIES:
+        return "receipt_authority_invalid"
+    if authority == "supervisor_derived" and transition not in _SUPERVISOR_TRANSITIONS:
+        return "receipt_authority_transition_invalid"
+    return None
+
+
+def _writer_contract_finding(
+    writer_role: object,
+    evidence_basis: object,
+    transition: object,
+    payload: object,
+) -> str | None:
+    if writer_role not in _WRITER_ROLES:
+        return "receipt_writer_role_invalid"
+    if evidence_basis not in _EVIDENCE_BASES:
+        return "receipt_evidence_basis_invalid"
+    if writer_role == "supervisor":
+        if evidence_basis != "derived" or transition not in _SUPERVISOR_WRITES:
+            return "receipt_writer_unauthorized"
+    elif writer_role == "operator_gateway":
+        expected_basis = "derived" if transition == "run_decision" else "submitted"
+        if evidence_basis != expected_basis or transition not in _OPERATOR_WRITES:
+            return "receipt_writer_unauthorized"
+    elif evidence_basis == "submitted" or transition in {
+        "context_injected",
+        "action_resolved",
+    }:
+        return "receipt_writer_unauthorized"
+    if not isinstance(transition, str) or not isinstance(payload, Mapping):
+        return "receipt_payload_invalid"
+    return validate_receipt_payload(
+        transition,
+        payload,
+        writer_role=str(writer_role),
+    )
+
+
+def _key_id(public_key: bytes) -> str:
+    return "sha256:" + hashlib.sha256(public_key).hexdigest()
+
+
+def _canonical(value: Mapping[str, Any]) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode()
+
+
+def _canonical_json(value: Mapping[str, Any]) -> str:
+    return _canonical(value).decode("ascii")
 
 
 def _windows_dll(name: str) -> Any:
@@ -371,6 +452,15 @@ def _restrict_signing_file(path: Path, failure: str) -> None:
         raise PermissionError(failure)
 
 
+def _restrict_signing_directory(path: Path, failure: str) -> None:
+    if os.name == "nt":
+        _set_windows_owner_only_acl(path)
+    else:
+        os.chmod(path, 0o700)
+    if not signing_file_permissions_are_restricted(path):
+        raise PermissionError(failure)
+
+
 def _restrict_private_key(path: Path) -> None:
     _restrict_signing_file(path, "receipt_signing_key_permissions_unsafe")
 
@@ -384,17 +474,36 @@ def restrict_receipt_trust_anchor(path: Path) -> None:
     _restrict_trust_anchor(path)
 
 
+@dataclass(frozen=True)
+class RunKeys:
+    manifest: bytes
+    orchestrator: bytes
+    supervisor: bytes
+    operator_gateway: bytes
+    artifact: bytes
+
+
 class RunKeyStore(Protocol):
     def get_or_create(self, run_id: str) -> bytes: ...
+
+    def get_or_create_run_keys(self, run_id: str) -> RunKeys: ...
 
 
 class MemoryRunKeyStore:
     def __init__(self) -> None:
         self._key = secrets.token_bytes(32)
+        self._run_keys: dict[str, RunKeys] = {}
 
     def get_or_create(self, run_id: str) -> bytes:
         del run_id
         return self._key
+
+    def get_or_create_run_keys(self, run_id: str) -> RunKeys:
+        if run_id not in self._run_keys:
+            self._run_keys[run_id] = RunKeys(
+                *(secrets.token_bytes(32) for _ in range(5))
+            )
+        return self._run_keys[run_id]
 
 
 class FileRunKeyStore:
@@ -403,6 +512,7 @@ class FileRunKeyStore:
     def __init__(self, evidence_root: Path) -> None:
         self.evidence_root = evidence_root
         self.private_key_path = evidence_root / _PRIVATE_KEY_NAME
+        self.run_identities_path = evidence_root / _RUN_IDENTITIES_DIR
 
     @staticmethod
     def _read_regular_key(path: Path) -> bytes:
@@ -443,6 +553,54 @@ class FileRunKeyStore:
             _restrict_private_key(self.private_key_path)
             return key
 
+    @staticmethod
+    def _get_or_create_secret(path: Path) -> bytes:
+        try:
+            _restrict_private_key(path)
+            return FileRunKeyStore._read_regular_key(path)
+        except FileNotFoundError:
+            key = secrets.token_bytes(32)
+            encoded = key.hex().encode("ascii")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            try:
+                descriptor = os.open(path, flags, 0o600)
+            except FileExistsError:
+                _restrict_private_key(path)
+                return FileRunKeyStore._read_regular_key(path)
+            try:
+                if os.write(descriptor, encoded) != len(encoded):
+                    raise OSError("receipt_run_key_short_write")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            _restrict_private_key(path)
+            return key
+
+    def get_or_create_run_keys(self, run_id: str) -> RunKeys:
+        identity = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+        self.run_identities_path.mkdir(parents=True, exist_ok=True)
+        _restrict_signing_directory(
+            self.run_identities_path,
+            "receipt_run_identity_permissions_unsafe",
+        )
+        directory = self.run_identities_path / identity
+        directory.mkdir(parents=True, exist_ok=True)
+        _restrict_signing_directory(
+            directory,
+            "receipt_run_identity_permissions_unsafe",
+        )
+        return RunKeys(
+            manifest=self._get_or_create_secret(directory / "manifest.key"),
+            orchestrator=self._get_or_create_secret(directory / "orchestrator.key"),
+            supervisor=self._get_or_create_secret(directory / "supervisor.key"),
+            operator_gateway=self._get_or_create_secret(
+                directory / "operator-gateway.key"
+            ),
+            artifact=self._get_or_create_secret(directory / "artifact.key"),
+        )
+
 
 @dataclass(frozen=True)
 class Verification:
@@ -457,11 +615,16 @@ class StoreVerification:
 
     @property
     def exit_code(self) -> int:
-        return {"verified": 0, "tampered": 3, "incomplete": 4}[self.status]
+        return {
+            "verified": 0,
+            "tampered": 3,
+            "incomplete": 4,
+            "unreadable": 4,
+        }[self.status]
 
 
 class ReceiptChain:
-    schema_version = "1.0.0"
+    schema_version = _RECEIPT_SCHEMA_VERSION
 
     def __init__(self, evidence_root: Path, run_id: str, keys: RunKeyStore, *, profile_version: str, policy_version: str) -> None:
         self.run_id = run_id
@@ -470,9 +633,12 @@ class ReceiptChain:
         self.receipts_path = self.root / "receipts.jsonl"
         self.key = keys.get_or_create(run_id)
         self._pin_signing_identity(evidence_root)
+        self.run_keys = keys.get_or_create_run_keys(run_id)
+        self.certificate_path = self._write_run_certificate()
         self.profile_version = profile_version
         self.policy_version = policy_version
         self.registry = PatternRegistry.default()
+        self._lock = RLock()
         self._sequence = 0
         self._previous: str | None = None
 
@@ -501,14 +667,67 @@ class ReceiptChain:
             os.close(descriptor)
         _restrict_trust_anchor(pin_path)
 
+    def _write_run_certificate(self) -> Path:
+        writer_keys = {
+            "orchestrator": self.run_keys.orchestrator,
+            "supervisor": self.run_keys.supervisor,
+            "operator_gateway": self.run_keys.operator_gateway,
+        }
+        writers: dict[str, dict[str, str]] = {}
+        for role, private_bytes in writer_keys.items():
+            public_key = (
+                Ed25519PrivateKey.from_private_bytes(private_bytes)
+                .public_key()
+                .public_bytes_raw()
+            )
+            writers[role] = {
+                "key_id": _key_id(public_key),
+                "public_key": public_key.hex(),
+            }
+        manifest_public = (
+            Ed25519PrivateKey.from_private_bytes(self.run_keys.manifest)
+            .public_key()
+            .public_bytes_raw()
+        )
+        body = {
+            "certificate_schema_version": "1.0.0",
+            "run_id": self.run_id,
+            "manifest_key": {
+                "key_id": _key_id(manifest_public),
+                "public_key": manifest_public.hex(),
+            },
+            "writers": writers,
+            "artifact_key_id": "sha256:"
+            + hashlib.sha256(self.run_keys.artifact).hexdigest(),
+        }
+        signed = {
+            **body,
+            "root_signature": Ed25519PrivateKey.from_private_bytes(self.key)
+            .sign(_canonical(body))
+            .hex(),
+        }
+        target = self.root / _RUN_CERTIFICATE_NAME
+        encoded = json.dumps(signed, sort_keys=True).encode("utf-8")
+        if target.exists():
+            if not hmac.compare_digest(target.read_bytes(), encoded):
+                raise ValueError("run_certificate_mismatch")
+            return target
+        target.write_bytes(encoded)
+        os.chmod(target, 0o600)
+        return target
+
     @staticmethod
     def hash_file(path: Path) -> str:
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
+    @property
+    def sequence(self) -> int:
+        """Return the last successfully appended receipt sequence."""
+        return self._sequence
+
     @staticmethod
     def _hash(payload: Mapping[str, Any]) -> str:
-        body = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        return "sha256:" + hashlib.sha256(body).hexdigest()
+        return "sha256:" + hashlib.sha256(_canonical(payload)).hexdigest()
 
     def _sanitize(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         serialized = json.dumps(payload, sort_keys=True)
@@ -518,57 +737,122 @@ class ReceiptChain:
             raise TypeError("receipt payload must be an object")
         return value
 
-    def append(self, transition: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        clean = self._sanitize(payload)
-        self._sequence += 1
-        receipt = {
-            "schema_version": self.schema_version,
-            "profile_version": self.profile_version,
-            "policy_version": self.policy_version,
-            "sequence": self._sequence,
-            "previous_receipt_hash": self._previous,
-            "transition": transition,
-            "payload": clean,
-        }
-        receipt_hash = self._hash(receipt)
-        envelope = {**receipt, "receipt_hash": receipt_hash}
-        with self.receipts_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(envelope, sort_keys=True) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(self.receipts_path, 0o600)
-        self._previous = receipt_hash
-        return envelope
+    def append(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        writer_role: str = "orchestrator",
+        evidence_basis: str | None = None,
+    ) -> dict[str, Any]:
+        if evidence_basis is None:
+            evidence_basis = (
+                "derived"
+                if transition
+                in {"run_planned", "run_decision", "repair_routed", "action_opened"}
+                else "observed"
+            )
+        writer_finding = _writer_contract_finding(
+            writer_role,
+            evidence_basis,
+            transition,
+            payload,
+        )
+        if writer_finding is not None:
+            raise ValueError(writer_finding)
+        with self._lock:
+            clean = self._sanitize(payload)
+            payload_finding = validate_receipt_payload(
+                transition,
+                clean,
+                writer_role=writer_role,
+            )
+            if payload_finding is not None:
+                raise ValueError(payload_finding)
+            self._sequence += 1
+            writer_private = getattr(self.run_keys, writer_role)
+            writer_public = (
+                Ed25519PrivateKey.from_private_bytes(writer_private)
+                .public_key()
+                .public_bytes_raw()
+            )
+            receipt = {
+                "schema_version": self.schema_version,
+                "profile_version": self.profile_version,
+                "policy_version": self.policy_version,
+                "sequence": self._sequence,
+                "previous_receipt_hash": self._previous,
+                "transition": transition,
+                "writer_role": writer_role,
+                "evidence_basis": evidence_basis,
+                "writer_key_id": _key_id(writer_public),
+                "payload": clean,
+                "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            }
+            writer_signature = (
+                Ed25519PrivateKey.from_private_bytes(writer_private)
+                .sign(_canonical(receipt))
+                .hex()
+            )
+            signed_receipt = {**receipt, "writer_signature": writer_signature}
+            receipt_hash = self._hash(signed_receipt)
+            envelope = {**signed_receipt, "receipt_hash": receipt_hash}
+            with self.receipts_path.open("a", encoding="utf-8") as stream:
+                stream.write(_canonical_json(envelope) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(self.receipts_path, 0o600)
+            self._previous = receipt_hash
+            self._write_manifest(sealed=False)
+            return envelope
 
     def write_artifact(self, name: str, content: str) -> Path:
-        clean, _ = self.registry.scan(content)
-        nonce = secrets.token_bytes(16)
-        plain = clean.encode()
-        stream = bytearray()
-        counter = 0
-        while len(stream) < len(plain):
-            stream.extend(hmac.new(self.key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest())
-            counter += 1
-        cipher = bytes(a ^ b for a, b in zip(plain, stream, strict=False))
-        target = self.root / "artifacts" / (name + ".enc")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(nonce + cipher)
+        with self._lock:
+            clean, _ = self.registry.scan(content)
+            nonce = secrets.token_bytes(16)
+            plain = clean.encode()
+            stream = bytearray()
+            counter = 0
+            while len(stream) < len(plain):
+                stream.extend(hmac.new(self.run_keys.artifact, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest())
+                counter += 1
+            cipher = bytes(a ^ b for a, b in zip(plain, stream, strict=False))
+            target = self.root / "artifacts" / (name + ".enc")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(nonce + cipher)
+            os.chmod(target, 0o600)
+            return target
+
+    def _write_manifest(self, *, sealed: bool) -> Path:
+        manifest = {
+            "schema_version": self.schema_version,
+            "run_id": self.run_id,
+            "terminal_receipt_hash": self._previous,
+            "receipt_count": self._sequence,
+            "sealed": sealed,
+            "manifest_key_id": _key_id(
+                Ed25519PrivateKey.from_private_bytes(self.run_keys.manifest)
+                .public_key()
+                .public_bytes_raw()
+            ),
+            "certificate_hash": self.hash_file(self.certificate_path),
+        }
+        private = Ed25519PrivateKey.from_private_bytes(self.run_keys.manifest)
+        signed = {
+            **manifest,
+            "signature": private.sign(_canonical(manifest)).hex(),
+        }
+        target = self.root / "terminal-manifest.json"
+        temporary = self.root / ".terminal-manifest.tmp"
+        temporary.write_text(json.dumps(signed, sort_keys=True), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
         os.chmod(target, 0o600)
         return target
 
     def seal(self) -> Path:
-        manifest = {"run_id": self.run_id, "terminal_receipt_hash": self._previous, "receipt_count": self._sequence}
-        body = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-        private = Ed25519PrivateKey.from_private_bytes(self.key)
-        signed = {
-            **manifest,
-            "public_key": private.public_key().public_bytes_raw().hex(),
-            "signature": private.sign(body).hex(),
-        }
-        target = self.root / "terminal-manifest.json"
-        target.write_text(json.dumps(signed, sort_keys=True), encoding="utf-8")
-        os.chmod(target, 0o600)
-        return target
+        with self._lock:
+            return self._write_manifest(sealed=True)
 
     def verify(self, manifest_path: Path) -> Verification:
         trusted_public_key = (
@@ -615,9 +899,12 @@ def verify_receipt_store(
         if not lines:
             return StoreVerification("incomplete", "receipt_chain_truncated")
         previous: str | None = None
-        versions: tuple[str, str, str] | None = None
+        versions: tuple[object, object, object] | None = None
+        receipts: list[dict[str, Any]] = []
         for expected_sequence, line in enumerate(lines, start=1):
             envelope = json.loads(line)
+            if not isinstance(envelope, dict):
+                return StoreVerification("unreadable", "evidence_unreadable")
             receipt_hash = envelope.pop("receipt_hash")
             if envelope.get("sequence") != expected_sequence:
                 return StoreVerification("tampered", "sequence_discontinuity")
@@ -625,6 +912,20 @@ def verify_receipt_store(
                 return StoreVerification("tampered", "receipt_chain_broken")
             if ReceiptChain._hash(envelope) != receipt_hash:
                 return StoreVerification("tampered", "receipt_hash_mismatch")
+            schema_version = envelope.get("schema_version")
+            if schema_version in {
+                _LEGACY_RECEIPT_SCHEMA_VERSION,
+                _AUTHORITY_RECEIPT_SCHEMA_VERSION,
+            }:
+                authority_finding = _receipt_authority_finding(
+                    schema_version,
+                    envelope.get("transition"),
+                    envelope.get("authority"),
+                )
+                if authority_finding is not None:
+                    return StoreVerification("tampered", authority_finding)
+            elif schema_version != _RECEIPT_SCHEMA_VERSION:
+                return StoreVerification("unreadable", "receipt_schema_unsupported")
             current_versions = (envelope.get("schema_version"), envelope.get("profile_version"), envelope.get("policy_version"))
             if versions is not None and current_versions != versions:
                 return StoreVerification("tampered", "version_inconsistency")
@@ -638,9 +939,8 @@ def verify_receipt_store(
                 if not artifact.exists() or ReceiptChain.hash_file(artifact) != payload.get("artifact_hash"):
                     return StoreVerification("tampered", "artifact_hash_mismatch")
             previous = receipt_hash
-        signed = json.loads(manifest_path.read_text(encoding="utf-8"))
-        signature = bytes.fromhex(str(signed.pop("signature")))
-        public_key = bytes.fromhex(str(signed.pop("public_key")))
+            receipts.append(envelope)
+
         pin_path = root.parent / _PUBLIC_KEY_NAME
         try:
             pin_metadata = pin_path.stat(follow_symlinks=False)
@@ -664,12 +964,114 @@ def verify_receipt_store(
                 return StoreVerification("tampered", "trust_identity_unsafe")
         if not hmac.compare_digest(pinned_public_key, trusted_public_key):
             return StoreVerification("tampered", "trust_anchor_substituted")
-        if not hmac.compare_digest(public_key, trusted_public_key):
-            return StoreVerification("tampered", "manifest_signer_untrusted")
+
+        signed = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(signed, dict):
+            return StoreVerification("unreadable", "evidence_unreadable")
+        signature = bytes.fromhex(str(signed.pop("signature")))
         if signed.get("terminal_receipt_hash") != previous or signed.get("receipt_count") != len(lines):
             return StoreVerification("incomplete", "manifest_coverage_mismatch")
-        body = json.dumps(signed, sort_keys=True, separators=(",", ":")).encode()
-        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, body)
+        schema_version = versions[0] if versions is not None else None
+        if schema_version == _RECEIPT_SCHEMA_VERSION:
+            certificate_path = root / _RUN_CERTIFICATE_NAME
+            if not certificate_path.exists():
+                return StoreVerification("incomplete", "run_certificate_missing")
+            certificate = json.loads(certificate_path.read_text(encoding="utf-8"))
+            if not isinstance(certificate, dict):
+                return StoreVerification("unreadable", "run_certificate_invalid")
+            root_signature = bytes.fromhex(str(certificate.pop("root_signature")))
+            try:
+                Ed25519PublicKey.from_public_bytes(trusted_public_key).verify(
+                    root_signature,
+                    _canonical(certificate),
+                )
+            except InvalidSignature:
+                return StoreVerification("tampered", "run_certificate_signature_invalid")
+            if (
+                certificate.get("certificate_schema_version") != "1.0.0"
+                or certificate.get("run_id") != signed.get("run_id")
+                or certificate.get("run_id") != root.name
+                or signed.get("schema_version") != _RECEIPT_SCHEMA_VERSION
+                or signed.get("certificate_hash")
+                != ReceiptChain.hash_file(certificate_path)
+            ):
+                return StoreVerification("tampered", "run_certificate_invalid")
+            manifest_key = certificate.get("manifest_key")
+            writers = certificate.get("writers")
+            if not isinstance(manifest_key, dict) or not isinstance(writers, dict):
+                return StoreVerification("tampered", "run_certificate_invalid")
+            manifest_public = bytes.fromhex(str(manifest_key.get("public_key")))
+            if (
+                manifest_key.get("key_id") != _key_id(manifest_public)
+                or signed.get("manifest_key_id") != manifest_key.get("key_id")
+            ):
+                return StoreVerification("tampered", "manifest_key_untrusted")
+            try:
+                Ed25519PublicKey.from_public_bytes(manifest_public).verify(
+                    signature,
+                    _canonical(signed),
+                )
+            except InvalidSignature:
+                return StoreVerification("tampered", "manifest_signature_invalid")
+            if set(writers) != _WRITER_ROLES:
+                return StoreVerification("tampered", "run_certificate_invalid")
+            certified_key_ids = {str(manifest_key.get("key_id"))}
+            certified_key_ids.update(
+                str(writer.get("key_id"))
+                for writer in writers.values()
+                if isinstance(writer, dict)
+            )
+            artifact_key_id = certificate.get("artifact_key_id")
+            if (
+                not isinstance(artifact_key_id, str)
+                or not artifact_key_id.startswith("sha256:")
+                or artifact_key_id in certified_key_ids
+            ):
+                return StoreVerification("tampered", "run_certificate_invalid")
+            for receipt in receipts:
+                writer_role = receipt.get("writer_role")
+                evidence_basis = receipt.get("evidence_basis")
+                writer_finding = _writer_contract_finding(
+                    writer_role,
+                    evidence_basis,
+                    receipt.get("transition"),
+                    receipt.get("payload"),
+                )
+                if writer_finding is not None:
+                    return StoreVerification("tampered", writer_finding)
+                writer = writers.get(writer_role)
+                if not isinstance(writer, dict):
+                    return StoreVerification("tampered", "receipt_writer_key_unknown")
+                writer_public = bytes.fromhex(str(writer.get("public_key")))
+                if (
+                    writer.get("key_id") != _key_id(writer_public)
+                    or receipt.get("writer_key_id") != writer.get("key_id")
+                ):
+                    return StoreVerification("tampered", "receipt_writer_key_unknown")
+                writer_signature = bytes.fromhex(str(receipt.get("writer_signature")))
+                writer_body = dict(receipt)
+                writer_body.pop("writer_signature")
+                try:
+                    Ed25519PublicKey.from_public_bytes(writer_public).verify(
+                        writer_signature,
+                        _canonical(writer_body),
+                    )
+                except InvalidSignature:
+                    return StoreVerification("tampered", "receipt_writer_signature_invalid")
+            lifecycle_finding = validate_v2_receipt_contract(
+                receipts,
+                sealed=bool(signed.get("sealed")),
+            )
+            if lifecycle_finding is not None:
+                return StoreVerification("tampered", lifecycle_finding)
+        else:
+            public_key = bytes.fromhex(str(signed.pop("public_key")))
+            if not hmac.compare_digest(public_key, trusted_public_key):
+                return StoreVerification("tampered", "manifest_signer_untrusted")
+            Ed25519PublicKey.from_public_bytes(public_key).verify(
+                signature,
+                _canonical(signed),
+            )
         return StoreVerification("verified", None)
     except InvalidSignature:
         return StoreVerification("tampered", "manifest_signature_invalid")
