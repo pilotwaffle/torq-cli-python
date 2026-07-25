@@ -332,7 +332,7 @@ def test_http_bootstrap_is_single_use_and_all_run_reads_require_session(
         connection.request("GET", f"/bootstrap?nonce={nonce}")
         bootstrap = connection.getresponse()
         assert bootstrap.status == 303
-        assert bootstrap.getheader("Location") == "/api/v1/fleet"
+        assert bootstrap.getheader("Location") == "/"
         cookie = str(bootstrap.getheader("Set-Cookie")).partition(";")[0]
         bootstrap.read()
         connection.close()

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
+from importlib.resources import files
 from threading import RLock
 from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, urlsplit
@@ -17,6 +18,21 @@ from urllib.parse import parse_qs, urlsplit
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.core.redaction import RedactionBlocked
+
+
+_FLEET_ASSETS = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/assets/fleet.css": ("fleet.css", "text/css; charset=utf-8"),
+    "/assets/fleet.js": ("fleet.js", "text/javascript; charset=utf-8"),
+}
+
+
+def _load_fleet_assets() -> dict[str, tuple[bytes, str]]:
+    root = files("torq_cli").joinpath("data", "fleet")
+    return {
+        route: (root.joinpath(filename).read_bytes(), content_type)
+        for route, (filename, content_type) in _FLEET_ASSETS.items()
+    }
 
 
 class ContextInjector(Protocol):
@@ -134,6 +150,7 @@ def create_fleet_server(
     if not 0 <= port <= 65535:
         raise ValueError("fleet_port_invalid")
     session_manager = sessions or FleetSessionManager()
+    fleet_assets = _load_fleet_assets()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "TORQFleet/1"
@@ -146,6 +163,10 @@ def create_fleet_server(
                 self._json(200, {"status": "ok"})
                 return
             parsed = urlsplit(self.path)
+            asset = fleet_assets.get(parsed.path)
+            if asset is not None:
+                self._asset(*asset)
+                return
             if parsed.path == "/bootstrap":
                 values = parse_qs(parsed.query, keep_blank_values=True)
                 nonce_values = values.get("nonce", [])
@@ -158,7 +179,7 @@ def create_fleet_server(
                     self._json(403, {"status": "blocked", "finding": str(exc)})
                     return
                 self.send_response(303)
-                self.send_header("Location", "/api/v1/fleet")
+                self.send_header("Location", "/")
                 self.send_header(
                     "Set-Cookie",
                     "torq_fleet_session="
@@ -297,10 +318,25 @@ def create_fleet_server(
             self.end_headers()
             self.wfile.write(encoded)
 
-        def _security_headers(self) -> None:
+        def _asset(self, encoded: bytes, content_type: str) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(encoded)))
+            self._security_headers(allow_ui=True)
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def _security_headers(self, *, allow_ui: bool = False) -> None:
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Content-Security-Policy", "default-src 'none'")
+            policy = "default-src 'none'"
+            if allow_ui:
+                policy += (
+                    "; script-src 'self'; style-src 'self'; connect-src 'self'"
+                    "; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+                    "; form-action 'none'"
+                )
+            self.send_header("Content-Security-Policy", policy)
             self.send_header("Referrer-Policy", "no-referrer")
 
     server = ThreadingHTTPServer((host, port), Handler)

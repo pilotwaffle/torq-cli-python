@@ -25,7 +25,14 @@ torq = "torq_cli.interfaces.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-torq_cli = ["data/**/*.yaml", "data/**/*.json", "data/**/*.md"]
+torq_cli = [
+    "data/**/*.yaml",
+    "data/**/*.json",
+    "data/**/*.md",
+    "data/**/*.html",
+    "data/**/*.css",
+    "data/**/*.js",
+]
 
 [tool.ruff]
 line-length = 100

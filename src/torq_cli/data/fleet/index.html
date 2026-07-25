@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>TORQ Fleet</title>
+  <link rel="stylesheet" href="/assets/fleet.css">
+  <script src="/assets/fleet.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#fleet-board">Skip to fleet board</a>
+  <div class="shell">
+    <header class="topbar">
+      <div class="wordmark" aria-label="TORQ Fleet">
+        <span class="wordmark-mark" aria-hidden="true">TQ</span>
+        <span><strong>TORQ</strong><small>FLEET READ</small></span>
+      </div>
+      <div class="topbar-facts" aria-label="Run status">
+        <div><span>VERIFY</span><strong id="verify-label">CHECKING</strong></div>
+        <div><span>RUN STATE</span><strong id="run-state">LOADING</strong></div>
+        <div><span>ELAPSED</span><strong id="elapsed">—</strong></div>
+        <div><span>OPEN</span><strong id="open-count">0</strong></div>
+      </div>
+    </header>
+
+    <section class="governance-rail" aria-labelledby="rail-title">
+      <div class="rail-heading">
+        <span id="rail-title">GOVERNANCE RAIL</span>
+        <span id="run-id">Awaiting verified run identity</span>
+      </div>
+      <ol id="lane-pips" class="lane-pips" aria-label="Six governed lanes"></ol>
+    </section>
+
+    <div id="system-banner" class="system-banner" role="status" aria-live="polite">
+      Authenticating local evidence…
+    </div>
+
+    <main id="fleet-board" tabindex="-1">
+      <section class="command-deck" aria-label="Orchestrator summary">
+        <article class="orchestrator-panel">
+          <div class="panel-kicker">ORCHESTRATOR / VERIFIED REDUCER</div>
+          <div class="orchestrator-grid">
+            <div>
+              <p class="eyebrow">EXECUTION</p>
+              <p id="execution-state" class="big-state">—</p>
+            </div>
+            <div>
+              <p class="eyebrow">WORKFLOW</p>
+              <p id="workflow-state" class="big-state">—</p>
+            </div>
+            <div>
+              <p class="eyebrow">PROFILE</p>
+              <p id="profile-id" class="mono fact-value">—</p>
+            </div>
+            <div>
+              <p class="eyebrow">EVIDENCE</p>
+              <p id="receipt-count" class="mono fact-value">—</p>
+            </div>
+          </div>
+          <dl class="tally-strip" id="tallies" aria-label="Lane state tallies"></dl>
+        </article>
+
+        <aside class="action-panel" aria-labelledby="action-title">
+          <div class="panel-heading">
+            <div><span class="panel-kicker">OPERATOR LEDGER</span><h2 id="action-title">Open actions</h2></div>
+            <button id="notify-button" class="quiet-button" type="button">Enable alerts</button>
+          </div>
+          <div id="action-list" class="action-list">
+            <p class="empty-copy">No verified actions loaded.</p>
+          </div>
+        </aside>
+      </section>
+
+      <section class="lane-section" aria-labelledby="lane-title">
+        <div class="section-heading">
+          <div><span class="panel-kicker">SEALED CATALOG ORDER</span><h1 id="lane-title">Governed lanes</h1></div>
+          <div class="poll-status"><span id="poll-dot" aria-hidden="true"></span><span id="poll-label">CONNECTING</span></div>
+        </div>
+        <div class="lane-columns lane-columns-head" aria-hidden="true">
+          <span>Lane / model</span><span>State</span><span>Attempt</span><span>Verified seq</span><span>Evidence summary</span><span></span>
+        </div>
+        <div id="lane-list" class="lane-list" aria-live="polite" aria-busy="true"></div>
+      </section>
+
+      <section class="settlement-panel" aria-labelledby="settlement-title">
+        <div><span class="panel-kicker">RUN SETTLEMENT</span><h2 id="settlement-title">Evidence-backed usage</h2></div>
+        <dl id="settlement-list" class="settlement-list"></dl>
+      </section>
+    </main>
+  </div>
+
+  <footer class="mini-monitor" aria-label="Persistent run monitor">
+    <span class="monitor-brand">TQ</span>
+    <span id="monitor-verify" class="monitor-verify">CHECKING</span>
+    <span id="monitor-run" class="monitor-run">Waiting for Fleet</span>
+    <span id="monitor-pips" class="monitor-pips" aria-hidden="true"></span>
+    <span id="monitor-elapsed" class="mono">—</span>
+    <span id="monitor-open" class="monitor-open">0 OPEN</span>
+  </footer>
+</body>
+</html>
