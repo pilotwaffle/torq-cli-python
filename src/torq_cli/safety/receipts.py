@@ -41,6 +41,7 @@ _EVIDENCE_BASES = frozenset({"observed", "derived", "submitted"})
 _RUN_CERTIFICATE_NAME = "run-certificate.json"
 _RUN_IDENTITIES_DIR = ".torq-run-identities"
 _ARTIFACT_FORMAT = b"TORQAEAD1"
+_BINARY = getattr(os, "O_BINARY", 0)
 
 
 def _receipt_authority_finding(
@@ -173,7 +174,7 @@ def _atomic_write(
 ) -> None:
     """Write, flush, replace, and directory-flush one security artifact."""
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(temporary, flags, mode)
@@ -670,7 +671,7 @@ class FileRunKeyStore:
                 os.O_WRONLY
                 | os.O_CREAT
                 | os.O_EXCL
-                | getattr(os, "O_BINARY", 0)
+                | _BINARY
             )
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
@@ -700,7 +701,7 @@ class FileRunKeyStore:
                 os.O_WRONLY
                 | os.O_CREAT
                 | os.O_EXCL
-                | getattr(os, "O_BINARY", 0)
+                | _BINARY
             )
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
@@ -799,7 +800,7 @@ class ReceiptChain:
         public_key = Ed25519PrivateKey.from_private_bytes(self.key).public_key().public_bytes_raw()
         pin_path = evidence_root / _PUBLIC_KEY_NAME
         encoded = public_key.hex().encode("ascii")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -906,6 +907,10 @@ class ReceiptChain:
             serialized = json.dumps(payload, sort_keys=True, allow_nan=False)
         except ValueError as exc:
             raise ValueError("receipt_payload_non_finite") from exc
+        except TypeError as exc:
+            # A payload the encoder cannot represent is a governed refusal like
+            # any other, not an escaping TypeError callers have to special-case.
+            raise ValueError("receipt_payload_unserializable") from exc
         clean, _ = self.registry.scan(serialized)
         value = json.loads(clean)
         if not isinstance(value, dict):
