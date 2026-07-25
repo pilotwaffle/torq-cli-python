@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+import hashlib
 from importlib.resources import files
+import json
 from typing import Any
 
 import yaml
@@ -13,6 +15,13 @@ import yaml
 
 _MTOK = Decimal(1_000_000)
 _PRECISION = Decimal("0.0000000001")
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 @dataclass(frozen=True)
@@ -23,9 +32,10 @@ class ModelRate:
 
 @dataclass(frozen=True)
 class PriceQuote:
-    metered_usd: float | None
+    metered_usd: str | None
     pricing_status: str
     rate_table_version: str
+    rate_table_hash: str
 
 
 class RateTable:
@@ -38,6 +48,28 @@ class RateTable:
             raise ValueError("rate_table_version_required")
         self.version = version
         self._rates = dict(rates)
+        sealed = {
+            "rate_table_version": version,
+            "rates": {
+                provider: {
+                    model: {
+                        "input_usd_per_mtok": format(rate.input_usd_per_mtok, "f"),
+                        "output_usd_per_mtok": format(rate.output_usd_per_mtok, "f"),
+                    }
+                    for (candidate, model), rate in sorted(self._rates.items())
+                    if candidate == provider
+                }
+                for provider in sorted({key[0] for key in self._rates})
+            },
+        }
+        encoded = json.dumps(
+            sealed,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        self.sha256 = hashlib.sha256(encoded).hexdigest()
 
     @classmethod
     def from_document(cls, raw: Mapping[str, Any]) -> RateTable:
@@ -66,7 +98,7 @@ class RateTable:
     ) -> PriceQuote:
         rate = self._rates.get((provider, model))
         if rate is None:
-            return PriceQuote(None, "rate_unknown", self.version)
+            return PriceQuote(None, "rate_unknown", self.version, self.sha256)
         input_tokens = Decimal(int(usage.get("input_tokens", 0)))
         output_tokens = Decimal(int(usage.get("output_tokens", 0)))
         reasoning_tokens = Decimal(int(usage.get("reasoning_tokens", 0)))
@@ -75,7 +107,7 @@ class RateTable:
             + (output_tokens + reasoning_tokens) * rate.output_usd_per_mtok
         ) / _MTOK
         sealed = amount.quantize(_PRECISION, rounding=ROUND_HALF_UP)
-        return PriceQuote(float(sealed), "priced", self.version)
+        return PriceQuote(_decimal_text(sealed), "priced", self.version, self.sha256)
 
 
 def load_default_rate_table() -> RateTable:

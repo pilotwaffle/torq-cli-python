@@ -54,6 +54,7 @@ def _unavailable_snapshot(verification: StoreVerification) -> dict[str, Any]:
         "lanes": [],
         "actions": [],
         "settlement": None,
+        "accounting": None,
     }
 
 
@@ -77,6 +78,7 @@ def reduce_fleet_snapshot(
     *,
     verification_state: str,
     operational_state: Mapping[str, Any] | None = None,
+    accounting: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fold one stable receipt snapshot into UI-facing normalized state."""
     lane_rows: dict[str, dict[str, Any]] = {}
@@ -449,6 +451,7 @@ def reduce_fleet_snapshot(
         "lanes": lanes,
         "actions": actions,
         "settlement": settlement,
+        "accounting": dict(accounting) if accounting is not None else None,
     }
 
 
@@ -461,10 +464,12 @@ class FleetProjector:
         *,
         trusted_public_key: bytes | None = None,
         operational_state: Mapping[str, Any] | None = None,
+        accounting: Mapping[str, Any] | None = None,
     ) -> None:
         self.run_root = run_root
         self.trusted_public_key = trusted_public_key
         self.operational_state = operational_state
+        self.accounting = accounting
 
     def snapshot(self) -> dict[str, Any]:
         verification = verify_receipt_store(
@@ -499,6 +504,7 @@ class FleetProjector:
             manifest,
             verification_state=verification.status,
             operational_state=self.operational_state,
+            accounting=self.accounting,
         )
 
 

@@ -226,7 +226,7 @@ def test_pricing_uses_split_tokens_and_prices_reasoning_as_output() -> None:
         {"input_tokens": 1_000_000, "output_tokens": 100_000, "reasoning_tokens": 50_000},
     )
 
-    assert quote.metered_usd == 3.2
+    assert quote.metered_usd == "3.2"
     assert quote.pricing_status == "priced"
     assert table.quote("moonshot", "k3", {}).pricing_status == "rate_unknown"
     assert table.quote("moonshot", "k3", {}).metered_usd is None
@@ -279,8 +279,9 @@ def test_plan_lane_dispatches_without_a_cost_ceiling_and_seals_replayable_price(
     first = completed[0]
     assert result.status == "design_rejected"
     assert first["settlement"] == "plan_covered"
-    assert first["billed_usd"] == 0.0
-    assert first["metered_usd"] == 0.009
+    assert first["billed_usd"] == "0"
+    assert first["metered_usd"] == "0.009"
+    assert first["rate_table_hash"] == _rates().sha256
     replay = _rates().quote("anthropic", "claude-fable-5", first["usage"])
     assert replay.metered_usd == first["metered_usd"]
     assert result.usage["settlement"]["plan_covered_roles"] == ["g1d", "g1r"]

@@ -475,16 +475,19 @@ made the PR #3 surface results unverifiable.
    seal settlement, billed and metered values, pricing status, rate-table
    version, and entitlement provenance; summaries preserve the split.
 
-7. **C8 / C9 / C10** — dispatch registry, head/count anchor, trust-set coverage
-   gating, durable reservations, reconciliation, and rollback recovery. This is
-   the next phase. The evidence broker prerequisite is now on protected main;
-   until this phase lands, the C3 coverage figure remains advisory because it
-   cannot detect a deleted run.
+7. ~~**C8 / C9 / C10**~~ — **Implemented 2026-07-25.** A broker-signed,
+   hash-chained root registry enrolls every plan account before dispatch. Its
+   separately signed head/count anchor detects truncation and rollback;
+   cross-run verification supplies the coverage denominator; active and
+   explicitly trusted-legacy roots count in the numerator while distrusted,
+   missing, and unverifiable runs remain in the denominator. Reservations are
+   written at transport start, survive uncertain outcomes until window expiry,
+   and reconcile through a second signed hash chain with exact entry IDs.
 
 1 and 2 were defect fixes that stood on their own merits and landed before the
 next governed live run. 3 was the correctness precondition for the ledger and is
-now met. Items 4-6 are on protected main. Item 7 is Release 2 build-order step 9
-and is the backend contract the Fleet accounting surface consumes.
+now met. Items 4-7 are implemented. Item 7 is Release 2 build-order step 9 and
+is the backend contract the Fleet accounting surface consumes.
 
 **Runs sealed before item 1 landed are permanently unpriceable.** That includes
 `docs/evidence/t33-governed-live-2026-07-24/`, whose four `stage_completed`
@@ -515,7 +518,7 @@ must exclude them rather than impute a split.
 - A provider absent from the account map raises `entitlement_unknown` rather
   than defaulting to a private window.
 
-Registry tests (C8/C9), each of which fails today because no registry exists:
+Registry tests (C8/C9), now enforced by `test_release2_accounting.py`:
 
 - **Deleted run is detected.** Enroll two runs, dispatch on both, delete one
   run directory entirely. Coverage reports 1 of 2, not 2 of 2, and preflight

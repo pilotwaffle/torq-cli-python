@@ -1,10 +1,13 @@
 # PRD r5 implementation status — 2026-07-24
 
-Current assessed implementation baseline:
-`6d4d5647001b35dfbea592e32a0c36370bfcb93c` on protected `main`, including
-merged PR #12 and the fresh hosted Windows credential evidence. Hosted quality
-run [`30124572287`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30124572287)
-passed Windows, macOS, Linux, and headless Linux.
+Current protected-main baseline: `8d5f014218f3e7d1ff2f91c1ae3a28abed425fb9`.
+Hosted quality run
+[`30160472701`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30160472701)
+passed Windows, macOS, Linux, and headless Linux. The Release 2 accounting
+candidate documented below is based on that commit and adds the immutable rate
+identity, durable dispatch registry, rollback anchor, cross-run coverage,
+reservation expiry, and signed reconciliation contracts required by Fleet UI
+build-order step 9.
 
 The final T-35 native-credential workflow at the assessed baseline completed
 successfully:
@@ -53,15 +56,14 @@ complete.
 
 ## Verification
 
-- Test collection: 476 tests across 25 test files; the refreshed local suite
-  passes with four intentional live/environment skips (472
-  executed tests).
-- Strict mypy: pass across 48 Python source files.
+- Test collection: 551 tests across 34 test files; the refreshed local suite
+  passes with four intentional live/environment skips (547 executed tests).
+- Strict mypy: pass across 58 Python source files.
 - Ruff: pass.
-- Named security/governance mutants: 22/22 killed. M01-M14 cover config,
-  registry, and hermeticity; M15-M22 cover the evidence layer (signing encoder,
+- Named security/governance mutants: 23/23 killed on Windows (22/22 applicable
+  on POSIX). M01-M14 cover config, registry, and hermeticity; M15-M23 cover the evidence layer (signing encoder,
   receipt sanitizer, transition authority, recovery-abandonment guard, lane
-  state projection, monetary accounting).
+  state projection, monetary accounting, and binary evidence writes).
 - Source distribution and wheel builds: pass; hosted jobs perform isolated wheel
   smoke tests.
 - Hosted PR run `30064851658` and push run `30064849331`: all four jobs green at
