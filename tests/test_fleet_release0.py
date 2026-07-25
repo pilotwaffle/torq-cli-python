@@ -393,3 +393,35 @@ def test_fleet_sessions_expire_and_rotate() -> None:
     assert sessions.authenticate(f"torq_fleet_session={rotated}") is not None
     clock[0] = 110.0
     assert sessions.authenticate(f"torq_fleet_session={rotated}") is None
+
+
+def test_mutation_session_claim_is_atomic_and_rotation_keeps_absolute_age() -> None:
+    clock = [100.0]
+    sessions = FleetSessionManager(
+        clock=lambda: clock[0],
+        idle_seconds=20,
+        absolute_seconds=30,
+    )
+    token = sessions.exchange(sessions.bootstrap_nonce)
+    cookie = f"torq_fleet_session={token}"
+    barrier = threading.Barrier(3)
+    claims: list[object] = []
+
+    def claim() -> None:
+        barrier.wait()
+        claims.append(sessions.claim_mutation(cookie))
+
+    workers = [threading.Thread(target=claim) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    barrier.wait()
+    for worker in workers:
+        worker.join(timeout=2)
+    winners = [claim for claim in claims if claim is not None]
+    assert len(winners) == 1
+
+    clock[0] = 120.0
+    rotated = sessions.rotate(winners[0])  # type: ignore[arg-type]
+    assert sessions.authenticate(f"torq_fleet_session={rotated}") is not None
+    clock[0] = 130.0
+    assert sessions.authenticate(f"torq_fleet_session={rotated}") is None

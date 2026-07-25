@@ -93,6 +93,11 @@ def reduce_fleet_snapshot(
     decision_reason: str | None = None
     decision_writer: dict[str, str] | None = None
     context_injections = 0
+    context_commands_accepted = 0
+    initial_plan_hash: str | None = None
+    current_plan_hash: str | None = None
+    plan_revision = 0
+    replans: list[dict[str, Any]] = []
     reduction_errors: list[str] = []
     abandoned_attempts: set[str] = set()
 
@@ -141,6 +146,10 @@ def reduce_fleet_snapshot(
         if transition == "run_planned":
             run_mode = str(payload.get("mode", "unknown"))
             profile_id = str(payload.get("profile_id", "unknown"))
+            raw_plan_hash = payload.get("plan_hash")
+            if isinstance(raw_plan_hash, str):
+                initial_plan_hash = raw_plan_hash
+                current_plan_hash = raw_plan_hash
             catalog = payload.get("lane_catalog")
             if isinstance(catalog, list):
                 for raw in catalog:
@@ -173,6 +182,14 @@ def reduce_fleet_snapshot(
                         catalog_order.append(role)
                         lane(role)
             continue
+        if transition == "run_replanned":
+            raw_revision = payload.get("plan_revision")
+            raw_hash = payload.get("new_plan_hash")
+            if isinstance(raw_revision, int) and isinstance(raw_hash, str):
+                plan_revision = raw_revision
+                current_plan_hash = raw_hash
+                replans.append({"sequence": sequence, **dict(payload), **writer})
+            continue
         if transition == "run_decision":
             run_status = str(payload.get("status", "unknown"))
             raw_outcome = payload.get("outcome")
@@ -188,6 +205,12 @@ def reduce_fleet_snapshot(
             run_status = "workflow_abandoned"
             run_outcome = "abandoned"
             decision_writer = writer
+            continue
+        if transition == "command_accepted" and payload.get("command_type") in {
+            "context",
+            "artifact",
+        }:
+            context_commands_accepted += 1
             continue
         if transition == "context_injected":
             context_injections += 1
@@ -437,6 +460,13 @@ def reduce_fleet_snapshot(
                 else "receipt_timestamps_unavailable"
             ),
             "context_injections": context_injections,
+            "context_commands_accepted": context_commands_accepted,
+            "plan": {
+                "initial_hash": initial_plan_hash,
+                "current_hash": current_plan_hash,
+                "revision": plan_revision,
+                "replans": replans,
+            },
             "operational_annotations": {
                 "orphaned_roles": orphaned_roles,
                 "recovery_required": bool(orphaned_roles),

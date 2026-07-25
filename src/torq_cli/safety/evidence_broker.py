@@ -155,6 +155,10 @@ class EvidenceBroker:
         with self._lock:
             return self.__chain.read_artifact(path)
 
+    def covered_receipts(self) -> tuple[dict[str, Any], ...]:
+        with self._lock:
+            return self.__chain.covered_receipts()
+
 
 class BrokeredReceiptChain:
     """ReceiptChain-compatible client facade with no key-bearing attributes."""
@@ -213,9 +217,18 @@ class BrokeredReceiptChain:
         return self.__broker.write_artifact(capability.token, name, content)
 
     def read_artifact(self, path: Path) -> str:
+        if self.__writer_role != "orchestrator":
+            raise PermissionError("broker_artifact_read_unauthorized")
         return self.__broker.read_artifact(path)
 
+    def covered_receipts(self) -> tuple[dict[str, Any], ...]:
+        if self.__writer_role != "orchestrator":
+            raise PermissionError("broker_receipt_read_unauthorized")
+        return self.__broker.covered_receipts()
+
     def seal(self) -> Path:
+        if self.__writer_role != "orchestrator":
+            raise PermissionError("broker_seal_unauthorized")
         value = self.__broker.seal()
         if not isinstance(value, Path):
             raise TypeError("broker_manifest_path_invalid")

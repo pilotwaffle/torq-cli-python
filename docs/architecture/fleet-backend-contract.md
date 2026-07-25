@@ -1,6 +1,6 @@
 # Fleet backend contract
 
-Status: **Release 1 implemented on protected main; contract reconciled 2026-07-25.**
+Status: **Release 3 backend implemented; protected-main merge pending 2026-07-25.**
 
 The Fleet backend is a local projection of authenticated run evidence. Its
 server-side reducer is the only evidence reducer. It does not tail provider
@@ -31,12 +31,20 @@ unless an active
 in-process orchestrator explicitly supplies a `GovernedContextInjector`; that
 opt-in enables the same-origin `POST /api/v1/context` contract. The standalone
 CLI server remains read-only. The server rejects non-loopback bind addresses.
+Only the run owner's `ActiveRunRuntime` may provide that opt-in. It owns one
+broker and separate fixed-role orchestrator/operator-gateway facades; the
+gateway cannot decrypt artifacts, inspect covered receipts, or seal the run.
 Every data request requires the HttpOnly Fleet session established by the
 single-use `/bootstrap` nonce exchange. Every request must also present exactly
 one `Host` header matching
 `127.0.0.1:<bound-port>`, `localhost:<bound-port>`, or the IPv6 loopback
 equivalent; other host forms fail with `421 fleet_host_denied` to block
 DNS-rebinding access.
+
+Mutation accepts either inline UTF-8 text or strict Base64 bytes for the pinned
+file extraction contract. The write session is consumed atomically and rotated
+after both accepted and governed-rejected commands. Each mutation re-verifies
+the run; terminal, tampered, incomplete, or cross-run state is non-mutable.
 
 ## Evidence behavior
 

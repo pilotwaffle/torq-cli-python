@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
+from torq_cli.application.context import GovernedContextInjector
+from torq_cli.application.fleet import FleetProjector
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import ProfileSpec, load_registry
 from torq_cli.safety.evidence_broker import BrokeredReceiptChain, EvidenceBroker
@@ -38,6 +40,17 @@ class Checkpoint:
     completed: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ActiveRunRuntime:
+    """The one broker-owned mutable surface for an active governed run."""
+
+    run_id: str
+    execution_chain: BrokeredReceiptChain
+    gateway_chain: BrokeredReceiptChain
+    context_injector: GovernedContextInjector
+    projector: FleetProjector
+
+
 class RunController:
     def __init__(
         self,
@@ -58,6 +71,7 @@ class RunController:
         policy_opt_in: bool = False,
         goal: str = "",
         profile: ProfileSpec | None = None,
+        on_active: Callable[[ActiveRunRuntime], None] | None = None,
     ) -> dict[str, Any]:
         for field, expected_value in expected.items():
             observed = actual.get(field)
@@ -76,14 +90,8 @@ class RunController:
             raise ValueError("policy_version_mismatch")
         mode = "live" if live else "dry_run"
         run_id = "run-" + uuid.uuid4().hex
-        key_chain = ReceiptChain(
-            self.run_root,
-            run_id,
-            FileRunKeyStore(self.run_root),
-            profile_version=identity.profile_version,
-            policy_version=identity.policy_version,
-        )
-        chain = BrokeredReceiptChain(EvidenceBroker(key_chain))
+        runtime = self.create_active_runtime(identity, run_id=run_id)
+        chain = runtime.execution_chain
         bind_run = getattr(self.orchestrator.entitlement_ledger, "bind_run", None)
         if callable(bind_run):
             bind_run(run_id)
@@ -95,6 +103,8 @@ class RunController:
                 "attested_fields": sorted(expected),
             },
         )
+        if on_active is not None:
+            on_active(runtime)
         try:
             result = self.orchestrator.execute(
                 goal=goal,
@@ -126,6 +136,34 @@ class RunController:
             "repair_cycles": result.repair_cycles,
             "timeline": result.timeline,
         }
+
+    def create_active_runtime(
+        self,
+        identity: RunIdentity,
+        *,
+        run_id: str | None = None,
+    ) -> ActiveRunRuntime:
+        active_run_id = run_id or "run-" + uuid.uuid4().hex
+        key_chain = ReceiptChain(
+            self.run_root,
+            active_run_id,
+            FileRunKeyStore(self.run_root),
+            profile_version=identity.profile_version,
+            policy_version=identity.policy_version,
+        )
+        broker = EvidenceBroker(
+            key_chain,
+            allowed_roles=frozenset({"orchestrator", "operator_gateway"}),
+        )
+        execution = BrokeredReceiptChain(broker, writer_role="orchestrator")
+        gateway = BrokeredReceiptChain(broker, writer_role="operator_gateway")
+        return ActiveRunRuntime(
+            run_id=active_run_id,
+            execution_chain=execution,
+            gateway_chain=gateway,
+            context_injector=GovernedContextInjector(self.orchestrator, gateway),
+            projector=FleetProjector(execution.root),
+        )
 
     @staticmethod
     def _profile(profile_version: str) -> ProfileSpec:

@@ -104,6 +104,39 @@ def test_dry_run_plans_governed_graph_without_provider_dispatch(tmp_path: Path) 
     assert transitions == ["run_planned", "run_decision"]
 
 
+def test_active_runtime_uses_one_broker_with_fixed_role_facades(tmp_path: Path) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    identity = RunIdentity(
+        profile.profile_version,
+        "3.1.3",
+        "registry-v1",
+        "profile-bound",
+        "sandbox-test",
+        1,
+        "prior-chain",
+    )
+    runtime = RunController(tmp_path / "runtime").create_active_runtime(identity)
+
+    accepted = runtime.context_injector.inject("Runtime-owned command")
+    row = json.loads(runtime.gateway_chain.receipts_path.read_text().splitlines()[0])
+    assert row["transition"] == "command_accepted"
+    assert row["writer_role"] == "operator_gateway"
+    assert accepted["status"] == "accepted"
+    with pytest.raises(PermissionError, match="broker_seal_unauthorized"):
+        runtime.gateway_chain.seal()
+    with pytest.raises(PermissionError, match="broker_artifact_read_unauthorized"):
+        runtime.gateway_chain.read_artifact(
+            runtime.gateway_chain.root / str(accepted["artifact"])
+        )
+    with pytest.raises(PermissionError, match="broker_writer_role_unbound"):
+        runtime.execution_chain.append(
+            "command_rejected",
+            {},
+            writer_role="operator_gateway",
+            evidence_basis="submitted",
+        )
+
+
 def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approval(
     tmp_path: Path,
 ) -> None:

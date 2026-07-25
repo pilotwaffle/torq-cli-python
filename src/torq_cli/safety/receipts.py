@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import stat
 from collections.abc import Mapping
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from torq_cli.core.redaction import PatternRegistry
+from torq_cli.core.canonical_json import canonical_json
 from torq_cli.domain.evidence_transitions import transition_authority_finding
 from torq_cli.domain.run_evidence import (
     validate_receipt_payload,
@@ -92,13 +94,7 @@ def _key_id(public_key: bytes) -> str:
 
 
 def _canonical(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode()
+    return canonical_json(value)
 
 
 def _canonical_for_verification(value: Mapping[str, Any]) -> bytes:
@@ -614,6 +610,10 @@ class ReceiptWriter(Protocol):
 
     def write_artifact(self, name: str, content: str) -> Path: ...
 
+    def read_artifact(self, path: Path) -> str: ...
+
+    def covered_receipts(self) -> tuple[dict[str, Any], ...]: ...
+
     def seal(self) -> Path: ...
 
     @staticmethod
@@ -1006,6 +1006,8 @@ class ReceiptChain:
 
     def write_artifact(self, name: str, content: str) -> Path:
         with self._lock:
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name) is None:
+                raise ValueError("artifact_name_invalid")
             clean, _ = self.registry.scan(content)
             nonce = secrets.token_bytes(12)
             plain = clean.encode()
@@ -1014,8 +1016,13 @@ class ReceiptChain:
                 plain,
                 self.run_id.encode("utf-8"),
             )
-            target = self.root / "artifacts" / (name + ".enc")
-            target.parent.mkdir(parents=True, exist_ok=True)
+            artifact_root = self.root / "artifacts"
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            if artifact_root.resolve() != self.root.resolve() / "artifacts":
+                raise ValueError("artifact_directory_unsafe")
+            target = artifact_root / (name + ".enc")
+            if target.exists():
+                raise ValueError("artifact_name_collision")
             _atomic_write(target, _ARTIFACT_FORMAT + nonce + cipher)
             return target
 
@@ -1037,6 +1044,20 @@ class ReceiptChain:
             self.run_id.encode("utf-8"),
         )
         return plain.decode("utf-8")
+
+    def covered_receipts(self) -> tuple[dict[str, Any], ...]:
+        """Return only the receipt prefix committed by the signed manifest."""
+        with self._lock:
+            manifest = json.loads(
+                (self.root / "terminal-manifest.json").read_text(encoding="utf-8")
+            )
+            count = manifest.get("receipt_count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError("manifest_receipt_count_invalid")
+            lines = self.receipts_path.read_text(encoding="utf-8").splitlines()
+            if len(lines) < count:
+                raise ValueError("receipt_chain_truncated")
+            return tuple(json.loads(line) for line in lines[:count])
 
     def _write_manifest(self, *, sealed: bool) -> Path:
         manifest = {

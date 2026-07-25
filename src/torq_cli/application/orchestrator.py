@@ -8,16 +8,26 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from threading import RLock
 from typing import Any, Protocol, cast
 
 from torq_cli.connectors import Connector
+from torq_cli.application.artifact_extraction import (
+    ArtifactExtractionError,
+    extract_supported_artifact,
+    validate_source_label,
+)
 from torq_cli.core.engine import NormalizedResponse
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.core.policy import Defect, G2APolicy
-from torq_cli.core.redaction import PatternRegistry
+from torq_cli.core.redaction import PatternRegistry, RedactionBlocked
 from torq_cli.domain.registry_schema import BindingSpec, ProfileSpec
 from torq_cli.domain.run_evidence import CONDITIONAL_LANES, LANE_ORDER
+from torq_cli.domain.run_plan import (
+    PLAN_CONTRACT,
+    initial_plan_body,
+    plan_hash,
+    revision_body,
+)
 from torq_cli.safety.entitlements import EntitlementLedger, PlanWindow
 from torq_cli.safety.pricing import RateTable, load_default_rate_table
 from torq_cli.safety.receipts import ReceiptWriter
@@ -128,8 +138,6 @@ class GovernedOrchestrator:
         self.rate_table = rate_table or load_default_rate_table()
         self.registry = PatternRegistry.default()
         self.policy = G2APolicy()
-        self._context_lock = RLock()
-        self._pending_context: list[dict[str, str]] = []
         self._attempt_ordinals: dict[str, int] = {}
 
     def inject_context(
@@ -140,58 +148,186 @@ class GovernedOrchestrator:
         target_role: str | None = None,
         media_type: str = "text/plain",
         source_name: str | None = None,
+        confirm_direct: bool = False,
     ) -> Mapping[str, Any]:
-        """Seal sanitized operator context and queue it for governed dispatch."""
-        encoded = content.encode("utf-8")
-        if not content.strip():
-            raise OrchestrationBlocked("context_empty")
-        if len(encoded) > 1_048_576:
-            raise OrchestrationBlocked("context_too_large")
+        """Durably acknowledge sanitized operator context and queue it."""
+        command_id = "cmd-" + secrets.token_hex(12)
         target = target_role or "lead"
-        if target != "lead" and target not in self._PLANNED_ROLES:
-            raise OrchestrationBlocked("context_target_invalid")
-        if not (
-            media_type.startswith("text/")
-            or media_type in {
-                "application/json",
-                "application/xml",
-                "application/yaml",
-                "application/x-yaml",
-            }
-        ):
-            raise OrchestrationBlocked("context_media_type_invalid")
-        clean, findings = self.registry.scan(content)
+        encoded = b""
+        safe_source_name: str | None = None
+        try:
+            encoded = content.encode("utf-8", errors="strict")
+            if not content.strip():
+                raise OrchestrationBlocked("context_empty")
+            if len(encoded) > 1_048_576:
+                raise OrchestrationBlocked("context_too_large")
+            if target != "lead" and target not in self._PLANNED_ROLES:
+                raise OrchestrationBlocked("context_target_invalid")
+            if target != "lead" and not confirm_direct:
+                raise OrchestrationBlocked("context_direct_confirmation_required")
+            if source_name is not None:
+                safe_source_name = validate_source_label(source_name)
+                scanned_name, name_findings = self.registry.scan(safe_source_name)
+                if scanned_name != safe_source_name or name_findings:
+                    raise OrchestrationBlocked("context_source_name_sensitive")
+            if not (
+                media_type.startswith("text/")
+                or media_type in {
+                    "application/json",
+                    "application/xml",
+                    "application/yaml",
+                    "application/x-yaml",
+                }
+            ):
+                raise OrchestrationBlocked("context_media_type_invalid")
+            clean, findings = self.registry.scan(content)
+        except (OrchestrationBlocked, RedactionBlocked, UnicodeError) as exc:
+            finding = "context_encoding_invalid" if isinstance(exc, UnicodeError) else str(exc)
+            chain.append(
+                "command_rejected",
+                {
+                    "command_id": command_id,
+                    "command_type": "context",
+                    "target_role": target if isinstance(target, str) else None,
+                    "media_type": media_type,
+                    "source_name": safe_source_name,
+                    "content_bytes": len(encoded),
+                    "finding": finding,
+                    "earliest_eligible_attempt": None,
+                    "provider_dispatch": False,
+                },
+                writer_role="operator_gateway",
+                evidence_basis="submitted",
+            )
+            raise
         context_id = "ctx-" + secrets.token_hex(8)
         artifact = chain.write_artifact(context_id, clean)
         artifact_hash = chain.hash_file(artifact)
+        accepted = chain.append(
+            "command_accepted",
+            {
+                "command_id": command_id,
+                "command_type": "context",
+                "context_id": context_id,
+                "target_role": target,
+                "route": "lead_replan" if target == "lead" else "direct_lane",
+                "artifact": str(artifact.relative_to(chain.root)),
+                "artifact_hash": artifact_hash,
+                "media_type": media_type,
+                "source_name": safe_source_name,
+                "content_bytes": len(clean.encode("utf-8")),
+                "redactions": findings,
+                "earliest_eligible_attempt": {
+                    "kind": "attempt_created_after_acknowledgement"
+                },
+                "provider_dispatch": False,
+                "direct_route_confirmed": target == "lead" or confirm_direct,
+            },
+            writer_role="operator_gateway",
+            evidence_basis="submitted",
+        )
         payload: dict[str, Any] = {
+            "command_id": command_id,
+            "accepted_sequence": accepted["sequence"],
             "context_id": context_id,
             "target_role": target,
             "route": "lead_replan" if target == "lead" else "direct_lane",
             "media_type": media_type,
-            "source_name": source_name,
+            "source_name": safe_source_name,
             "content_bytes": len(clean.encode("utf-8")),
             "redactions": findings,
             "artifact": str(artifact.relative_to(chain.root)),
             "artifact_hash": artifact_hash,
             "provider_dispatch": False,
+            "direct_route_confirmed": target == "lead" or confirm_direct,
         }
-        with self._context_lock:
-            receipt = chain.append(
-                "context_injected",
-                payload,
+        return {
+            **payload,
+            "status": "accepted",
+            "sequence": accepted["sequence"],
+            "receipt_hash": accepted["receipt_hash"],
+        }
+
+    def inject_artifact(
+        self,
+        chain: ReceiptWriter,
+        content: bytes,
+        *,
+        media_type: str,
+        source_name: str,
+        target_role: str | None = None,
+        confirm_direct: bool = False,
+    ) -> Mapping[str, Any]:
+        """Extract, sanitize, encrypt, and durably acknowledge a supported file."""
+        command_id = "cmd-" + secrets.token_hex(12)
+        target = target_role or "lead"
+        safe_source_name: str | None = None
+        try:
+            if target != "lead" and target not in self._PLANNED_ROLES:
+                raise OrchestrationBlocked("context_target_invalid")
+            if target != "lead" and not confirm_direct:
+                raise OrchestrationBlocked("context_direct_confirmation_required")
+            extracted = extract_supported_artifact(
+                content,
+                media_type=media_type,
+                source_name=source_name,
+            )
+            safe_source_name = extracted.source_name
+            safe_name, name_findings = self.registry.scan(extracted.source_name)
+            if safe_name != extracted.source_name or name_findings:
+                raise ArtifactExtractionError("artifact_source_name_sensitive")
+            clean, findings = self.registry.scan(extracted.text)
+        except (ArtifactExtractionError, OrchestrationBlocked, RedactionBlocked) as exc:
+            chain.append(
+                "command_rejected",
+                {
+                    "command_id": command_id,
+                    "command_type": "artifact",
+                    "target_role": target,
+                    "media_type": media_type,
+                    "source_name": safe_source_name,
+                    "content_bytes": len(content),
+                    "finding": str(exc),
+                    "earliest_eligible_attempt": None,
+                    "provider_dispatch": False,
+                },
                 writer_role="operator_gateway",
                 evidence_basis="submitted",
             )
-            self._pending_context.append({
-                "context_id": context_id,
-                "target_role": target,
-                "content": clean,
-            })
+            raise
+        context_id = "ctx-" + secrets.token_hex(8)
+        artifact = chain.write_artifact(context_id, clean)
+        payload: dict[str, Any] = {
+            "command_id": command_id,
+            "command_type": "artifact",
+            "context_id": context_id,
+            "target_role": target,
+            "route": "lead_replan" if target == "lead" else "direct_lane",
+            "artifact": str(artifact.relative_to(chain.root)),
+            "artifact_hash": chain.hash_file(artifact),
+            "media_type": extracted.media_type,
+            "source_name": extracted.source_name,
+            "content_bytes": len(clean.encode("utf-8")),
+            "redactions": findings,
+            "extraction": extracted.evidence(),
+            "earliest_eligible_attempt": {
+                "kind": "attempt_created_after_acknowledgement"
+            },
+            "provider_dispatch": False,
+            "direct_route_confirmed": target == "lead" or confirm_direct,
+        }
+        accepted = chain.append(
+            "command_accepted",
+            payload,
+            writer_role="operator_gateway",
+            evidence_basis="submitted",
+        )
         return {
             **payload,
-            "sequence": receipt["sequence"],
-            "receipt_hash": receipt["receipt_hash"],
+            "status": "accepted",
+            "accepted_sequence": accepted["sequence"],
+            "sequence": accepted["sequence"],
+            "receipt_hash": accepted["receipt_hash"],
         }
 
     def resolve_action(
@@ -261,6 +397,13 @@ class GovernedOrchestrator:
         chain: ReceiptWriter,
     ) -> OrchestrationResult:
         planned = self._PLANNED_ROLES
+        lane_catalog = self._lane_catalog(profile)
+        initial_plan = initial_plan_body(
+            profile_id=profile.profile_id,
+            strategy_id=profile.strategy_id,
+            planned_roles=planned,
+            lane_catalog=lane_catalog,
+        )
         self._attempt_ordinals = {}
         missing = tuple(role for role in planned if role not in profile.bindings)
         if missing:
@@ -272,7 +415,9 @@ class GovernedOrchestrator:
                 "profile_id": profile.profile_id,
                 "strategy_id": profile.strategy_id,
                 "planned_roles": planned,
-                "lane_catalog": self._lane_catalog(profile),
+                "plan_contract": PLAN_CONTRACT,
+                "plan_hash": plan_hash(initial_plan),
+                "lane_catalog": lane_catalog,
                 "rate_table_version": self.rate_table.version,
                 "rate_table_hash": self.rate_table.sha256,
             },
@@ -315,6 +460,7 @@ class GovernedOrchestrator:
             # A refusal that leaves no terminal receipt is indistinguishable
             # from a run that never happened. Record the decision, then let the
             # caller seal and re-raise.
+            self._flush_unapplied_commands(chain)
             chain.append(
                 "run_decision",
                 {
@@ -433,7 +579,7 @@ class GovernedOrchestrator:
             raise OrchestrationBlocked(f"profile_binding_missing:{role}")
         attempt = attempt or self._allocate_attempt(role, repair_cycle=repair_cycle)
         attempt_evidence = self._attempt_evidence(attempt)
-        chain.append(
+        created = chain.append(
             "stage_attempt_created",
             {
                 **attempt_evidence,
@@ -484,6 +630,7 @@ class GovernedOrchestrator:
                 binding=binding,
                 budget=budget,
                 attempt_evidence=attempt_evidence,
+                attempt_created_sequence=int(created["sequence"]),
                 chain=chain,
             )
         except Exception as exc:
@@ -674,9 +821,15 @@ class GovernedOrchestrator:
         binding: BindingSpec,
         budget: StageBudget,
         attempt_evidence: Mapping[str, Any],
+        attempt_created_sequence: int,
         chain: ReceiptWriter,
     ) -> str:
-        injected = self._consume_context(role)
+        injected = self._consume_context(
+            chain,
+            role=role,
+            attempt_evidence=attempt_evidence,
+            attempt_created_sequence=attempt_created_sequence,
+        )
         prompt_context: dict[str, Any] = dict(context)
         if injected:
             prompt_context["injected_context"] = [
@@ -694,6 +847,7 @@ class GovernedOrchestrator:
                 "prompt_id": binding.prompt_id,
                 "redactions": findings,
                 "context_ids": tuple(item["context_id"] for item in injected),
+                "command_ids": tuple(item["command_id"] for item in injected),
                 "settlement": budget.settlement,
                 "entitlement": (
                     budget.window.as_receipt() if budget.window is not None else None
@@ -714,21 +868,190 @@ class GovernedOrchestrator:
                 raise OrchestrationBlocked(f"plan_window_exceeded:{role}") from exc
         return clean_prompt
 
-    def _consume_context(self, role: str) -> list[dict[str, str]]:
-        with self._context_lock:
-            selected = [
-                item
-                for item in self._pending_context
-                if item["target_role"] in {"lead", role}
-            ]
-            if selected:
-                selected_ids = {item["context_id"] for item in selected}
-                self._pending_context = [
-                    item
-                    for item in self._pending_context
-                    if item["context_id"] not in selected_ids
-                ]
-            return selected
+    def _consume_context(
+        self,
+        chain: ReceiptWriter,
+        *,
+        role: str,
+        attempt_evidence: Mapping[str, Any],
+        attempt_created_sequence: int,
+    ) -> list[dict[str, str]]:
+        receipts = chain.covered_receipts()
+        finalized = {
+            str(receipt.get("payload", {}).get("command_id"))
+            for receipt in receipts
+            if receipt.get("transition") in {"context_injected", "command_unapplied"}
+            and isinstance(receipt.get("payload"), Mapping)
+        }
+        accepted = [
+            receipt
+            for receipt in receipts
+            if receipt.get("transition") == "command_accepted"
+            and isinstance(receipt.get("payload"), Mapping)
+            and str(receipt["payload"].get("command_id")) not in finalized
+            and receipt["payload"].get("target_role") in {"lead", role}
+            and int(receipt.get("sequence", 0)) < attempt_created_sequence
+        ]
+        selected: list[dict[str, str]] = []
+        for receipt in accepted:
+            payload = receipt["payload"]
+            assert isinstance(payload, Mapping)
+            artifact_relative = str(payload["artifact"])
+            artifact = chain.root / artifact_relative
+            if chain.hash_file(artifact) != payload["artifact_hash"]:
+                raise OrchestrationBlocked("context_artifact_hash_mismatch")
+            content = chain.read_artifact(artifact)
+            context_id = str(payload["context_id"])
+            command_id = str(payload["command_id"])
+            if payload["target_role"] == "lead":
+                self._append_replan(
+                    chain,
+                    command_id=command_id,
+                    accepted_sequence=int(receipt["sequence"]),
+                    attempt_evidence=attempt_evidence,
+                    attempt_created_sequence=attempt_created_sequence,
+                )
+            chain.append(
+                "context_injected",
+                {
+                    "command_id": command_id,
+                    "command_type": payload["command_type"],
+                    "accepted_sequence": receipt["sequence"],
+                    "context_id": context_id,
+                    "target_role": payload["target_role"],
+                    "artifact": artifact_relative,
+                    "artifact_hash": payload["artifact_hash"],
+                    "media_type": payload["media_type"],
+                    "route": payload["route"],
+                    "source_name": payload.get("source_name"),
+                    "content_bytes": payload["content_bytes"],
+                    "redactions": payload.get("redactions", ()),
+                    "extraction": payload.get("extraction"),
+                    "direct_route_confirmed": payload["direct_route_confirmed"],
+                    "effective_attempt": {
+                        "role": role,
+                        "attempt_id": attempt_evidence["attempt_id"],
+                        "attempt_ordinal": attempt_evidence["attempt_ordinal"],
+                        "attempt_created_sequence": attempt_created_sequence,
+                    },
+                    "provider_dispatch": False,
+                },
+                writer_role="orchestrator",
+                evidence_basis="derived",
+            )
+            selected.append({
+                "command_id": command_id,
+                "context_id": context_id,
+                "content": content,
+            })
+        return selected
+
+    def _append_replan(
+        self,
+        chain: ReceiptWriter,
+        *,
+        command_id: str,
+        accepted_sequence: int,
+        attempt_evidence: Mapping[str, Any],
+        attempt_created_sequence: int,
+    ) -> None:
+        receipts = chain.covered_receipts()
+        planned = next(
+            receipt
+            for receipt in receipts
+            if receipt.get("transition") == "run_planned"
+        )
+        planned_payload = planned["payload"]
+        assert isinstance(planned_payload, Mapping)
+        prior_replans = [
+            receipt for receipt in receipts if receipt.get("transition") == "run_replanned"
+        ]
+        old_hash = (
+            str(prior_replans[-1]["payload"]["new_plan_hash"])
+            if prior_replans
+            else str(planned_payload["plan_hash"])
+        )
+        previous_sequence = (
+            int(prior_replans[-1]["sequence"]) if prior_replans else None
+        )
+        affected = ({
+            "role": attempt_evidence["role"],
+            "attempt_id": attempt_evidence["attempt_id"],
+            "attempt_ordinal": attempt_evidence["attempt_ordinal"],
+            "attempt_created_sequence": attempt_created_sequence,
+        },)
+        revision = len(prior_replans) + 1
+        body = revision_body(
+            plan_revision=revision,
+            previous_plan_hash=old_hash,
+            command_id=command_id,
+            accepted_sequence=accepted_sequence,
+            affected_future_attempts=affected,
+        )
+        chain.append(
+            "run_replanned",
+            {
+                "plan_contract": PLAN_CONTRACT,
+                "plan_revision": revision,
+                "previous_replan_sequence": previous_sequence,
+                "command_id": command_id,
+                "accepted_sequence": accepted_sequence,
+                "reason": "operator_context",
+                "old_plan_hash": old_hash,
+                "new_plan_hash": plan_hash(body),
+                "affected_future_attempts": affected,
+                "provider_dispatch": False,
+            },
+            writer_role="orchestrator",
+            evidence_basis="derived",
+        )
+
+    def _flush_unapplied_commands(self, chain: ReceiptWriter) -> tuple[str, ...]:
+        """Finalize accepted commands before a terminal run decision."""
+        receipts = chain.covered_receipts()
+        finalized = {
+            str(receipt.get("payload", {}).get("command_id"))
+            for receipt in receipts
+            if receipt.get("transition") in {"context_injected", "command_unapplied"}
+            and isinstance(receipt.get("payload"), Mapping)
+        }
+        pending = [
+            receipt
+            for receipt in receipts
+            if receipt.get("transition") == "command_accepted"
+            and isinstance(receipt.get("payload"), Mapping)
+            and str(receipt["payload"].get("command_id")) not in finalized
+        ]
+        if not pending:
+            return ()
+        chain.append(
+            "run_decision",
+            {
+                "status": "terminating",
+                "outcome": "pending_commands_unapplied",
+                "provider_dispatch": False,
+            },
+        )
+        command_ids: list[str] = []
+        for receipt in pending:
+            payload = receipt["payload"]
+            assert isinstance(payload, Mapping)
+            command_id = str(payload["command_id"])
+            chain.append(
+                "command_unapplied",
+                {
+                    "command_id": command_id,
+                    "accepted_sequence": receipt["sequence"],
+                    "target_role": payload["target_role"],
+                    "reason": "run_terminating",
+                    "last_covered_sequence": chain.sequence,
+                    "provider_dispatch": False,
+                },
+                writer_role="orchestrator",
+                evidence_basis="derived",
+            )
+            command_ids.append(command_id)
+        return tuple(command_ids)
 
     def _allocate_attempt(self, role: str, *, repair_cycle: int) -> StageAttempt:
         ordinal = self._attempt_ordinals.get(role, 0) + 1
@@ -962,6 +1285,7 @@ class GovernedOrchestrator:
                 },
             )
         else:
+            self._flush_unapplied_commands(chain)
             chain.append(
                 "run_decision",
                 {
