@@ -1,10 +1,13 @@
-"""Pin the canonical encoder's own guarantees, independent of its callers.
+"""Pin how evidence bytes are produced, independent of the callers that use them.
 
 `ReceiptChain._sanitize` rejects non-finite payloads before `_canonical` is ever
 reached, so every existing test that exercises strictness kills the sanitizer's
 guard and leaves the signing encoder's guard untested. These tests hold the
 encoder to its contract directly: the bytes that get signed are conforming JSON,
 key-ordered, compact, and ASCII-only.
+
+They also pin the step after encoding — that the bytes handed to `_atomic_write`
+are the bytes that come back off disk, on every platform.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import pytest
 from torq_cli.safety.receipts import (
     FileRunKeyStore,
     ReceiptChain,
+    _atomic_write,
     _canonical,
     _canonical_for_verification,
 )
@@ -55,6 +59,20 @@ def test_verification_encoder_still_reproduces_legacy_non_finite_bytes() -> None
     # Receipts signed before the encoder tightened must stay verifiable: the
     # verification path reproduces the exact bytes that were signed.
     assert _canonical_for_verification({"score": float("nan")}) == b'{"score":NaN}'
+
+
+def test_atomic_write_preserves_binary_payloads_byte_for_byte(tmp_path: Path) -> None:
+    # Windows opens descriptors in the CRT's default text mode, which expands
+    # every 0x0A to 0x0D 0x0A. Encrypted artifacts are uniformly random bytes,
+    # so about one in six contained a newline and came back off disk longer than
+    # it went on — failing AEAD authentication with no diagnostic beyond
+    # `InvalidTag`. Every byte value must survive a round trip.
+    payload = bytes(range(256)) * 4
+    target = tmp_path / "artifact.bin"
+
+    _atomic_write(target, payload)
+
+    assert target.read_bytes() == payload
 
 
 def test_unserializable_payload_is_a_governed_finding(tmp_path: Path) -> None:

@@ -41,6 +41,11 @@ _EVIDENCE_BASES = frozenset({"observed", "derived", "submitted"})
 _RUN_CERTIFICATE_NAME = "run-certificate.json"
 _RUN_IDENTITIES_DIR = ".torq-run-identities"
 _ARTIFACT_FORMAT = b"TORQAEAD1"
+# Windows opens descriptors in the CRT's default text mode, which expands every
+# 0x0A byte written to 0x0D 0x0A. Everything below is binary security material,
+# so without O_BINARY roughly one artifact in six comes back off disk longer
+# than it went on and fails AEAD authentication.
+_BINARY = getattr(os, "O_BINARY", 0)
 
 
 def _receipt_authority_finding(
@@ -173,7 +178,7 @@ def _atomic_write(
 ) -> None:
     """Write, flush, replace, and directory-flush one security artifact."""
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(temporary, flags, mode)
@@ -666,7 +671,7 @@ class FileRunKeyStore:
         except FileNotFoundError:
             key = secrets.token_bytes(32)
             encoded = key.hex().encode("ascii")
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             try:
@@ -691,7 +696,7 @@ class FileRunKeyStore:
         except FileNotFoundError:
             key = secrets.token_bytes(32)
             encoded = key.hex().encode("ascii")
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             try:
@@ -789,7 +794,7 @@ class ReceiptChain:
         public_key = Ed25519PrivateKey.from_private_bytes(self.key).public_key().public_bytes_raw()
         pin_path = evidence_root / _PUBLIC_KEY_NAME
         encoded = public_key.hex().encode("ascii")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
