@@ -1,7 +1,7 @@
 # Plan entitlement accounting
 
-Status: **implemented on `feat/plan-entitlement-accounting`; merge pending.**
-Written and implemented 2026-07-24 against `orchestrator.py`,
+Status: **items 1-6 merged to `main` in PR #15 (2026-07-25); items 7 (C8/C9) not
+started.** Written and implemented 2026-07-24 against `orchestrator.py`,
 `adapters/live_provider.py`, and `scripts/run_governed_live.py`.
 
 Every provider lane now runs on a paid subscription rather than metered API
@@ -342,10 +342,83 @@ only:
 The mixed case is the normal case: `budget` constrains only `g2a`, while
 `metered_equivalent_usd` covers every priced lane.
 
+### C8 — Dispatch registry (PRD AR-4a, AR-4c)
+
+Everything above measures consumption from run evidence. That is sound only
+while the set of runs is itself known. It is not: a run's usage and the only
+proof the run existed live in the same directory, so deleting it removes
+numerator and denominator together and coverage stays at 100 percent. The ledger
+reads freed quota where an attacker read evidence.
+
+A root-level, append-only registry outside every run directory closes this. The
+broker owns it, enrolls a run at creation before its first dispatch, and signs
+each entry:
+
+```python
+@dataclass(frozen=True)
+class RegistryEntry:
+    run_id: str
+    account: str            # entitlement account, matching PlanWindow.account
+    root_key_id: str        # trust anchor the run's certificate chains to
+    window_resets_at: str   # ISO-8601 Z, the rolling window it draws from
+    enrolled_at: str        # ISO-8601 Z, before first dispatch
+    entry_hash: str         # over the canonical entry plus prior entry_hash
+```
+
+`entry_hash` chains the journal. The broker anchors the current head outside the
+mutable journal, beside the trust anchor and under the same file protections.
+Verification recomputes the journal head and compares it to the anchored head —
+signatures alone detect modification but not deletion of the journal or
+restoration of an older, still-validly-signed copy.
+
+Resolution of a registry entry against the evidence tree:
+
+| Entry resolves to | In active denominator | Reservation |
+|---|---|---|
+| verified run | yes | actual, from sealed receipts |
+| `missing` | yes | conservative |
+| `deleted` | yes | conservative |
+| `unverifiable` | yes | conservative |
+| `expired` | **no** | released |
+
+`expired` leaves the active-window denominator and releases its reservation.
+Keeping it counted would contradict the reservation-expiry rule in C3 and
+ratchet coverage permanently downward as runs age out, until every dispatch
+refused.
+
+A registry that is absent, whose recomputed head does not match the anchor, or
+whose head is an ancestor of the anchored head does **not** reduce to low
+coverage. It fails closed as `registry_rollback_detected`. A rolled-back
+registry is an attack on the denominator itself, and treating it as ordinary
+missing coverage would let it be reconciled away by the same path that clears
+benign gaps. Recovery is explicit operator reconciliation.
+
+### C9 — Coverage gating on `_preflight_entitlement` (PRD AR-4b)
+
+C4 fails closed on `settlement == "unknown"`. It must also fail closed on
+incomplete coverage, for the same reason and one step earlier:
+
+```python
+def _preflight_entitlement(self, role, binding, usage_rows) -> StageBudget:
+    coverage = self.entitlement.coverage(binding.provider_id)
+    if coverage.status == "registry_rollback_detected":
+        raise OrchestrationBlocked(f"registry_rollback_detected:{role}")
+    if coverage.verified < coverage.total:
+        raise OrchestrationBlocked(f"entitlement_coverage_incomplete:{role}")
+    window = self.entitlement.window(binding.provider_id)
+    ...
+```
+
+Excluding unverifiable runs is correct for display and dangerous for
+enforcement. Display continues to show the partial figure against its
+denominator; enforcement refuses. The asymmetry is deliberate — a reader
+tolerating an incomplete number loses accuracy, an enforcer tolerating one
+grants quota that tampering created.
+
 ## State vocabulary
 
 Additions: `plan_covered`, `plan_window_exceeded`, `entitlement_unknown`,
-`rate_unknown`.
+`rate_unknown`, `entitlement_coverage_incomplete`, `registry_rollback_detected`.
 
 ## Evidence-source boundary
 
@@ -385,10 +458,18 @@ made the PR #3 surface results unverifiable.
    seal settlement, billed and metered values, pricing status, rate-table
    version, and entitlement provenance; summaries preserve the split.
 
+7. **C8 / C9** — dispatch registry, head anchor, and coverage gating. Not
+   started. Blocked on the evidence broker (PRD TC-7), which owns the registry
+   and the anchor; there is no broker in the tree as of `origin/main` 56b8bff.
+   Until this lands, the coverage figure in C3 is advisory: it cannot detect a
+   deleted run, so it must not gate anything.
+
 1 and 2 were defect fixes that stood on their own merits and landed before the
 next governed live run. 3 was the correctness precondition for the ledger and is
 now met. 4–6 are implemented on the feature branch and awaiting protected-main
-review.
+review. 7 belongs to the Fleet UI Release 0 gate rather than to this document's
+original scope, and is recorded here because the registry is a backend contract
+that this ledger consumes.
 
 **Runs sealed before item 1 landed are permanently unpriceable.** That includes
 `docs/evidence/t33-governed-live-2026-07-24/`, whose four `stage_completed`
@@ -418,6 +499,23 @@ must exclude them rather than impute a split.
   a single window. Dispatching on `qwen` reduces the headroom `deepseek` sees.
 - A provider absent from the account map raises `entitlement_unknown` rather
   than defaulting to a private window.
+
+Registry tests (C8/C9), each of which fails today because no registry exists:
+
+- **Deleted run is detected.** Enroll two runs, dispatch on both, delete one
+  run directory entirely. Coverage reports 1 of 2, not 2 of 2, and preflight
+  raises `entitlement_coverage_incomplete`. This is the test the registry exists
+  for; without it the deletion reads as freed quota.
+- **Rollback is not reduced coverage.** Restore an older, still-validly-signed
+  registry journal. Verification raises `registry_rollback_detected`, *not* a
+  coverage shortfall, and operator reconciliation is the only path forward.
+- **Truncation is caught by the anchor.** Drop the last journal entry. The
+  recomputed head is an ancestor of the anchored head; same failure.
+- **Enrollment precedes dispatch.** A run that dispatches without a registry
+  entry is refused, so the registry cannot be outrun by a racing writer.
+- **Expiry releases, it does not accumulate.** Age a run past its window. It
+  leaves the active denominator, its reservation is released, and coverage
+  returns to 100 percent rather than ratcheting down.
 
 ## Not in scope
 
