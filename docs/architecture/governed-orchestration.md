@@ -48,5 +48,5 @@ The phase gate passed locally on Windows:
 - complete pytest suite (four platform-dependent skips);
 - Ruff;
 - strict mypy across 44 source files;
-- 14/14 named mutants killed;
+- 22/22 named mutants killed;
 - source distribution and wheel build.
