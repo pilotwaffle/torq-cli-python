@@ -372,14 +372,14 @@ def test_unreachable_context_is_finalized_unapplied_before_terminal(
     rows = [json.loads(line) for line in chain.receipts_path.read_text().splitlines()]
     final = rows[-3:]
     assert [row["transition"] for row in final] == [
-        "run_decision",
+        "terminalization_started",
         "command_unapplied",
         "run_decision",
     ]
-    assert final[0]["payload"]["status"] == "terminating"
+    assert final[0]["payload"]["reason"] == "pending_commands"
     assert final[1]["payload"]["command_id"] == accepted["command_id"]
     assert final[1]["payload"]["reason"] == "run_terminating"
-    assert final[2]["payload"]["status"] == "workflow_closed"
+    assert final[2]["payload"]["decision"] == "blocked"
     assert verify_receipt_store(chain.root).status == "verified"
 
 

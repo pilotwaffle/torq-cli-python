@@ -163,6 +163,7 @@ def reduce_fleet_snapshot(
                     for key in (
                         "order",
                         "kind",
+                        "required",
                         "provider",
                         "model",
                         "prompt_id",
@@ -191,7 +192,9 @@ def reduce_fleet_snapshot(
                 replans.append({"sequence": sequence, **dict(payload), **writer})
             continue
         if transition == "run_decision":
-            run_status = str(payload.get("status", "unknown"))
+            run_status = str(
+                payload.get("decision", payload.get("status", "unknown"))
+            )
             raw_outcome = payload.get("outcome")
             run_outcome = str(raw_outcome) if raw_outcome is not None else None
             raw_reason = payload.get("reason")
@@ -344,7 +347,7 @@ def reduce_fleet_snapshot(
                     "usage": payload.get("usage", "unreported"),
                 }
             )
-        elif transition == "stage_blocked":
+        elif transition in {"stage_blocked", "stage_rejected"}:
             row["state"] = "blocked"
             attempt["state"] = "blocked"
         elif transition == "stage_failed":
@@ -408,13 +411,13 @@ def reduce_fleet_snapshot(
     last_time = receipts[-1].get("observed_at") if receipts else None
     times_available = isinstance(first_time, str) and isinstance(last_time, str)
     settlement = summarize_usage(usage_rows, budget_usd=0.0)["settlement"]
-    if run_status == "execution_complete_action_open":
+    if run_status in {"awaiting_approval", "execution_complete_action_open"}:
         execution_state, workflow_state = "complete", "action_open"
-    elif run_status == "workflow_closed":
+    elif run_status in {"completed", "workflow_closed"}:
         execution_state, workflow_state = "complete", "closed"
     elif run_status == "workflow_abandoned":
         execution_state, workflow_state = "abandoned", "abandoned"
-    elif run_status == "blocked":
+    elif run_status in {"blocked", "failed", "workflow_failed"}:
         execution_state, workflow_state = "blocked", "closed"
     else:
         execution_state, workflow_state = "running", "open"

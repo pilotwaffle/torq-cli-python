@@ -22,7 +22,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 from torq_cli.core.redaction import PatternRegistry
 from torq_cli.core.canonical_json import canonical_json
-from torq_cli.domain.evidence_transitions import transition_authority_finding
+from torq_cli.domain.evidence_transitions import (
+    transition_authority_finding,
+    transition_rule,
+)
 from torq_cli.domain.run_evidence import (
     validate_receipt_payload,
     validate_v2_receipt_contract,
@@ -34,6 +37,8 @@ _PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
 _LEGACY_RECEIPT_SCHEMA_VERSION = "1.0.0"
 _AUTHORITY_RECEIPT_SCHEMA_VERSION = "1.1.0"
 _RECEIPT_SCHEMA_VERSION = "2.0.0"
+_LEGACY_CERTIFICATE_SCHEMA_VERSION = "1.0.0"
+_CERTIFICATE_SCHEMA_VERSION = "2.0.0"
 _RECEIPT_AUTHORITIES = frozenset({"worker", "supervisor_derived"})
 _SUPERVISOR_TRANSITIONS = frozenset({"stage_interrupted", "run_decision"})
 _WRITER_ROLES = frozenset(
@@ -44,6 +49,22 @@ _RUN_CERTIFICATE_NAME = "run-certificate.json"
 _RUN_IDENTITIES_DIR = ".torq-run-identities"
 _ARTIFACT_FORMAT = b"TORQAEAD1"
 _BINARY = getattr(os, "O_BINARY", 0)
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul", "clock$"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def _valid_run_id(run_id: str) -> bool:
+    stem = run_id.split(".", 1)[0].casefold()
+    return (
+        _RUN_ID.fullmatch(run_id) is not None
+        and run_id not in {".", ".."}
+        and not run_id.endswith(".")
+        and stem not in _WINDOWS_DEVICE_NAMES
+    )
 
 
 def _receipt_authority_finding(
@@ -67,6 +88,8 @@ def _writer_contract_finding(
     evidence_basis: object,
     transition: object,
     payload: object,
+    *,
+    legacy: bool = False,
 ) -> str | None:
     if writer_role not in _WRITER_ROLES:
         return "receipt_writer_role_invalid"
@@ -79,6 +102,7 @@ def _writer_contract_finding(
         transition,
         evidence_basis,
         payload,
+        legacy=legacy,
     )
     if authority_finding is not None:
         return authority_finding
@@ -86,6 +110,7 @@ def _writer_contract_finding(
         transition,
         payload,
         writer_role=str(writer_role),
+        legacy=legacy,
     )
 
 
@@ -625,6 +650,14 @@ class ReceiptWriter(Protocol):
 
     def seal(self) -> Path: ...
 
+    def resolve_action(
+        self,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]: ...
+
     @staticmethod
     def hash_file(path: Path) -> str: ...
 
@@ -788,8 +821,12 @@ class ReceiptChain:
         policy_version: str,
         commit_observer: Callable[[str], None] | None = None,
     ) -> None:
+        if not _valid_run_id(run_id):
+            raise ValueError("run_id_invalid")
         self.run_id = run_id
         self.root = evidence_root / run_id
+        if self.root.resolve(strict=False).parent != evidence_root.resolve(strict=False):
+            raise ValueError("run_id_invalid")
         self.root.mkdir(parents=True, exist_ok=True)
         self.receipts_path = self.root / "receipts.jsonl"
         self.key = keys.get_or_create(run_id)
@@ -854,7 +891,7 @@ class ReceiptChain:
             .public_bytes_raw()
         )
         body = {
-            "certificate_schema_version": "1.0.0",
+            "certificate_schema_version": _CERTIFICATE_SCHEMA_VERSION,
             "run_id": self.run_id,
             "manifest_key": {
                 "key_id": _key_id(manifest_public),
@@ -873,6 +910,16 @@ class ReceiptChain:
         target = self.root / _RUN_CERTIFICATE_NAME
         encoded = _canonical(signed)
         if target.exists():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("run_certificate_invalid") from exc
+            if (
+                isinstance(existing, Mapping)
+                and existing.get("certificate_schema_version")
+                == _LEGACY_CERTIFICATE_SCHEMA_VERSION
+            ):
+                raise ValueError("run_certificate_legacy_read_only")
             if not hmac.compare_digest(target.read_bytes(), encoded):
                 raise ValueError("run_certificate_mismatch")
             return target
@@ -937,12 +984,9 @@ class ReceiptChain:
         if self._sealed:
             raise ValueError("receipt_after_terminal_decision")
         if evidence_basis is None:
-            evidence_basis = (
-                "derived"
-                if transition
-                in {"run_planned", "run_decision", "repair_routed", "action_opened"}
-                else "observed"
-            )
+            decision = payload.get("decision") if transition == "run_decision" else None
+            rule = transition_rule(writer_role, transition, decision)
+            evidence_basis = rule.evidence_basis if rule is not None else "observed"
         writer_finding = _writer_contract_finding(
             writer_role,
             evidence_basis,
@@ -970,6 +1014,7 @@ class ReceiptChain:
             )
             receipt = {
                 "schema_version": self.schema_version,
+                "run_id": self.run_id,
                 "profile_version": self.profile_version,
                 "policy_version": self.policy_version,
                 "sequence": self._sequence,
@@ -1012,6 +1057,76 @@ class ReceiptChain:
             self._previous = receipt_hash
             self._write_manifest(sealed=False)
             return envelope
+
+    def resolve_action(
+        self,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]:
+        """Atomically resolve one sealed action contract and close the run."""
+        if not action_id or not resolution or not resolver_identity:
+            raise ValueError("action_resolution_invalid")
+        with self._lock:
+            self._assert_store_writable()
+            opened_sequence: int | None = None
+            outcome_map: dict[str, str] | None = None
+            already_resolved = False
+            for receipt in self.covered_receipts():
+                payload = receipt.get("payload", {})
+                if (
+                    not isinstance(payload, Mapping)
+                    or payload.get("action_id") != action_id
+                ):
+                    continue
+                if receipt.get("transition") == "action_opened":
+                    opened_sequence = int(receipt["sequence"])
+                    candidate_map = payload.get("outcome_map")
+                    if isinstance(candidate_map, Mapping):
+                        outcome_map = {
+                            str(key): str(value)
+                            for key, value in candidate_map.items()
+                        }
+                elif receipt.get("transition") == "action_resolved":
+                    already_resolved = True
+            if opened_sequence is None:
+                raise ValueError("action_open_missing")
+            if already_resolved:
+                raise ValueError("action_already_resolved")
+            if outcome_map is None or resolution not in outcome_map:
+                raise ValueError("action_resolution_unauthorized")
+            resolved = self.append(
+                "action_resolved",
+                {
+                    "action_id": action_id,
+                    "resolution": resolution,
+                    "resolver_identity": resolver_identity,
+                    "opened_sequence": opened_sequence,
+                    "provider_dispatch": False,
+                },
+                writer_role="operator_gateway",
+                evidence_basis="submitted",
+            )
+            decision = self.terminalize(
+                "run_decision",
+                {
+                    "decision": outcome_map[resolution],
+                    "outcome": resolution,
+                    "action_id": action_id,
+                    "action_resolved_sequence": resolved["sequence"],
+                    "provider_dispatch": False,
+                },
+                writer_role="operator_gateway",
+                evidence_basis="derived",
+            )
+            self.seal()
+            return {
+                "action_id": action_id,
+                "action_resolved_sequence": resolved["sequence"],
+                "run_decision_sequence": decision["sequence"],
+                "status": outcome_map[resolution],
+            }
 
     def write_artifact(self, name: str, content: str) -> Path:
         with self._lock:
@@ -1063,10 +1178,9 @@ class ReceiptChain:
             ]
             if pending:
                 self.append(
-                    "run_decision",
+                    "terminalization_started",
                     {
-                        "status": "terminating",
-                        "outcome": "pending_commands_unapplied",
+                        "reason": "pending_commands",
                         "provider_dispatch": False,
                     },
                     writer_role="orchestrator",
@@ -1315,9 +1429,12 @@ def verify_receipt_store(
             certificate_path = root / _RUN_CERTIFICATE_NAME
             if not certificate_path.exists():
                 return StoreVerification("incomplete", "run_certificate_missing")
-            certificate = json.loads(certificate_path.read_text(encoding="utf-8"))
+            certificate_bytes = certificate_path.read_bytes()
+            certificate = json.loads(certificate_bytes)
             if not isinstance(certificate, dict):
                 return StoreVerification("unreadable", "run_certificate_invalid")
+            certificate_file_hash = ReceiptChain.hash_file(certificate_path)
+            full_certificate = dict(certificate)
             root_signature = bytes.fromhex(str(certificate.pop("root_signature")))
             try:
                 Ed25519PublicKey.from_public_bytes(trusted_public_key).verify(
@@ -1326,15 +1443,26 @@ def verify_receipt_store(
                 )
             except InvalidSignature:
                 return StoreVerification("tampered", "run_certificate_signature_invalid")
+            certificate_schema_version = certificate.get(
+                "certificate_schema_version"
+            )
             if (
-                certificate.get("certificate_schema_version") != "1.0.0"
+                certificate_schema_version not in {
+                    _LEGACY_CERTIFICATE_SCHEMA_VERSION,
+                    _CERTIFICATE_SCHEMA_VERSION,
+                }
                 or certificate.get("run_id") != signed.get("run_id")
                 or certificate.get("run_id") != root.name
                 or signed.get("schema_version") != _RECEIPT_SCHEMA_VERSION
                 or signed.get("certificate_hash")
-                != ReceiptChain.hash_file(certificate_path)
+                != certificate_file_hash
             ):
                 return StoreVerification("tampered", "run_certificate_invalid")
+            if (
+                certificate_schema_version == _CERTIFICATE_SCHEMA_VERSION
+                and certificate_bytes != _canonical(full_certificate)
+            ):
+                return StoreVerification("tampered", "run_certificate_noncanonical")
             manifest_key = certificate.get("manifest_key")
             writers = certificate.get("writers")
             if not isinstance(manifest_key, dict) or not isinstance(writers, dict):
@@ -1368,6 +1496,11 @@ def verify_receipt_store(
             ):
                 return StoreVerification("tampered", "run_certificate_invalid")
             for receipt in receipts:
+                if (
+                    certificate_schema_version == _CERTIFICATE_SCHEMA_VERSION
+                    and receipt.get("run_id") != certificate.get("run_id")
+                ):
+                    return StoreVerification("tampered", "receipt_run_id_mismatch")
                 writer_role = receipt.get("writer_role")
                 evidence_basis = receipt.get("evidence_basis")
                 writer_finding = _writer_contract_finding(
@@ -1375,6 +1508,10 @@ def verify_receipt_store(
                     evidence_basis,
                     receipt.get("transition"),
                     receipt.get("payload"),
+                    legacy=(
+                        certificate_schema_version
+                        == _LEGACY_CERTIFICATE_SCHEMA_VERSION
+                    ),
                 )
                 if writer_finding is not None:
                     return StoreVerification("tampered", writer_finding)
@@ -1400,6 +1537,10 @@ def verify_receipt_store(
             lifecycle_finding = validate_v2_receipt_contract(
                 receipts,
                 sealed=bool(signed.get("sealed")),
+                legacy=(
+                    certificate_schema_version
+                    == _LEGACY_CERTIFICATE_SCHEMA_VERSION
+                ),
             )
             if lifecycle_finding is not None:
                 return StoreVerification("tampered", lifecycle_finding)

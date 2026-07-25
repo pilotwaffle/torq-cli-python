@@ -71,6 +71,8 @@ class RunSupervisor:
         provider_dispatch: bool | str = "unknown",
         reason: str = "worker_terminated",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if reason not in {"process_exit", "worker_crash", "worker_terminated"}:
+            raise ValueError("supervisor_observation_required")
         capability = self.broker.issue("supervisor")
         interrupted = self.broker.append(
             capability.token,
@@ -79,6 +81,7 @@ class RunSupervisor:
                 **dict(attempt),
                 "provider_dispatch": provider_dispatch,
                 "reason": reason,
+                "observation_source": "worker_exit",
             },
         )
         decision_capability = self.broker.issue("supervisor")
@@ -86,7 +89,7 @@ class RunSupervisor:
             decision_capability.token,
             "run_decision",
             {
-                "status": "workflow_failed",
+                "decision": "failed",
                 "interruption_sequence": interrupted["sequence"],
                 "reason": reason,
             },

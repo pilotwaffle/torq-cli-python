@@ -114,13 +114,14 @@ def test_atomic_binary_write_preserves_ciphertext_newlines(tmp_path: Path) -> No
 
 
 def test_machine_readable_matrix_rejects_every_wrong_basis() -> None:
-    assert len(TRANSITION_RULES) == len(
-        {(rule.writer_role, rule.transition) for rule in TRANSITION_RULES}
-    )
+    assert len(TRANSITION_RULES) == len({
+        (rule.writer_role, rule.transition, rule.decision_value)
+        for rule in TRANSITION_RULES
+    })
     for rule in TRANSITION_RULES:
         payload = (
-            {"status": sorted(rule.permitted_statuses)[0]}
-            if rule.permitted_statuses is not None
+            {"decision": rule.decision_value}
+            if rule.decision_value is not None
             else {}
         )
         assert (
@@ -221,10 +222,14 @@ def test_broker_serializes_concurrent_multi_writer_appends(tmp_path: Path) -> No
     def append_supervisor() -> dict[str, object]:
         capability = broker.issue("supervisor")
         return broker.append(
-            capability.token,
-            "stage_interrupted",
-            {**_attempt(), "provider_dispatch": "unknown"},
-        )
+                capability.token,
+                "stage_interrupted",
+                {
+                    **_attempt(),
+                    "provider_dispatch": "unknown",
+                    "observation_source": "worker_exit",
+                },
+            )
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         rows = list(

@@ -148,7 +148,7 @@ def test_happy_path_projects_catalog_attempts_action_and_linked_closure(
         resolver_identity="operator:test",
     )
 
-    assert closure["status"] == "workflow_closed"
+    assert closure["status"] == "completed"
     assert verify_receipt_store(chain.root).status == "verified"
     closed = FleetProjector(chain.root).snapshot()
     assert closed["verification"]["normalized_state"] == "sealed_verified"
@@ -160,8 +160,7 @@ def test_happy_path_projects_catalog_attempts_action_and_linked_closure(
     terminating = next(
         row
         for row in receipts
-        if row["transition"] == "run_decision"
-        and row["payload"].get("status") == "terminating"
+        if row["transition"] == "terminalization_started"
     )
     unapplied = next(row for row in receipts if row["transition"] == "command_unapplied")
     assert terminating["sequence"] < unapplied["sequence"] < closure["run_decision_sequence"]
@@ -265,7 +264,30 @@ def test_awaiting_approval_cannot_be_abandoned_even_without_open_attempts(
     tmp_path: Path,
 ) -> None:
     chain = _chain(tmp_path, "run-awaiting-approval")
-    chain.append("run_decision", {"status": "awaiting_approval"})
+    chain.append("run_attested", {"mode": "live"})
+    action = chain.append(
+        "action_opened",
+        {
+            "action_id": "approval",
+            "type": "approval_required",
+            "scope": "run",
+            "target": "operator",
+            "summary": "Review.",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
+            "caused_by_sequence": 1,
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "run_decision",
+        {
+            "decision": "awaiting_approval",
+            "action_id": "approval",
+            "action_opened_sequence": action["sequence"],
+            "provider_dispatch": False,
+        },
+    )
     before = chain.receipts_path.read_bytes()
 
     with pytest.raises(ValueError, match="run_abandoned_operator_action_open"):
@@ -294,7 +316,10 @@ def test_open_operator_action_blocks_recovery_abandonment(tmp_path: Path) -> Non
             "scope": "run",
             "target": "operator",
             "summary": "Review the governed result.",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
             "caused_by_sequence": 1,
+            "provider_dispatch": False,
         },
     )
     attempt = {
@@ -326,8 +351,8 @@ def test_invented_orchestrator_decision_status_is_rejected_before_append(
 ) -> None:
     chain = _chain(tmp_path, "run-invented-decision")
 
-    with pytest.raises(ValueError, match="run_decision_status_unauthorized"):
-        chain.append("run_decision", {"status": "looks_finished_to_me"})
+    with pytest.raises(ValueError, match="run_decision_value_unauthorized"):
+        chain.append("run_decision", {"decision": "looks_finished_to_me"})
 
     assert chain.sequence == 0
     assert not chain.receipts_path.exists()

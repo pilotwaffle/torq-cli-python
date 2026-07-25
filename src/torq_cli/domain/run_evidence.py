@@ -19,6 +19,7 @@ ATTEMPT_TRANSITIONS = frozenset(
     {
         "stage_attempt_created",
         "stage_blocked",
+        "stage_rejected",
         "stage_dispatch_started",
         "stage_completed",
         "stage_failed",
@@ -26,7 +27,13 @@ ATTEMPT_TRANSITIONS = frozenset(
     }
 )
 TERMINAL_ATTEMPT_TRANSITIONS = frozenset(
-    {"stage_blocked", "stage_completed", "stage_failed", "stage_interrupted"}
+    {
+        "stage_blocked",
+        "stage_rejected",
+        "stage_completed",
+        "stage_failed",
+        "stage_interrupted",
+    }
 )
 CORE_LANES = ("g1d", "g1r", "builder", "g2a")
 CONDITIONAL_LANES = ("refine_bug", "refine_ui")
@@ -145,21 +152,28 @@ MAX_RECEIPT_DEPTH = 8
 
 def _oversized_value(value: object, *, depth: int = 0) -> bool:
     """True when any string is too long, or the structure is too wide/deep."""
-    if depth > MAX_RECEIPT_DEPTH:
-        return True
-    if isinstance(value, str):
-        return len(value) > MAX_RECEIPT_STRING
-    if isinstance(value, Mapping):
-        if len(value) > MAX_RECEIPT_ITEMS:
+    remaining = [MAX_RECEIPT_ITEMS]
+
+    def walk(item: object, item_depth: int) -> bool:
+        if item_depth > MAX_RECEIPT_DEPTH:
             return True
-        return any(
-            _oversized_value(item, depth=depth + 1) for item in value.values()
-        )
-    if isinstance(value, (list, tuple)):
-        if len(value) > MAX_RECEIPT_ITEMS:
+        remaining[0] -= 1
+        if remaining[0] < 0:
             return True
-        return any(_oversized_value(item, depth=depth + 1) for item in value)
-    return False
+        if isinstance(item, str):
+            return len(item) > MAX_RECEIPT_STRING
+        if isinstance(item, Mapping):
+            return any(
+                not isinstance(key, str)
+                or len(key) > MAX_RECEIPT_STRING
+                or walk(child, item_depth + 1)
+                for key, child in item.items()
+            )
+        if isinstance(item, (list, tuple)):
+            return any(walk(child, item_depth + 1) for child in item)
+        return False
+
+    return walk(value, depth)
 
 
 #: Every key each governed receipt may carry. An undeclared key is refused with
@@ -255,7 +269,11 @@ RUN_REPLANNED_KEYS = frozenset(
     }
 )
 ACTION_OPENED_KEYS = frozenset(
-    {"action_id", "type", "scope", "target", "summary", "caused_by_sequence", "provider_dispatch"}
+    {
+        "action_id", "type", "scope", "target", "summary",
+        "allowed_resolutions", "outcome_map", "caused_by_sequence",
+        "provider_dispatch",
+    }
 )
 ACTION_RESOLVED_KEYS = frozenset(
     {"action_id", "resolution", "resolver_identity", "opened_sequence", "provider_dispatch"}
@@ -279,7 +297,7 @@ RUN_ABANDONED_KEYS = frozenset(
 #: Every key any `run_decision` may carry, across all three writers.
 RUN_DECISION_KEYS = frozenset(
     {
-        "status",
+        "decision",
         "provider_dispatch",
         "reason",
         "outcome",
@@ -334,8 +352,28 @@ def _decision_text_finding(payload: Mapping[str, Any]) -> str | None:
         isinstance(roles, (list, tuple))
         and len(roles) <= MAX_DISPATCHED_ROLES
         and all(role in LANE_ORDER for role in roles)
+        and len(set(roles)) == len(roles)
     ):
         return "run_decision_text_invalid"
+    if "provider_dispatch" in payload and not isinstance(
+        payload.get("provider_dispatch"), bool
+    ):
+        return "run_decision_structure_invalid"
+    if "repair_cycles" in payload and not _nonnegative_int(
+        payload.get("repair_cycles")
+    ):
+        return "run_decision_structure_invalid"
+    if "action_id" in payload and not _matches(
+        _OPAQUE_ID, payload.get("action_id")
+    ):
+        return "run_decision_structure_invalid"
+    for field in (
+        "action_opened_sequence",
+        "action_resolved_sequence",
+        "interruption_sequence",
+    ):
+        if field in payload and not _positive_int(payload.get(field)):
+            return "run_decision_structure_invalid"
     return None
 
 
@@ -344,13 +382,14 @@ def validate_receipt_payload(
     payload: Mapping[str, Any],
     *,
     writer_role: str,
+    legacy: bool = False,
 ) -> str | None:
     """Validate the local shape that can be checked before append."""
     # The floor under every transition: no receipt, whatever its type, may
     # carry a document-sized string or an accumulating structure. Transitions
     # with their own allowlist bound their fields more tightly than this; the
     # floor catches the rest, including the writer-only lifecycle transitions.
-    if _oversized_value(dict(payload)):
+    if not legacy and _oversized_value(dict(payload)):
         return "receipt_value_oversized"
     if transition in ATTEMPT_TRANSITIONS:
         if not isinstance(payload.get("role"), str):
@@ -367,9 +406,20 @@ def validate_receipt_payload(
             return "attempt_dispatch_invalid"
         if transition == "stage_blocked" and dispatch is not False:
             return "attempt_dispatch_invalid"
-        if transition in {"stage_dispatch_started", "stage_completed"}:
+        if transition in {"stage_dispatch_started", "stage_completed", "stage_rejected"}:
             if dispatch is not True:
                 return "attempt_dispatch_invalid"
+        if transition == "stage_rejected" and (
+            payload.get("role") not in {"g1r", "g2a"}
+            or payload.get("verdict") != "reject"
+            or payload.get("reason")
+            != (
+                "design_rejected"
+                if payload.get("role") == "g1r"
+                else "audit_rejected"
+            )
+        ):
+            return "stage_rejected_invalid"
         if transition == "stage_failed" and not isinstance(dispatch, bool):
             return "attempt_dispatch_invalid"
         if transition == "stage_interrupted" and dispatch not in {
@@ -378,8 +428,14 @@ def validate_receipt_payload(
             "unknown",
         }:
             return "attempt_dispatch_invalid"
+        if (
+            transition == "stage_interrupted"
+            and not legacy
+            and payload.get("observation_source") != "worker_exit"
+        ):
+            return "stage_interrupted_observation_invalid"
     elif transition == "run_planned":
-        if _extra_keys(payload, RUN_PLANNED_KEYS):
+        if not legacy and _extra_keys(payload, RUN_PLANNED_KEYS):
             return "lane_catalog_invalid"
         catalog = payload.get("lane_catalog")
         if not isinstance(catalog, list) or len(catalog) != len(LANE_ORDER):
@@ -387,6 +443,19 @@ def validate_receipt_payload(
         roles = [lane.get("role") for lane in catalog if isinstance(lane, Mapping)]
         if tuple(roles) != LANE_ORDER:
             return "lane_catalog_order_invalid"
+        if not legacy:
+            for lane in catalog:
+                if (
+                    not isinstance(lane, Mapping)
+                    or not isinstance(lane.get("required"), bool)
+                    or (
+                        payload.get("mode") != "dry_run"
+                        and
+                        lane.get("role") not in CONDITIONAL_LANES
+                        and lane.get("required") is not True
+                    )
+                ):
+                    return "lane_catalog_required_invalid"
         contract = payload.get("plan_contract")
         digest = payload.get("plan_hash")
         if (contract is None) != (digest is None):
@@ -415,7 +484,7 @@ def validate_receipt_payload(
         # An undeclared key is refused, and the operator-facing strings are
         # bounded labels, not documents: a signed receipt is no place for
         # unbounded prose whichever transition carries it.
-        if _extra_keys(payload, ACTION_OPENED_KEYS):
+        if not legacy and _extra_keys(payload, ACTION_OPENED_KEYS):
             return "action_opened_invalid"
         required: tuple[str, ...] = (
             "action_id",
@@ -424,12 +493,36 @@ def validate_receipt_payload(
             "target",
             "summary",
         )
-        if any(not _bounded_label(payload.get(field)) for field in required):
+        if any(
+            not (
+                isinstance(payload.get(field), str)
+                if legacy
+                else _bounded_label(payload.get(field))
+            )
+            for field in required
+        ):
             return "action_opened_invalid"
         if not _positive_int(payload.get("caused_by_sequence")):
             return "action_opened_invalid"
+        if not legacy:
+            allowed = payload.get("allowed_resolutions")
+            outcome_map = payload.get("outcome_map")
+            if (
+                not isinstance(allowed, list)
+                or not allowed
+                or len(allowed) > 8
+                or any(not _matches(_OPAQUE_ID, item) for item in allowed)
+                or len(set(allowed)) != len(allowed)
+                or not isinstance(outcome_map, Mapping)
+                or set(outcome_map) != set(allowed)
+                or any(
+                    value not in {"completed", "blocked", "failed"}
+                    for value in outcome_map.values()
+                )
+            ):
+                return "action_outcome_map_invalid"
     elif transition == "command_accepted":
-        if _extra_keys(payload, COMMAND_ACCEPTED_KEYS):
+        if not legacy and _extra_keys(payload, COMMAND_ACCEPTED_KEYS):
             return "command_accept_invalid"
         required = (
             "command_id",
@@ -449,19 +542,24 @@ def validate_receipt_payload(
         # Bound the operator-influenced values, not just their presence: an id
         # is an opaque token, a hash is a hash, media_type is a MIME token, and
         # redactions are pattern names — none of them a place for prose.
-        if not _command_values_ok(payload):
+        if not legacy and not _command_values_ok(payload):
             return "command_accept_invalid"
-        if not _sha256(payload.get("artifact_hash")):
+        if not legacy and not _sha256(payload.get("artifact_hash")):
             return "command_accept_invalid"
         if payload.get("command_type") not in {"context", "artifact"}:
             return "command_accept_invalid"
         extraction = payload.get("extraction")
         if payload.get("command_type") == "artifact" and (
             not isinstance(extraction, Mapping)
-            or set(extraction)
+            or not legacy
+            and set(extraction)
             != {"contract_version", "extractor", "source_bytes", "extracted_bytes"}
             or extraction.get("contract_version") != "1.0.0"
-            or not _bounded_label(extraction.get("extractor"))
+            or not (
+                isinstance(extraction.get("extractor"), str)
+                if legacy
+                else _bounded_label(extraction.get("extractor"))
+            )
             or not _positive_int(extraction.get("source_bytes"))
             or not _positive_int(extraction.get("extracted_bytes"))
         ):
@@ -477,7 +575,8 @@ def validate_receipt_payload(
         boundary = payload.get("earliest_eligible_attempt")
         if (
             not isinstance(boundary, Mapping)
-            or set(boundary) != {"kind"}
+            or not legacy
+            and set(boundary) != {"kind"}
             or boundary.get("kind") != "attempt_created_after_acknowledgement"
         ):
             return "command_boundary_invalid"
@@ -486,12 +585,22 @@ def validate_receipt_payload(
         if payload.get("provider_dispatch") is not False:
             return "command_accept_invalid"
     elif transition == "command_rejected":
-        if _extra_keys(payload, COMMAND_REJECTED_KEYS):
+        if not legacy and _extra_keys(payload, COMMAND_REJECTED_KEYS):
             return "command_rejection_invalid"
         if (
-            not _matches(_OPAQUE_ID, payload.get("command_id"))
+            not (
+                isinstance(payload.get("command_id"), str)
+                and bool(payload.get("command_id"))
+                if legacy
+                else _matches(_OPAQUE_ID, payload.get("command_id"))
+            )
             or payload.get("command_type") not in {"context", "artifact"}
-            or not _bounded_label(payload.get("finding"))
+            or not (
+                isinstance(payload.get("finding"), str)
+                and bool(payload.get("finding"))
+                if legacy
+                else _bounded_label(payload.get("finding"))
+            )
             or payload.get("earliest_eligible_attempt") is not None
             or payload.get("provider_dispatch") is not False
             or not _nonnegative_int(payload.get("content_bytes"))
@@ -503,7 +612,7 @@ def validate_receipt_payload(
         # to a length bound, not to accepted-grade validity: a rejection can
         # record a bad value but not a megabyte of prose.
         echoed = ("media_type", "source_name", "target_role")
-        if any(
+        if not legacy and any(
             field in payload
             and payload.get(field) is not None
             and not _bounded_label(payload.get(field))
@@ -511,7 +620,7 @@ def validate_receipt_payload(
         ):
             return "command_rejection_invalid"
     elif transition == "context_injected" and "command_id" in payload:
-        if _extra_keys(payload, CONTEXT_INJECTED_KEYS):
+        if not legacy and _extra_keys(payload, CONTEXT_INJECTED_KEYS):
             return "command_effective_attempt_invalid"
         required = (
             "command_id",
@@ -527,11 +636,14 @@ def validate_receipt_payload(
                 not isinstance(payload.get(field), str) or not payload.get(field)
                 for field in required
             )
-            or not _command_values_ok(payload)
-            or not _sha256(payload.get("artifact_hash"))
+            or not legacy
+            and not _command_values_ok(payload)
+            or not legacy
+            and not _sha256(payload.get("artifact_hash"))
             or not _positive_int(payload.get("accepted_sequence"))
             or not isinstance(effective, Mapping)
-            or set(effective)
+            or not legacy
+            and set(effective)
             != {"role", "attempt_id", "attempt_ordinal", "attempt_created_sequence"}
             or not isinstance(effective.get("role"), str)
             or not isinstance(effective.get("attempt_id"), str)
@@ -541,11 +653,16 @@ def validate_receipt_payload(
         ):
             return "command_effective_attempt_invalid"
     elif transition == "command_unapplied":
-        if _extra_keys(payload, COMMAND_UNAPPLIED_KEYS):
+        if not legacy and _extra_keys(payload, COMMAND_UNAPPLIED_KEYS):
             return "command_unapplied_invalid"
         target = payload.get("target_role")
         if (
-            not _matches(_OPAQUE_ID, payload.get("command_id"))
+            not (
+                isinstance(payload.get("command_id"), str)
+                and bool(payload.get("command_id"))
+                if legacy
+                else _matches(_OPAQUE_ID, payload.get("command_id"))
+            )
             or not _positive_int(payload.get("accepted_sequence"))
             or payload.get("reason") not in {
                 "no_eligible_future_attempt",
@@ -553,15 +670,21 @@ def validate_receipt_payload(
             }
             or not _positive_int(payload.get("last_covered_sequence"))
             or payload.get("provider_dispatch") is not False
-            or (target is not None and target not in {"lead", *LANE_ORDER})
+            or not legacy
+            and (target is not None and target not in {"lead", *LANE_ORDER})
         ):
             return "command_unapplied_invalid"
     elif transition == "run_replanned":
-        if _extra_keys(payload, RUN_REPLANNED_KEYS):
+        if not legacy and _extra_keys(payload, RUN_REPLANNED_KEYS):
             return "run_replanned_invalid"
         affected = payload.get("affected_future_attempts")
         if (
-            not _matches(_OPAQUE_ID, payload.get("command_id"))
+            not (
+                isinstance(payload.get("command_id"), str)
+                and bool(payload.get("command_id"))
+                if legacy
+                else _matches(_OPAQUE_ID, payload.get("command_id"))
+            )
             or payload.get("plan_contract") != PLAN_CONTRACT
             or not _positive_int(payload.get("plan_revision"))
             or payload.get("previous_replan_sequence") is not None
@@ -580,7 +703,8 @@ def validate_receipt_payload(
         candidate = affected[0]
         if (
             not isinstance(candidate, Mapping)
-            or set(candidate)
+            or not legacy
+            and set(candidate)
             != {"role", "attempt_id", "attempt_ordinal", "attempt_created_sequence"}
             or candidate.get("role") not in LANE_ORDER
             or not isinstance(candidate.get("attempt_id"), str)
@@ -598,35 +722,53 @@ def validate_receipt_payload(
         if payload.get("new_plan_hash") != plan_hash(body):
             return "run_replanned_hash_invalid"
     elif transition == "action_resolved":
-        if _extra_keys(payload, ACTION_RESOLVED_KEYS):
+        if not legacy and _extra_keys(payload, ACTION_RESOLVED_KEYS):
             return "action_resolved_invalid"
         required = ("action_id", "resolution", "resolver_identity")
-        if any(not _bounded_label(payload.get(field)) for field in required):
+        if any(
+            not (
+                isinstance(payload.get(field), str)
+                if legacy
+                else _bounded_label(payload.get(field))
+            )
+            for field in required
+        ):
             return "action_resolved_invalid"
         if not _positive_int(payload.get("opened_sequence")):
             return "action_resolved_invalid"
     elif transition == "run_decision" and writer_role == "supervisor":
-        if payload.get("status") != "workflow_failed":
+        expected = "workflow_failed" if legacy else "failed"
+        field = "status" if legacy else "decision"
+        if payload.get(field) != expected:
             return "supervisor_decision_invalid"
         if not _positive_int(payload.get("interruption_sequence")):
             return "supervisor_decision_invalid"
-        if _decision_text_finding(payload) is not None:
+        if not legacy and _decision_text_finding(payload) is not None:
             return "supervisor_decision_invalid"
     elif transition == "run_decision" and writer_role == "operator_gateway":
-        if payload.get("status") != "workflow_closed":
+        field = "status" if legacy else "decision"
+        allowed = {"workflow_closed"} if legacy else {"completed", "blocked", "failed"}
+        if payload.get(field) not in allowed:
             return "operator_decision_invalid"
         if not isinstance(payload.get("action_id"), str):
             return "operator_decision_invalid"
         if not _positive_int(payload.get("action_resolved_sequence")):
             return "operator_decision_invalid"
-        if _decision_text_finding(payload) is not None:
+        if not legacy and _decision_text_finding(payload) is not None:
             return "operator_decision_invalid"
     elif transition == "run_decision":
-        finding = _decision_text_finding(payload)
+        if not legacy and payload.get("decision") not in {
+            "awaiting_approval",
+            "blocked",
+            "completed",
+            "failed",
+        }:
+            return "run_decision_value_invalid"
+        finding = None if legacy else _decision_text_finding(payload)
         if finding is not None:
             return finding
     elif transition == "run_abandoned" and writer_role == "recovery":
-        if _extra_keys(payload, RUN_ABANDONED_KEYS):
+        if not legacy and _extra_keys(payload, RUN_ABANDONED_KEYS):
             return "run_abandoned_invalid"
         attempt_ids = payload.get("attempt_ids")
         if (
@@ -638,6 +780,12 @@ def validate_receipt_payload(
             or payload.get("operator_assertion") != "no_live_worker"
         ):
             return "run_abandoned_invalid"
+    elif transition == "terminalization_started":
+        if set(payload) != {"reason", "provider_dispatch"} or (
+            payload.get("reason") != "pending_commands"
+            or payload.get("provider_dispatch") is not False
+        ):
+            return "terminalization_started_invalid"
     return None
 
 
@@ -645,15 +793,17 @@ def validate_v2_receipt_contract(
     receipts: Sequence[Mapping[str, Any]],
     *,
     sealed: bool,
+    legacy: bool = False,
 ) -> str | None:
     """Validate cross-receipt lifecycle invariants after crypto verification."""
     attempts: dict[str, dict[str, Any]] = {}
     ordinals: dict[str, int] = {}
     repairs: dict[str, tuple[str, int, int]] = {}
     open_actions: dict[str, int] = {}
+    action_outcomes: dict[str, dict[str, str]] = {}
     commands: dict[str, dict[str, Any]] = {}
     run_terminating = False
-    resolved_actions: dict[int, str] = {}
+    resolved_actions: dict[int, tuple[str, str | None]] = {}
     interruptions: set[int] = set()
     terminal_decision = False
     execution_complete_action_open = False
@@ -661,6 +811,7 @@ def validate_v2_receipt_contract(
     saw_run_planned = False
     saw_catalog = False
     catalog_roles: set[str] = set()
+    required_roles: set[str] = set()
     current_plan_hash: str | None = None
     plan_revision = 0
     last_replan_sequence: int | None = None
@@ -689,6 +840,7 @@ def validate_v2_receipt_contract(
                 transition,
                 receipt.get("evidence_basis"),
                 payload,
+                legacy=legacy,
             )
             if authority_finding is not None:
                 return authority_finding
@@ -696,6 +848,7 @@ def validate_v2_receipt_contract(
             transition,
             payload,
             writer_role=writer_role,
+            legacy=legacy,
         )
         if finding is not None:
             return finding
@@ -711,11 +864,28 @@ def validate_v2_receipt_contract(
                 for row in catalog
                 if isinstance(row, Mapping) and isinstance(row.get("role"), str)
             }
-            plan_hash = payload.get("plan_hash")
-            if plan_hash is not None:
-                if not _sha256(plan_hash):
+            required_roles = {
+                str(row["role"])
+                for row in catalog
+                if isinstance(row, Mapping)
+                and (
+                    row.get("required") is True
+                    or legacy and row.get("role") not in CONDITIONAL_LANES
+                )
+            }
+            sealed_plan_hash = payload.get("plan_hash")
+            if sealed_plan_hash is not None:
+                if not _sha256(sealed_plan_hash):
                     return "run_plan_hash_invalid"
-                current_plan_hash = str(plan_hash)
+                current_plan_hash = str(sealed_plan_hash)
+        if transition == "terminalization_started":
+            if run_terminating or open_actions or not any(
+                command["transition"] == "command_accepted"
+                and command["finalized"] is None
+                for command in commands.values()
+            ):
+                return "terminalization_started_precondition_invalid"
+            run_terminating = True
         if transition == "repair_routed":
             attempt_id = str(payload["attempt_id"])
             if attempt_id in repairs:
@@ -908,10 +1078,10 @@ def validate_v2_receipt_contract(
                     return "attempt_dispatch_duplicate"
                 attempt["dispatched"] = True
             elif transition in TERMINAL_ATTEMPT_TRANSITIONS:
-                if transition == "stage_blocked" and attempt["dispatched"]:
-                    return "attempt_blocked_after_dispatch"
                 if transition == "stage_completed" and not attempt["dispatched"]:
                     return "attempt_completed_without_dispatch"
+                if transition == "stage_rejected" and not attempt["dispatched"]:
+                    return "attempt_rejected_without_dispatch"
                 if payload["provider_dispatch"] is True and not attempt["dispatched"]:
                     return "attempt_dispatch_evidence_missing"
                 attempt["terminal"] = transition
@@ -919,11 +1089,18 @@ def validate_v2_receipt_contract(
                     interruptions.add(sequence_number)
         elif transition == "action_opened":
             action_id = str(payload["action_id"])
-            if action_id in open_actions or action_id in resolved_actions.values():
+            if action_id in open_actions or any(
+                resolved[0] == action_id for resolved in resolved_actions.values()
+            ):
                 return "action_id_duplicate"
             if int(payload["caused_by_sequence"]) >= sequence_number:
                 return "action_cause_invalid"
             open_actions[action_id] = sequence_number
+            if not legacy:
+                action_outcomes[action_id] = {
+                    str(key): str(value)
+                    for key, value in payload["outcome_map"].items()
+                }
         elif transition == "action_resolved":
             action_id = str(payload["action_id"])
             opened_sequence = open_actions.get(action_id)
@@ -931,23 +1108,54 @@ def validate_v2_receipt_contract(
                 return "action_open_missing"
             if payload["opened_sequence"] != opened_sequence:
                 return "action_open_link_invalid"
+            mapped_decision = (
+                None
+                if legacy
+                else action_outcomes.get(action_id, {}).get(
+                    str(payload.get("resolution"))
+                )
+            )
+            if not legacy and mapped_decision is None:
+                return "action_resolution_unauthorized"
             del open_actions[action_id]
-            resolved_actions[sequence_number] = action_id
+            resolved_actions[sequence_number] = (action_id, mapped_decision)
         elif transition == "run_decision" and writer_role == "supervisor":
             if payload["interruption_sequence"] not in interruptions:
                 return "supervisor_decision_link_invalid"
+            if (
+                open_actions
+                or any(attempt["terminal"] is None for attempt in attempts.values())
+                or any(
+                    command["transition"] == "command_accepted"
+                    and command["finalized"] is None
+                    for command in commands.values()
+                )
+            ):
+                return "supervisor_decision_precondition_invalid"
             terminal_decision = True
             run_terminating = False
         elif transition == "run_decision" and writer_role == "operator_gateway":
             resolved_sequence = int(payload["action_resolved_sequence"])
-            if resolved_actions.get(resolved_sequence) != payload["action_id"]:
+            resolved_action = resolved_actions.get(resolved_sequence)
+            if resolved_action is None or resolved_action[0] != payload["action_id"]:
                 return "operator_decision_link_invalid"
-            if open_actions or not execution_complete_action_open:
+            if not legacy and resolved_action[1] != payload.get("decision"):
+                return "operator_decision_outcome_mismatch"
+            if (
+                open_actions
+                or any(attempt["terminal"] is None for attempt in attempts.values())
+                or not execution_complete_action_open
+                or any(
+                    command["transition"] == "command_accepted"
+                    and command["finalized"] is None
+                    for command in commands.values()
+                )
+            ):
                 return "operator_decision_actions_open"
             terminal_decision = True
             run_terminating = False
         elif transition == "run_decision":
-            status = payload.get("status")
+            status = payload.get("status") if legacy else payload.get("decision")
             open_attempts = [
                 attempt
                 for attempt in attempts.values()
@@ -958,7 +1166,17 @@ def validate_v2_receipt_contract(
                 for attempt in attempts.values()
                 if attempt["terminal"] is not None
             }
-            if status == "terminating":
+            latest_by_role: dict[str, Mapping[str, Any]] = {}
+            for attempt in attempts.values():
+                existing = latest_by_role.get(str(attempt["role"]))
+                if existing is None or int(attempt["ordinal"]) > int(
+                    existing["ordinal"]
+                ):
+                    latest_by_role[str(attempt["role"])] = attempt
+            required_latest = {
+                role: latest_by_role.get(role) for role in required_roles
+            }
+            if legacy and status == "terminating":
                 if run_terminating or open_actions:
                     return "run_decision_precondition_invalid"
                 if not any(
@@ -968,22 +1186,52 @@ def validate_v2_receipt_contract(
                 ):
                     return "run_decision_precondition_invalid"
                 run_terminating = True
-            elif status == "execution_complete_action_open":
+            elif legacy and status == "execution_complete_action_open":
                 if not open_actions or open_attempts:
                     return "run_decision_precondition_invalid"
                 execution_complete_action_open = True
                 waiting_on_operator = True
             elif status == "awaiting_approval":
+                if not open_actions or open_attempts:
+                    return "run_decision_precondition_invalid"
+                execution_complete_action_open = True
                 waiting_on_operator = True
-            elif status == "workflow_closed":
+            elif status in {"workflow_closed", "completed"}:
                 if open_actions or open_attempts:
                     return "run_decision_precondition_invalid"
-            elif status in {"blocked", "workflow_failed"}:
-                if not terminal_attempts.intersection(
-                    {"stage_blocked", "stage_failed", "stage_interrupted"}
+                if not legacy and any(
+                    attempt is None or attempt["terminal"] != "stage_completed"
+                    for attempt in required_latest.values()
+                ):
+                    return "run_decision_required_lanes_incomplete"
+            elif status in {"blocked", "failed", "workflow_failed"}:
+                if legacy:
+                    if not terminal_attempts.intersection(
+                            {"stage_blocked", "stage_rejected", "stage_failed", "stage_interrupted"}
+                    ):
+                        return "run_decision_precondition_invalid"
+                elif open_actions or open_attempts:
+                    return "run_decision_precondition_invalid"
+                elif status == "blocked":
+                    latest_states = {
+                        attempt["terminal"]
+                        for attempt in required_latest.values()
+                        if attempt is not None
+                    }
+                    if (
+                        not latest_states.intersection({"stage_blocked", "stage_rejected"})
+                        or latest_states.intersection(
+                            {"stage_failed", "stage_interrupted"}
+                        )
+                    ):
+                        return "run_decision_precondition_invalid"
+                elif not any(
+                    attempt is not None
+                    and attempt["terminal"] in {"stage_failed", "stage_interrupted"}
+                    for attempt in required_latest.values()
                 ):
                     return "run_decision_precondition_invalid"
-            terminal_decision = payload.get("status") not in {
+            terminal_decision = status not in {
                 "awaiting_approval",
                 "execution_complete_action_open",
                 "terminating",
