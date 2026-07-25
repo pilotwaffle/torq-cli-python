@@ -10,6 +10,7 @@ import secrets
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -529,6 +530,7 @@ class ReceiptChain:
             "previous_receipt_hash": self._previous,
             "transition": transition,
             "payload": clean,
+            "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
         receipt_hash = self._hash(receipt)
         envelope = {**receipt, "receipt_hash": receipt_hash}
@@ -538,6 +540,7 @@ class ReceiptChain:
             os.fsync(stream.fileno())
         os.chmod(self.receipts_path, 0o600)
         self._previous = receipt_hash
+        self._write_manifest(sealed=False)
         return envelope
 
     def write_artifact(self, name: str, content: str) -> Path:
@@ -556,8 +559,13 @@ class ReceiptChain:
         os.chmod(target, 0o600)
         return target
 
-    def seal(self) -> Path:
-        manifest = {"run_id": self.run_id, "terminal_receipt_hash": self._previous, "receipt_count": self._sequence}
+    def _write_manifest(self, *, sealed: bool) -> Path:
+        manifest = {
+            "run_id": self.run_id,
+            "terminal_receipt_hash": self._previous,
+            "receipt_count": self._sequence,
+            "sealed": sealed,
+        }
         body = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
         private = Ed25519PrivateKey.from_private_bytes(self.key)
         signed = {
@@ -566,9 +574,15 @@ class ReceiptChain:
             "signature": private.sign(body).hex(),
         }
         target = self.root / "terminal-manifest.json"
-        target.write_text(json.dumps(signed, sort_keys=True), encoding="utf-8")
+        temporary = self.root / ".terminal-manifest.tmp"
+        temporary.write_text(json.dumps(signed, sort_keys=True), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
         os.chmod(target, 0o600)
         return target
+
+    def seal(self) -> Path:
+        return self._write_manifest(sealed=True)
 
     def verify(self, manifest_path: Path) -> Verification:
         trusted_public_key = (

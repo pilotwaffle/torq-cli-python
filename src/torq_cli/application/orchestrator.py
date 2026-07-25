@@ -84,7 +84,7 @@ class OrchestrationResult:
 class GovernedOrchestrator:
     """Execute the fixed gate/build/audit flow and bounded repair loop."""
 
-    _CORE_ROLES = ("g1d", "g1r", "builder", "g2a")
+    _PLANNED_ROLES = ("g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui")
 
     def __init__(
         self,
@@ -123,7 +123,7 @@ class GovernedOrchestrator:
         mode: ExecutionMode,
         chain: ReceiptChain,
     ) -> OrchestrationResult:
-        planned = self._CORE_ROLES
+        planned = self._PLANNED_ROLES
         missing = tuple(role for role in planned if role not in profile.bindings)
         if missing:
             raise OrchestrationBlocked("profile_binding_missing:" + ",".join(missing))

@@ -33,7 +33,7 @@ def test_run_command_dry_default_and_evidence_verify_exit_codes(tmp_path, capsys
     assert run_output["mode"] == "dry_run"
     assert run_output["verdict"] == "dry_run_complete"
     assert run_output["dispatched_roles"] == []
-    assert [event["status"] for event in run_output["timeline"]] == ["planned"] * 4
+    assert [event["status"] for event in run_output["timeline"]] == ["planned"] * 6
     receipt_root = tmp_path / "runs" / run_output["run_id"]
     assert run_output["receipts"] == str(receipt_root)
     assert verify_receipt_store(receipt_root).status == "verified"
