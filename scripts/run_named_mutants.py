@@ -4,7 +4,10 @@ M01-M14 cover configuration, registry, and hermeticity. M15-M18 cover the
 schema-v2 evidence-authority guards added during Fleet Release 0 hardening.
 M19-M23 cover the rest of the evidence layer: the signing encoder (distinct
 from the sanitizer M15 covers), lane state projection, monetary accounting, and
-Windows binary-write fidelity.
+Windows binary-write fidelity. M24-M28 cover the verifier-side prose bounds that
+keep operator content out of receipt bodies: the per-key command value schema,
+the bounded MIME token, the bounded action-receipt labels, the run_decision key
+allowlist, and the shared extra-key refusal.
 """
 
 from __future__ import annotations
@@ -133,6 +136,48 @@ MUTATIONS = (
         "_BINARY = 0",
         "tests/test_fleet_release0.py::test_atomic_binary_write_preserves_ciphertext_newlines",
         ("nt",),
+    ),
+    Mutation(
+        "M24",
+        "src/torq_cli/domain/run_evidence.py",
+        "        if not _command_values_ok(payload):\n            return \"command_accept_invalid\"",
+        "        if False:\n            return \"command_accept_invalid\"",
+        "tests/test_receipt_prose_bounds.py::test_command_accepted_rejects_prose_shaped_values",
+    ),
+    Mutation(
+        "M25",
+        "src/torq_cli/domain/run_evidence.py",
+        '        ("media_type", _matches(_MEDIA_TYPE, payload.get("media_type"))),',
+        '        ("media_type", isinstance(payload.get("media_type"), str)),',
+        "tests/test_receipt_prose_bounds.py::test_command_accepted_rejects_prose_shaped_values",
+    ),
+    Mutation(
+        "M26",
+        "src/torq_cli/domain/run_evidence.py",
+        "            \"summary\",\n        )\n        if any(not _bounded_label(payload.get(field)) for field in required):\n            return \"action_opened_invalid\"",
+        "            \"summary\",\n        )\n        if False:\n            return \"action_opened_invalid\"",
+        "tests/test_receipt_prose_bounds.py::test_action_opened_rejects_unbounded_summary",
+    ),
+    Mutation(
+        "M27",
+        "src/torq_cli/domain/run_evidence.py",
+        "    if _extra_keys(payload, RUN_DECISION_KEYS):\n        return \"run_decision_text_invalid\"",
+        "    if False:\n        return \"run_decision_text_invalid\"",
+        "tests/test_receipt_prose_bounds.py::test_run_decision_rejects_prose_and_undeclared_keys",
+    ),
+    Mutation(
+        "M28",
+        "src/torq_cli/domain/run_evidence.py",
+        "def _extra_keys(payload: Mapping[str, Any], allowed: frozenset[str]) -> bool:\n    \"\"\"True when the payload carries a key outside the allowed set.\"\"\"\n    return bool(set(payload) - allowed)",
+        "def _extra_keys(payload: Mapping[str, Any], allowed: frozenset[str]) -> bool:\n    \"\"\"True when the payload carries a key outside the allowed set.\"\"\"\n    return False",
+        "tests/test_receipt_prose_bounds.py::test_command_accepted_rejects_an_undeclared_key",
+    ),
+    Mutation(
+        "M29",
+        "src/torq_cli/domain/run_evidence.py",
+        "    if _oversized_value(dict(payload)):\n        return \"receipt_value_oversized\"",
+        "    if False:\n        return \"receipt_value_oversized\"",
+        "tests/test_receipt_prose_bounds.py::test_oversize_floor_applies_to_every_transition",
     ),
 )
 
