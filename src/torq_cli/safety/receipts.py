@@ -1113,6 +1113,7 @@ def verify_receipt_store(
     root: Path,
     *,
     trusted_public_key: bytes | None = None,
+    external_trust: bool = False,
 ) -> StoreVerification:
     receipts_path = root / "receipts.jsonl"
     manifest_path = root / "terminal-manifest.json"
@@ -1181,20 +1182,8 @@ def verify_receipt_store(
             previous = receipt_hash
             receipts.append(envelope)
 
-        pin_path = root.parent / _PUBLIC_KEY_NAME
-        try:
-            pin_metadata = pin_path.stat(follow_symlinks=False)
-        except FileNotFoundError:
-            return StoreVerification("incomplete", "trust_anchor_missing")
-        if not stat.S_ISREG(pin_metadata.st_mode) or pin_metadata.st_nlink != 1:
-            return StoreVerification("tampered", "trust_anchor_unsafe")
-        try:
-            anchor_restricted = signing_file_permissions_are_restricted(pin_path)
-        except OSError:
-            return StoreVerification("tampered", "trust_anchor_unsafe")
-        if not anchor_restricted:
-            return StoreVerification("tampered", "trust_anchor_unsafe")
-        pinned_public_key = bytes.fromhex(pin_path.read_text(encoding="ascii").strip())
+        if external_trust and trusted_public_key is None:
+            return StoreVerification("incomplete", "external_trust_key_missing")
         if trusted_public_key is None:
             try:
                 trusted_public_key = _trusted_public_key_from_private_identity(root.parent)
@@ -1202,8 +1191,25 @@ def verify_receipt_store(
                 return StoreVerification("incomplete", "trust_identity_missing")
             except (OSError, PermissionError, ValueError):
                 return StoreVerification("tampered", "trust_identity_unsafe")
-        if not hmac.compare_digest(pinned_public_key, trusted_public_key):
-            return StoreVerification("tampered", "trust_anchor_substituted")
+        if not external_trust:
+            pin_path = root.parent / _PUBLIC_KEY_NAME
+            try:
+                pin_metadata = pin_path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                return StoreVerification("incomplete", "trust_anchor_missing")
+            if not stat.S_ISREG(pin_metadata.st_mode) or pin_metadata.st_nlink != 1:
+                return StoreVerification("tampered", "trust_anchor_unsafe")
+            try:
+                anchor_restricted = signing_file_permissions_are_restricted(pin_path)
+            except OSError:
+                return StoreVerification("tampered", "trust_anchor_unsafe")
+            if not anchor_restricted:
+                return StoreVerification("tampered", "trust_anchor_unsafe")
+            pinned_public_key = bytes.fromhex(
+                pin_path.read_text(encoding="ascii").strip()
+            )
+            if not hmac.compare_digest(pinned_public_key, trusted_public_key):
+                return StoreVerification("tampered", "trust_anchor_substituted")
 
         signed = json.loads(manifest_bytes)
         if not isinstance(signed, dict):

@@ -930,7 +930,7 @@ affected future attempts. Prior evidence is immutable.
 
 ## 11. Dependencies and release gates
 
-Status is relative to protected `main` at **8367514**. Release 0 and Release 1
+Status is relative to protected `main` after **8d5f014**. Release 0 and Release 1
 passed protected-main quality, adversarial, headless, package, wheel, and browser
 checks on 2026-07-25. Rows marked not landed are the Release 2/3 workload.
 
@@ -938,7 +938,7 @@ checks on 2026-07-25. Rows marked not landed are the Release 2/3 workload.
 |---|---|
 | Split token counts and preflight refusal | landed |
 | Receipt `observed_at` and signed rolling manifest foundation | landed |
-| Rate table, in-memory entitlement ledger, settlement receipts | foundation landed; immutable rate hashes and cross-run lifecycle outstanding |
+| Rate table, entitlement ledger, settlement receipts | Release 2 implemented: canonical rate identity, decimal strings, durable account windows, and cross-run lifecycle |
 | DeepSeek/Qwen routing | implemented through the shared Token Plan account; Southeast Asia is the HTTPS default and `QWEN_TOKEN_PLAN_BASE_URL` is the explicit override |
 | Verified Fleet projector and loopback server | Release 1 landed with stable v2 snapshot, directional coverage, bootstrap/session capability, and exact Host validation |
 | Governed textual context injection | foundation landed; command lifecycle, attempt boundary, and replan outstanding |
@@ -964,15 +964,15 @@ checks on 2026-07-25. Rows marked not landed are the Release 2/3 workload.
 | Recovery while waiting on operator | refused for awaiting-approval state or any open action |
 | Run-decision value authority | implemented as per-writer permitted status sets in the shared transition matrix |
 | Per-run manifest rollback detection | accepted TC-7c residual; no same-filesystem counter is represented as a security boundary |
-| Registry anti-rollback head anchor (AR-4c) | not landed |
+| Registry anti-rollback head anchor (AR-4c) | implemented with signed head/count, explicit re-anchor record, confirmation, and quarantine limit |
 | Orphan annotation (SR-3a) | implemented as non-evidentiary supervisor state |
 | Abandoned-attempt reduction (LC-1, VC-6, VC-7) | implemented only through certified `run_abandoned` evidence |
-| Append-only dispatch registry (AR-4a) | not landed; no record survives a deleted run |
-| Coverage-gated entitlement preflight (AR-4b) | not landed |
+| Append-only dispatch registry (AR-4a) | implemented outside run directories with signed hash-chained enrollment and reservations |
+| Coverage-gated entitlement preflight (AR-4b) | implemented; missing, unverifiable, and distrusted enrolled runs fail closed |
 | Capability bootstrap and session contract (SR-5a) | implemented; a single-use URL nonce exchanges for an HttpOnly, expiring, rotating session |
 | Operator action lifecycle | implemented with linked resolution and operator-gateway closure |
 | Local supervisor and interruption evidence | implemented with atomic non-evidentiary state and role-limited interruption/recovery writes |
-| Reservation expiry/reconciliation and cross-run aggregation | not landed |
+| Reservation expiry/reconciliation and cross-run aggregation | implemented with separate used/reserved/limit values, signed reconciliation history, and shared Qwen/DeepSeek windows |
 | Binary extraction/sanitization | not landed |
 
 ### Release 0 gate

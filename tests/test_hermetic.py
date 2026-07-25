@@ -47,10 +47,11 @@ def test_production_imports_forbid_subprocess() -> None:
             local_allow = {"http", "urllib"}
         elif source_path.as_posix().endswith(
             (
-                "torq_cli/safety/workspace.py",
-                "torq_cli/safety/receipts.py",
-                "torq_cli/safety/evidence_broker.py",
-            )
+                    "torq_cli/safety/workspace.py",
+                    "torq_cli/safety/receipts.py",
+                    "torq_cli/safety/evidence_broker.py",
+                    "torq_cli/safety/accounting_registry.py",
+                )
         ):
             local_allow = {"os"}
         elif source_path.as_posix().endswith("torq_cli/connectors/native_credentials.py"):

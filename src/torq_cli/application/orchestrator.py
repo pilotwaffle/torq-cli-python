@@ -6,6 +6,7 @@ import json
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, cast
@@ -43,6 +44,7 @@ class StageBudget:
     settlement: str
     ceiling_usd: float
     window: PlanWindow | None = None
+    projected_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -272,6 +274,7 @@ class GovernedOrchestrator:
                 "planned_roles": planned,
                 "lane_catalog": self._lane_catalog(profile),
                 "rate_table_version": self.rate_table.version,
+                "rate_table_hash": self.rate_table.sha256,
             },
         )
         if mode is ExecutionMode.DRY_RUN:
@@ -464,9 +467,9 @@ class GovernedOrchestrator:
                         else "configured_worst_case"
                     ),
                     "usage": self._usage_record({}),
-                    "cost_usd": 0.0,
-                    "billed_usd": 0.0,
-                    "metered_usd": 0.0,
+                    "cost_usd": "0",
+                    "billed_usd": "0",
+                    "metered_usd": "0",
                     "settlement": settlement,
                     "entitlement": window.as_receipt() if window is not None else None,
                     "provider_dispatch": False,
@@ -607,13 +610,13 @@ class GovernedOrchestrator:
         else:
             entitlement = budget.window
         quote = self.rate_table.quote(binding.provider_id, binding.model_id, usage)
-        billed_usd: float | None
+        billed_usd: str | None
         if self.entitlement_ledger is None:
-            billed_usd = budget.ceiling_usd
+            billed_usd = str(budget.ceiling_usd)
             cost_basis = "configured_worst_case"
         else:
             billed_usd = (
-                0.0 if budget.settlement == "plan_covered" else quote.metered_usd
+                "0" if budget.settlement == "plan_covered" else quote.metered_usd
             )
             cost_basis = (
                 "sealed_token_counts"
@@ -630,6 +633,7 @@ class GovernedOrchestrator:
                 "settlement": budget.settlement,
                 "pricing_status": quote.pricing_status,
                 "rate_table_version": quote.rate_table_version,
+                "rate_table_hash": quote.rate_table_hash,
                 "preflight_ceiling_usd": budget.ceiling_usd,
                 "cost_basis": cost_basis,
                 "usage": usage,
@@ -649,6 +653,7 @@ class GovernedOrchestrator:
                 "settlement": budget.settlement,
                 "pricing_status": quote.pricing_status,
                 "rate_table_version": quote.rate_table_version,
+                "rate_table_hash": quote.rate_table_hash,
                 "cost_basis": cost_basis,
                 "entitlement": (
                     entitlement.as_receipt() if entitlement is not None else None
@@ -696,6 +701,17 @@ class GovernedOrchestrator:
                 "provider_dispatch": True,
             },
         )
+        if (
+            self.entitlement_ledger is not None
+            and budget.settlement == "plan_covered"
+        ):
+            try:
+                self.entitlement_ledger.reserve(
+                    binding.provider_id,
+                    calls=budget.projected_calls,
+                )
+            except ValueError as exc:
+                raise OrchestrationBlocked(f"plan_window_exceeded:{role}") from exc
         return clean_prompt
 
     def _consume_context(self, role: str) -> list[dict[str, str]]:
@@ -796,8 +812,11 @@ class GovernedOrchestrator:
         if role not in self.cost_ceiling_usd_by_role:
             raise OrchestrationBlocked(f"cost_ceiling_required:{role}")
         ceiling = float(self.cost_ceiling_usd_by_role[role])
-        consumed = sum(float(row["cost_usd"]) for row in usage_rows)
-        if consumed + ceiling > self.budget_usd:
+        consumed = sum(
+            (Decimal(str(row["cost_usd"])) for row in usage_rows),
+            start=Decimal(0),
+        )
+        if consumed + Decimal(str(ceiling)) > Decimal(str(self.budget_usd)):
             raise OrchestrationBlocked(f"budget_preflight_blocked:{role}")
         return ceiling
 
@@ -822,16 +841,15 @@ class GovernedOrchestrator:
                 window,
             )
         projected = self.projected_calls_by_role.get(role, 1)
-        if window.used + projected > window.limit:
+        preflight = getattr(self.entitlement_ledger, "preflight", None)
+        if callable(preflight):
+            try:
+                preflight(binding.provider_id)
+            except ValueError as exc:
+                raise OrchestrationBlocked(str(exc)) from exc
+        if window.used + window.reserved + projected > window.limit:
             raise OrchestrationBlocked(f"plan_window_exceeded:{role}")
-        try:
-            self.entitlement_ledger.reserve(
-                binding.provider_id,
-                calls=projected,
-            )
-        except ValueError as exc:
-            raise OrchestrationBlocked(f"plan_window_exceeded:{role}") from exc
-        return StageBudget("plan_covered", 0.0, window)
+        return StageBudget("plan_covered", 0.0, window, projected)
 
     @staticmethod
     def _prompt(

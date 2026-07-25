@@ -84,6 +84,9 @@ class RunController:
             policy_version=identity.policy_version,
         )
         chain = BrokeredReceiptChain(EvidenceBroker(key_chain))
+        bind_run = getattr(self.orchestrator.entitlement_ledger, "bind_run", None)
+        if callable(bind_run):
+            bind_run(run_id)
         chain.append(
             "run_attested",
             {

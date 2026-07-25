@@ -24,13 +24,19 @@ class PlanWindow:
     resets_at: str
     used_source: str = "receipt_derived"
     limit_source: str = "operator_declared"
+    reserved: int = 0
 
     def __post_init__(self) -> None:
         if not self.account or not self.providers:
             raise ValueError("entitlement_account_invalid")
         if self.settlement not in _SETTLEMENTS:
             raise ValueError("entitlement_settlement_invalid")
-        if self.used < 0 or self.limit < 0 or self.used > self.limit:
+        if (
+            self.used < 0
+            or self.reserved < 0
+            or self.limit < 0
+            or self.used + self.reserved > self.limit
+        ):
             raise ValueError("entitlement_window_invalid")
         if self.used_source not in _USED_SOURCES:
             raise ValueError("entitlement_used_source_invalid")
@@ -43,6 +49,7 @@ class PlanWindow:
         return {
             "account": self.account,
             "used": self.used,
+            "reserved": self.reserved,
             "limit": self.limit,
             "resets_at": self.resets_at,
             "used_source": self.used_source,
@@ -73,6 +80,10 @@ class InMemoryEntitlementLedger:
                     raise ValueError(f"entitlement_provider_ambiguous:{provider}")
                 self._provider_accounts[provider] = account
 
+    @property
+    def windows(self) -> Mapping[str, PlanWindow]:
+        return dict(self._windows)
+
     @classmethod
     def from_config(cls, raw: Mapping[str, object]) -> InMemoryEntitlementLedger:
         windows: dict[str, PlanWindow] = {}
@@ -98,6 +109,7 @@ class InMemoryEntitlementLedger:
                 resets_at=str(value.get("resets_at", "")),
                 used_source=str(value.get("used_source", "receipt_derived")),
                 limit_source=str(value.get("limit_source", "operator_declared")),
+                reserved=int(value.get("reserved", 0)),
             )
         return cls(windows)
 
