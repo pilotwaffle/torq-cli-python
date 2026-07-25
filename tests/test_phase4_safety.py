@@ -329,10 +329,27 @@ def test_apply_requires_explicit_approval_pinned_tree_and_exact_content(tmp_path
 
 def test_usage_summary_reconstructs_totals_and_preserves_unreported() -> None:
     receipts = [
-        {"agent": "g1d", "provider": "claude", "cost_usd": 0.2, "usage": {"tokens": 10}},
-        {"agent": "g2a", "provider": "codex", "cost_usd": 0.3, "usage": "unreported"},
+        {
+            "agent": "g1d",
+            "provider": "claude",
+            "cost_usd": 0.1,
+            "billed_usd": 0.1,
+            "metered_usd": 0.1,
+            "usage": {"tokens": 10},
+        },
+        {
+            "agent": "g2a",
+            "provider": "codex",
+            "cost_usd": 0.2,
+            "billed_usd": 0.2,
+            "metered_usd": 0.2,
+            "usage": "unreported",
+        },
     ]
     summary = summarize_usage(receipts, budget_usd=1.0)
-    assert summary["budget"] == {"consumed_usd": 0.5, "remaining_usd": 0.5}
+    assert summary["budget"] == {"consumed_usd": "0.3", "remaining_usd": "0.7"}
+    assert summary["settlement"]["billed_usd"] == "0.3"
+    assert summary["settlement"]["metered_equivalent_usd"] == "0.3"
+    assert summary["providers"]["claude"]["cost_usd"] == "0.1"
     assert summary["providers"]["codex"]["usage"] == "unreported"
     assert json.loads(json.dumps(summary)) == summary

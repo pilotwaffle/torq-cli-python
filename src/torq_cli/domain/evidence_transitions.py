@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -12,6 +13,7 @@ class TransitionRule:
     evidence_basis: str
     precondition: str
     terminal: bool = False
+    permitted_statuses: frozenset[str] | None = None
 
 
 TRANSITION_RULES: tuple[TransitionRule, ...] = (
@@ -35,12 +37,29 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         "orchestrator", "repair_routed", "derived", "qualifying_defect"
     ),
     TransitionRule("orchestrator", "action_opened", "derived", "action_new"),
-    TransitionRule("orchestrator", "run_decision", "derived", "decision_valid", True),
+    TransitionRule(
+        "orchestrator",
+        "run_decision",
+        "derived",
+        "decision_valid",
+        True,
+        frozenset({
+            "awaiting_approval",
+            "blocked",
+            "execution_complete_action_open",
+            "workflow_closed",
+        }),
+    ),
     TransitionRule(
         "supervisor", "stage_interrupted", "derived", "attempt_open", True
     ),
     TransitionRule(
-        "supervisor", "run_decision", "derived", "interruption_linked", True
+        "supervisor",
+        "run_decision",
+        "derived",
+        "interruption_linked",
+        True,
+        frozenset({"workflow_failed"}),
     ),
     TransitionRule(
         "operator_gateway", "context_injected", "submitted", "run_open"
@@ -49,7 +68,12 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         "operator_gateway", "action_resolved", "submitted", "action_open"
     ),
     TransitionRule(
-        "operator_gateway", "run_decision", "derived", "last_action_resolved", True
+        "operator_gateway",
+        "run_decision",
+        "derived",
+        "last_action_resolved",
+        True,
+        frozenset({"workflow_closed"}),
     ),
     TransitionRule(
         "recovery", "run_abandoned", "submitted", "open_attempts_enumerated", True
@@ -71,6 +95,7 @@ def transition_authority_finding(
     writer_role: object,
     transition: object,
     evidence_basis: object,
+    payload: Mapping[str, object],
 ) -> str | None:
     """Validate role and basis using the shared machine-readable matrix."""
     if not isinstance(writer_role, str) or not isinstance(transition, str):
@@ -88,6 +113,11 @@ def transition_authority_finding(
         return "receipt_writer_unauthorized"
     if evidence_basis != rule.evidence_basis:
         return "receipt_writer_unauthorized"
+    if (
+        rule.permitted_statuses is not None
+        and payload.get("status") not in rule.permitted_statuses
+    ):
+        return "run_decision_status_unauthorized"
     return None
 
 

@@ -1,6 +1,6 @@
 # PRD - TORQ Fleet UI
 
-Status: **Release 1 Fleet Read implemented on protected main.** Revised 2026-07-25, Rev 5.5.
+Status: **Requirements Rev 5.3; Release 1 implementation status updated 2026-07-25.**
 
 The Release 0 gate in Section 11 has passed. Release 1 completed protected-main
 CI on Windows, macOS, Linux, and headless Linux after merge. Release 2
@@ -28,17 +28,20 @@ Rev 5.3 changes no requirement. It reconciles the document with `origin/main` at
 outstanding, and re-derives every code citation against that commit. Changes are
 listed in Section 19.
 
-Rev 5.4 implements build-order steps 0-7, closes canonical-encoding decision 6
+The post-Rev-5.3 implementation implements build-order steps 0-7, closes
+canonical-encoding decision 6
 in favor of the pinned standard-library encoder, and adds the Release 0
-adversarial fixtures. Fleet Read UI implementation remains the next release
-step; Release 2 accounting and Release 3 control dependencies remain gated.
+adversarial fixtures. At that checkpoint, Fleet Read UI implementation remained
+the next release step; Release 2 accounting and Release 3 control dependencies
+remained gated.
 
-Rev 5.5 implements build-order step 8 as a wheel-bundled, loopback-only Fleet
-Read board. It adds the six-lane governance rail, orchestrator and action
-ledgers, in-place evidence detail, persistent monitor, deduplicated local
-notifications, secure static routes, responsive and reduced-motion treatments,
-and real-browser verification. Release 2 accounting and Release 3 control
-remain gated.
+The next implementation update completes build-order step 8 as a
+wheel-bundled, loopback-only Fleet Read board. It adds the six-lane governance
+rail, orchestrator and action ledgers, in-place evidence detail, persistent
+monitor, deduplicated local notifications, secure static routes, responsive and
+reduced-motion treatments, and real-browser verification. These paragraphs are
+implementation status, not uncommitted Rev 5.4 or Rev 5.5 requirement bodies.
+Release 2 accounting and Release 3 control remain gated.
 
 Depends on:
 
@@ -450,6 +453,17 @@ never covers the supervisor's or recovery writer's transitions — but it does n
 close it. Decision 7 is where that residual risk is either accepted or paid down
 by running the broker under a separate OS identity.
 
+**TC-7c (accepted local rollback residual).** The per-run manifest has no
+monotonic anchor outside the operator-controlled filesystem. A same-user
+attacker who retained an earlier valid manifest can restore that manifest and
+its covered receipt prefix; the verifier cannot distinguish the restored state
+from legitimate verification lag. A generation counter stored beside the run
+would be controlled by the same attacker and would not close this threat. TORQ
+therefore reports only the evidence it can currently authenticate and treats
+same-user per-run rollback detection as out of scope unless a future design
+anchors monotonic state in an OS-backed identity or external transparency log.
+This residual does not weaken AR-4c's separate dispatch-registry requirement.
+
 This makes the broker the single most security-critical component in the
 product. It runs as its own process with its own lifetime, it is the only holder
 of the keys, and its compromise is equivalent to compromise of the whole
@@ -695,6 +709,7 @@ Fleet renders four core and two conditional rows in sealed catalog order.
 | queued | grey | lane without attempt |
 | running | gold | open created/dispatched attempt |
 | sealed | sage | latest attempt completed |
+| blocked | ochre plus `⊘` glyph | terminal preflight refusal; no provider transport invoked |
 | needs you | burnt orange | open lane action |
 | failed | red plus `x` glyph | latest attempt failed |
 | interrupted | violet/red outline plus `!` glyph | verified interruption |
@@ -837,9 +852,10 @@ affected future attempts. Prior evidence is immutable.
 
 ## 11. Dependencies and release gates
 
-Status is relative to the Release 0 implementation branch based on protected
-`main` at **ea70760**. Local quality, adversarial, headless, package, and wheel
-checks passed on 2026-07-25; protected-main CI remains the merge gate.
+Status is relative to protected `main` at **8d00380** plus the current audit
+blocker implementation. Local quality, adversarial, headless, package, wheel,
+and browser checks passed on 2026-07-25; protected-main CI remains the merge
+gate for these final blocker fixes.
 
 | Dependency | Status |
 |---|---|
@@ -865,6 +881,12 @@ checks passed on 2026-07-25; protected-main CI remains the merge gate.
 | Machine-readable transition matrix and generated conformance tests (TC-4a) | implemented in `domain/evidence_transitions.py`; append and verification share it |
 | Crash-durable commit (WC-1) | implemented with receipt fsync, canonical temporary manifest fsync, atomic replace, and directory fsync |
 | Covered-prefix projection (VC-3) | implemented; uncovered tails report `live_catching_up` and do not enter reduction |
+| Blocked vs operator-attention lane state | implemented as distinct reducer counts and Fleet visuals |
+| Finite canonical JSON | implemented; `allow_nan=False` rejects non-finite payloads before append |
+| Decimal settlement aggregation (AR-2) | implemented with `Decimal` accumulation and canonical decimal-string outputs |
+| Recovery while waiting on operator | refused for awaiting-approval state or any open action |
+| Run-decision value authority | implemented as per-writer permitted status sets in the shared transition matrix |
+| Per-run manifest rollback detection | accepted TC-7c residual; no same-filesystem counter is represented as a security boundary |
 | Registry anti-rollback head anchor (AR-4c) | not landed |
 | Orphan annotation (SR-3a) | implemented as non-evidentiary supervisor state |
 | Abandoned-attempt reduction (LC-1, VC-6, VC-7) | implemented only through certified `run_abandoned` evidence |
@@ -930,8 +952,8 @@ command lifecycle, sanitizer, attempt boundaries, and replan receipts.
 
 ## 12. Build order
 
-Rev 5.4 implements and locally verifies steps 0-7. Rev 5.5 implements step 8,
-Fleet Read UI. Steps 9-10 remain gated as Release 2 and Release 3 work.
+The post-Rev-5.3 implementation locally verifies steps 0-7 and implements step
+8, Fleet Read UI. Steps 9-10 remain gated as Release 2 and Release 3 work.
 
 0. One pinned canonical JSON encoder shared by hashing, signing, and storage.
    Everything below signs over its output, so it lands first. Partly done:
@@ -1063,10 +1085,11 @@ Fleet Read UI. Steps 9-10 remain gated as Release 2 and Release 3 work.
 3. Default Qwen Token Plan region when configuration declares none.
 4. Whether operator-declared quota limits are sufficient for initial Release 2.
 5. Rolling-manifest cadence and maximum visible verification lag.
-6. **Settled in Rev 5.4:** canonical JSON uses the pinned standard-library
+6. **Settled in post-Rev-5.3 implementation:** canonical JSON uses the pinned standard-library
    `json.dumps(value, sort_keys=True, separators=(",", ":"),
-   ensure_ascii=True)` encoding. A packaged non-ASCII oracle pins the exact
-   bytes and SHA-256 without adding a fourth runtime dependency.
+   ensure_ascii=True, allow_nan=False)` encoding. A packaged non-ASCII oracle
+   pins the exact bytes and SHA-256 without adding a fourth runtime dependency;
+   non-finite numeric payloads fail before append.
 7. Broker key custody and identity: OS keychain (reusing the `keyring` backend
    already carrying provider credentials), an encrypted keystore the broker
    unlocks at start, or a separate OS user under which the broker runs. Only the

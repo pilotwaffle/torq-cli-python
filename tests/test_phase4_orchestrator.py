@@ -172,8 +172,8 @@ def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approv
     assert result.proposal["source_role"] == "builder"
     assert result.usage["agents"]["builder"]["usage"]["tokens"] == 5
     assert result.usage["budget"] == {
-        "consumed_usd": 0.4,
-        "remaining_usd": 0.6,
+        "consumed_usd": "0.4",
+        "remaining_usd": "0.6",
     }
     assert verify_receipt_store(chain.root).status == "verified"
 

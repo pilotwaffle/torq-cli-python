@@ -154,12 +154,47 @@ def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Pat
     assert snapshot["run"]["sealed"] is True
     assert snapshot["run"]["status"] == "blocked"
     assert snapshot["run"]["waiting_on"] == []
-    assert snapshot["summary"]["needs_you"] == 1
-    assert snapshot["settlement"]["metered_equivalent_usd"] == 0.002
+    assert snapshot["summary"]["blocked"] == 1
+    assert snapshot["summary"]["needs_you"] == 0
+    assert snapshot["settlement"]["metered_equivalent_usd"] == "0.002"
     blocked = next(row for row in snapshot["lanes"] if row["role"] == "g1r")
+    assert blocked["state"] == "blocked"
     assert blocked["provider_dispatch"] is False
     assert blocked["reason"] == "plan_window_exceeded:g1r"
     assert "subscription account" in blocked["reason_gloss"]
+
+
+def test_open_lane_action_promotes_blocked_lane_to_needs_you(tmp_path: Path) -> None:
+    chain = _chain(tmp_path, "run-blocked-action")
+    _planned(chain)
+    attempt = _created(chain, "g1r")
+    blocked = chain.append(
+        "stage_blocked",
+        {
+            **attempt,
+            "reason": "operator_approval_required",
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "action_opened",
+        {
+            "action_id": "approve-g1r",
+            "type": "approval_required",
+            "scope": "lane",
+            "target": "g1r",
+            "summary": "Approve the blocked lane.",
+            "caused_by_sequence": blocked["sequence"],
+        },
+    )
+
+    snapshot = FleetProjector(chain.root).snapshot()
+    lane = next(row for row in snapshot["lanes"] if row["role"] == "g1r")
+
+    assert lane["state"] == "needs_you"
+    assert snapshot["summary"]["blocked"] == 0
+    assert snapshot["summary"]["needs_you"] == 1
+    assert snapshot["summary"]["open_actions"] == 1
 
 
 def test_tampered_chain_never_projects_plausible_fleet_data(tmp_path: Path) -> None:
@@ -181,7 +216,14 @@ def test_tampered_chain_never_projects_plausible_fleet_data(tmp_path: Path) -> N
 def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     chain = _chain(tmp_path, "run-cli")
     _planned(chain)
-    chain.append("run_decision", {"status": "dry_run_complete", "provider_dispatch": False})
+    chain.append(
+        "run_decision",
+        {
+            "status": "workflow_closed",
+            "outcome": "dry_run_complete",
+            "provider_dispatch": False,
+        },
+    )
     chain.seal()
 
     code = main(["fleet", "--run-root", str(chain.root)])
