@@ -1,13 +1,13 @@
 # Plan entitlement accounting
 
-Status: **items 1-6 merged to `main` in PR #15 (2026-07-25); items 7 (C8/C9) not
-started.** Written and implemented 2026-07-24 against `orchestrator.py`,
-`adapters/live_provider.py`, and `scripts/run_governed_live.py`.
+Status: **C1-C7 foundations are on protected main; C8/C9 and the Rev 5.5
+reconciliation/rollback lifecycle are Release 2 build-order step 9.** Reconciled
+2026-07-25 against `docs/prd-fleet-ui.md` Rev 5.5.
 
-Every provider lane now runs on a paid subscription rather than metered API
-keys. That inverts the scarce resource: dollars are fixed and prepaid, while
-plan windows are what actually run out. This document specifies the accounting
-change and the defects that block it.
+Most provider lanes run on paid plans rather than metered API keys; the OpenAI
+HTTP transport remains metered as built. This makes the run mixed-settlement:
+plan windows constrain subscription lanes while dollars constrain metered
+lanes. This document specifies the accounting contract for both.
 
 The user-facing goal is a defensible answer to "what would this have cost on
 metered API?" — but the number is worthless unless it recomputes from sealed
@@ -365,11 +365,11 @@ class RegistryEntry:
     entry_hash: str         # over the canonical entry plus prior entry_hash
 ```
 
-`entry_hash` chains the journal. The broker anchors the current head outside the
-mutable journal, beside the trust anchor and under the same file protections.
-Verification recomputes the journal head and compares it to the anchored head —
-signatures alone detect modification but not deletion of the journal or
-restoration of an older, still-validly-signed copy.
+`entry_hash` chains the journal. The broker anchors the current head and
+monotonic entry count outside the mutable journal, beside the trust anchor and
+under the same file protections. Verification recomputes both values and
+compares them to the anchor; signatures alone detect modification but not
+deletion or restoration of an older, still-validly-signed journal.
 
 Resolution of a registry entry against the evidence tree:
 
@@ -391,7 +391,9 @@ whose head is an ancestor of the anchored head does **not** reduce to low
 coverage. It fails closed as `registry_rollback_detected`. A rolled-back
 registry is an attack on the denominator itself, and treating it as ordinary
 missing coverage would let it be reconciled away by the same path that clears
-benign gaps. Recovery is explicit operator reconciliation.
+benign gaps. Recovery uses a distinct broker-signed re-anchor record and
+quarantines the affected account window at its configured limit before a new
+head is accepted. Ordinary reconciliation cannot clear rollback.
 
 ### C9 — Coverage gating on `_preflight_entitlement` (PRD AR-4b)
 
@@ -414,6 +416,21 @@ enforcement. Display continues to show the partial figure against its
 denominator; enforcement refuses. The asymmetry is deliberate — a reader
 tolerating an incomplete number loses accuracy, an enforcer tolerating one
 grants quota that tampering created.
+
+Coverage spans the active root plus every `trusted_legacy` root. Runs under a
+`distrusted_compromised` root stay in the active denominator and are excluded
+from the verified numerator. Routine rotation therefore preserves 100 percent
+coverage; compromise does not.
+
+### C10 — Durable reservation and reconciliation history (PRD AR-5, AR-6)
+
+Reservations are journaled by entitlement account and registry entry. They
+begin at transport attempt, remain conservative after uncertain failure, and
+expire only with the rolling window or an explicit reconciliation. The
+reconciliation journal is broker-signed, hash-chained, and rollback-anchored.
+Each record names actor, time, source, old/new reservation, and affected entry
+IDs. Reconciliation may release reserved capacity; it cannot remove a missing,
+deleted, unverifiable, or distrusted entry from the coverage denominator.
 
 ## State vocabulary
 
@@ -458,18 +475,16 @@ made the PR #3 surface results unverifiable.
    seal settlement, billed and metered values, pricing status, rate-table
    version, and entitlement provenance; summaries preserve the split.
 
-7. **C8 / C9** — dispatch registry, head anchor, and coverage gating. Not
-   started. Blocked on the evidence broker (PRD TC-7), which owns the registry
-   and the anchor; there is no broker in the tree as of `origin/main` 56b8bff.
-   Until this lands, the coverage figure in C3 is advisory: it cannot detect a
-   deleted run, so it must not gate anything.
+7. **C8 / C9 / C10** — dispatch registry, head/count anchor, trust-set coverage
+   gating, durable reservations, reconciliation, and rollback recovery. This is
+   the next phase. The evidence broker prerequisite is now on protected main;
+   until this phase lands, the C3 coverage figure remains advisory because it
+   cannot detect a deleted run.
 
 1 and 2 were defect fixes that stood on their own merits and landed before the
 next governed live run. 3 was the correctness precondition for the ledger and is
-now met. 4–6 are implemented on the feature branch and awaiting protected-main
-review. 7 belongs to the Fleet UI Release 0 gate rather than to this document's
-original scope, and is recorded here because the registry is a backend contract
-that this ledger consumes.
+now met. Items 4-6 are on protected main. Item 7 is Release 2 build-order step 9
+and is the backend contract the Fleet accounting surface consumes.
 
 **Runs sealed before item 1 landed are permanently unpriceable.** That includes
 `docs/evidence/t33-governed-live-2026-07-24/`, whose four `stage_completed`

@@ -1,10 +1,12 @@
 # Fleet backend contract
 
-Status: **implemented on `feat/fleet-backend`; merge pending.**
+Status: **Release 1 implemented on protected main; contract reconciled 2026-07-25.**
 
-The Fleet backend is a local, read-only projection of authenticated run
-evidence. It does not tail provider output, import CLI command handlers, expose
-the receipt signing key, or mutate the chain.
+The Fleet backend is a local projection of authenticated run evidence. Its
+server-side reducer is the only evidence reducer. It does not tail provider
+output, expose receipt keys, or let the browser reconstruct lifecycle state.
+The standalone service is read-only except when an in-process governed context
+injector is explicitly supplied.
 
 ## Commands
 
@@ -23,12 +25,15 @@ torq fleet --run-root .\export\run `
   --trusted-public-key .\export\.torq-receipt-signing-key.pub
 ```
 
-The HTTP contract is `GET /api/v1/fleet`. `GET /healthz` reports the current
-verification result. Mutation methods return `405 read_only` unless an active
+The HTTP read contract is `GET /api/v1/fleet`. `GET /healthz` returns only the
+fixed liveness shape `{status: ok}`. Mutation methods return `405 read_only`
+unless an active
 in-process orchestrator explicitly supplies a `GovernedContextInjector`; that
 opt-in enables the same-origin `POST /api/v1/context` contract. The standalone
 CLI server remains read-only. The server rejects non-loopback bind addresses.
-Every request must also present exactly one `Host` header matching
+Every data request requires the HttpOnly Fleet session established by the
+single-use `/bootstrap` nonce exchange. Every request must also present exactly
+one `Host` header matching
 `127.0.0.1:<bound-port>`, `localhost:<bound-port>`, or the IPv6 loopback
 equivalent; other host forms fail with `421 fleet_host_denied` to block
 DNS-rebinding access.
@@ -50,15 +55,16 @@ start/update time. Historical receipts without timestamps explicitly return
 
 ## Snapshot schema
 
-`torq-fleet-snapshot-v1` contains:
+`torq-fleet-snapshot-v2` contains:
 
 - verification status and finding;
 - run identity, mode, decision, seal state, and waiting-on list;
-- reconciled sealed/running/needs-you/queued counts;
-- six lane rows ordered by first receipt sequence;
+- one count per ordered lane state, open-action count, and reduction errors;
+- catalog-ordered lane rows with distinct `blocked` and `needs_you` states;
 - raw blocked reason, plain-language gloss, and `provider_dispatch` assertion;
 - split token usage, settlement, quota provenance, and priced/unpriced values;
 - settlement totals reconstructed from completed-stage receipts.
 
-The projector never reads encrypted artifact bodies. Lane attachment and
-artifact decryption require a separate attended application boundary.
+The projector never reads encrypted artifact bodies. Operational orphan and
+recovery annotations remain explicitly non-evidentiary. Artifact decryption
+requires a separate attended application boundary.
