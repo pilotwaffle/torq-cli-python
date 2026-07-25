@@ -24,6 +24,7 @@ from torq_cli.safety.receipts import (
     FileRunKeyStore,
     MemoryRunKeyStore,
     ReceiptChain,
+    _atomic_write,
     verify_receipt_store,
 )
 
@@ -100,6 +101,15 @@ def test_artifacts_are_aead_authenticated_and_run_bound(tmp_path: Path) -> None:
     transplanted.write_bytes(artifact.read_bytes())
     with pytest.raises(InvalidTag):
         second.read_artifact(transplanted)
+
+
+def test_atomic_binary_write_preserves_ciphertext_newlines(tmp_path: Path) -> None:
+    payload = b"cipher-prefix\x00\n\r\n\xffcipher-suffix"
+    target = tmp_path / "artifact.enc"
+
+    _atomic_write(target, payload)
+
+    assert target.read_bytes() == payload
 
 
 def test_machine_readable_matrix_rejects_every_wrong_basis() -> None:
