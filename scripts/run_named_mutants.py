@@ -100,14 +100,14 @@ MUTATIONS = (
     ),
     Mutation(
         "M19",
-        "src/torq_cli/safety/receipts.py",
+        "src/torq_cli/core/canonical_json.py",
         "        ensure_ascii=True,\n        allow_nan=False,",
         "        ensure_ascii=True,\n        allow_nan=True,",
         "tests/test_evidence_encoder_contract.py::test_signing_encoder_refuses_non_finite_floats",
     ),
     Mutation(
         "M20",
-        "src/torq_cli/safety/receipts.py",
+        "src/torq_cli/core/canonical_json.py",
         "        ensure_ascii=True,\n        allow_nan=False,",
         "        ensure_ascii=False,\n        allow_nan=False,",
         "tests/test_evidence_encoder_contract.py::test_signing_encoder_escapes_non_ascii",
