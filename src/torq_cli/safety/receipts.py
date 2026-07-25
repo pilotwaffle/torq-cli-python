@@ -78,6 +78,9 @@ def _writer_contract_finding(
         return authority_finding
     if not isinstance(transition, str) or not isinstance(payload, Mapping):
         return "receipt_payload_invalid"
+    encoding_finding = _canonical_encodable_finding(payload)
+    if encoding_finding is not None:
+        return encoding_finding
     return validate_receipt_payload(
         transition,
         payload,
@@ -95,11 +98,28 @@ def _canonical(value: Mapping[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        allow_nan=False,
     ).encode()
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
     return _canonical(value).decode("ascii")
+
+
+def _canonical_encodable_finding(payload: object) -> str | None:
+    """Reject payloads the canonical encoder cannot represent as JSON.
+
+    `allow_nan=False` makes NaN and Infinity a `ValueError` rather than the
+    bare `NaN`/`Infinity` tokens no conforming parser accepts. Catching it
+    before the append lock keeps an unencodable payload from being signed.
+    """
+    if not isinstance(payload, Mapping):
+        return "receipt_payload_invalid"
+    try:
+        _canonical(payload)
+    except (TypeError, ValueError):
+        return "receipt_payload_unencodable"
+    return None
 
 
 def _fsync_directory(path: Path) -> None:
@@ -911,6 +931,9 @@ class ReceiptChain:
         with self._lock:
             self._assert_store_writable()
             clean = self._sanitize(payload)
+            encoding_finding = _canonical_encodable_finding(clean)
+            if encoding_finding is not None:
+                raise ValueError(encoding_finding)
             payload_finding = validate_receipt_payload(
                 transition,
                 clean,

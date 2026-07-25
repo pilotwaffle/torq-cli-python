@@ -12,6 +12,14 @@ class TransitionRule:
     evidence_basis: str
     precondition: str
     terminal: bool = False
+    statuses: tuple[str, ...] = ()
+    """Closed set of `payload["status"]` values this role may declare.
+
+    Empty means the transition carries no status field. Authority is the
+    `(writer_role, transition, status)` triple, not the pair alone: without
+    this set an authorized writer could close a run with any status string
+    and reach no precondition branch at all.
+    """
 
 
 TRANSITION_RULES: tuple[TransitionRule, ...] = (
@@ -35,12 +43,31 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         "orchestrator", "repair_routed", "derived", "qualifying_defect"
     ),
     TransitionRule("orchestrator", "action_opened", "derived", "action_new"),
-    TransitionRule("orchestrator", "run_decision", "derived", "decision_valid", True),
+    TransitionRule(
+        "orchestrator",
+        "run_decision",
+        "derived",
+        "decision_valid",
+        True,
+        (
+            "awaiting_approval",
+            "dry_run_complete",
+            "execution_complete_action_open",
+            "workflow_closed",
+            "blocked",
+            "workflow_failed",
+        ),
+    ),
     TransitionRule(
         "supervisor", "stage_interrupted", "derived", "attempt_open", True
     ),
     TransitionRule(
-        "supervisor", "run_decision", "derived", "interruption_linked", True
+        "supervisor",
+        "run_decision",
+        "derived",
+        "interruption_linked",
+        True,
+        ("workflow_failed",),
     ),
     TransitionRule(
         "operator_gateway", "context_injected", "submitted", "run_open"
@@ -49,7 +76,12 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         "operator_gateway", "action_resolved", "submitted", "action_open"
     ),
     TransitionRule(
-        "operator_gateway", "run_decision", "derived", "last_action_resolved", True
+        "operator_gateway",
+        "run_decision",
+        "derived",
+        "last_action_resolved",
+        True,
+        ("workflow_closed",),
     ),
     TransitionRule(
         "recovery", "run_abandoned", "submitted", "open_attempts_enumerated", True

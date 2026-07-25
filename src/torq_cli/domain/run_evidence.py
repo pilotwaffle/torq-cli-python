@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from torq_cli.domain.evidence_transitions import transition_authority_finding
+from torq_cli.domain.evidence_transitions import (
+    transition_authority_finding,
+    transition_rule,
+)
 
 
 ATTEMPT_TRANSITIONS = frozenset(
@@ -101,18 +104,18 @@ def validate_receipt_payload(
             return "action_resolved_invalid"
         if not _positive_int(payload.get("opened_sequence")):
             return "action_resolved_invalid"
-    elif transition == "run_decision" and writer_role == "supervisor":
-        if payload.get("status") != "workflow_failed":
-            return "supervisor_decision_invalid"
-        if not _positive_int(payload.get("interruption_sequence")):
-            return "supervisor_decision_invalid"
-    elif transition == "run_decision" and writer_role == "operator_gateway":
-        if payload.get("status") != "workflow_closed":
-            return "operator_decision_invalid"
-        if not isinstance(payload.get("action_id"), str):
-            return "operator_decision_invalid"
-        if not _positive_int(payload.get("action_resolved_sequence")):
-            return "operator_decision_invalid"
+    elif transition == "run_decision":
+        rule = transition_rule(writer_role, transition)
+        if rule is None or payload.get("status") not in rule.statuses:
+            return "run_decision_status_invalid"
+        if writer_role == "supervisor":
+            if not _positive_int(payload.get("interruption_sequence")):
+                return "supervisor_decision_invalid"
+        elif writer_role == "operator_gateway":
+            if not isinstance(payload.get("action_id"), str):
+                return "operator_decision_invalid"
+            if not _positive_int(payload.get("action_resolved_sequence")):
+                return "operator_decision_invalid"
     elif transition == "run_abandoned" and writer_role == "recovery":
         attempt_ids = payload.get("attempt_ids")
         if (
@@ -141,6 +144,7 @@ def validate_v2_receipt_contract(
     interruptions: set[int] = set()
     terminal_decision = False
     execution_complete_action_open = False
+    awaiting_approval = False
     saw_run_planned = False
     saw_catalog = False
     catalog_roles: set[str] = set()
@@ -298,6 +302,7 @@ def validate_v2_receipt_contract(
                     {"stage_blocked", "stage_failed", "stage_interrupted"}
                 ):
                     return "run_decision_precondition_invalid"
+            awaiting_approval = status == "awaiting_approval"
             terminal_decision = payload.get("status") not in {
                 "awaiting_approval",
                 "execution_complete_action_open",
@@ -310,6 +315,13 @@ def validate_v2_receipt_contract(
             }
             if terminal_decision or set(payload["attempt_ids"]) != open_attempt_ids:
                 return "run_abandoned_attempts_invalid"
+            # A run waiting on a person is not abandonable: `awaiting_approval`
+            # and an open action both leave `terminal_decision` false, so the
+            # check above alone would let recovery close a run mid-decision.
+            if awaiting_approval:
+                return "run_abandoned_awaiting_approval"
+            if open_actions:
+                return "run_abandoned_actions_open"
             if int(payload["last_covered_sequence"]) != sequence_number - 1:
                 return "run_abandoned_coverage_invalid"
             for open_attempt_id in open_attempt_ids:
