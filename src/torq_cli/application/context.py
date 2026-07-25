@@ -6,13 +6,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from torq_cli.application.orchestrator import GovernedOrchestrator
-from torq_cli.safety.receipts import ReceiptChain
+from torq_cli.safety.receipts import ReceiptWriter
 
 
 class GovernedContextInjector:
     """Bind one active orchestrator and its authenticated receipt chain."""
 
-    def __init__(self, orchestrator: GovernedOrchestrator, chain: ReceiptChain) -> None:
+    def __init__(self, orchestrator: GovernedOrchestrator, chain: ReceiptWriter) -> None:
         self.orchestrator = orchestrator
         self.chain = chain
 

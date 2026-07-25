@@ -1,0 +1,12 @@
+{
+  "canonical_ascii": "{\"message\":\"caf\\u00e9 \\u2713\",\"nested\":{\"a\":1,\"z\":true},\"schema\":\"torq-canonical-v1\"}",
+  "sha256": "f4e2e5be524ed6c93dc62399b7ada3a309d3a81591457f462d8a14ecf4745e26",
+  "value": {
+    "message": "café ✓",
+    "nested": {
+      "a": 1,
+      "z": true
+    },
+    "schema": "torq-canonical-v1"
+  }
+}

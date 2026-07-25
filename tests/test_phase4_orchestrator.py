@@ -470,12 +470,19 @@ def test_live_orchestration_fails_closed_without_dispatcher_or_model_attestation
             ]
         }
     )
+    mismatch_chain = ReceiptChain(
+        tmp_path / "mismatch-evidence",
+        "mismatch-run",
+        MemoryRunKeyStore(),
+        profile_version=profile.profile_version,
+        policy_version="3.1.3",
+    )
     with pytest.raises(OrchestrationBlocked, match="resolved_model_mismatch:g1d"):
         _orchestrator(mismatch).execute(
             goal="Do not fake attestation",
             profile=profile,
             mode=ExecutionMode.LIVE,
-            chain=chain,
+            chain=mismatch_chain,
         )
 
 

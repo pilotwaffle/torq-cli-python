@@ -13,12 +13,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from torq_cli.core.redaction import PatternRegistry
+from torq_cli.domain.evidence_transitions import transition_authority_finding
 from torq_cli.domain.run_evidence import (
     validate_receipt_payload,
     validate_v2_receipt_contract,
@@ -32,12 +34,13 @@ _AUTHORITY_RECEIPT_SCHEMA_VERSION = "1.1.0"
 _RECEIPT_SCHEMA_VERSION = "2.0.0"
 _RECEIPT_AUTHORITIES = frozenset({"worker", "supervisor_derived"})
 _SUPERVISOR_TRANSITIONS = frozenset({"stage_interrupted", "run_decision"})
-_WRITER_ROLES = frozenset({"orchestrator", "supervisor", "operator_gateway"})
+_WRITER_ROLES = frozenset(
+    {"orchestrator", "supervisor", "operator_gateway", "recovery"}
+)
 _EVIDENCE_BASES = frozenset({"observed", "derived", "submitted"})
-_SUPERVISOR_WRITES = frozenset({"stage_interrupted", "run_decision"})
-_OPERATOR_WRITES = frozenset({"context_injected", "action_resolved", "run_decision"})
 _RUN_CERTIFICATE_NAME = "run-certificate.json"
 _RUN_IDENTITIES_DIR = ".torq-run-identities"
+_ARTIFACT_FORMAT = b"TORQAEAD1"
 
 
 def _receipt_authority_finding(
@@ -66,18 +69,13 @@ def _writer_contract_finding(
         return "receipt_writer_role_invalid"
     if evidence_basis not in _EVIDENCE_BASES:
         return "receipt_evidence_basis_invalid"
-    if writer_role == "supervisor":
-        if evidence_basis != "derived" or transition not in _SUPERVISOR_WRITES:
-            return "receipt_writer_unauthorized"
-    elif writer_role == "operator_gateway":
-        expected_basis = "derived" if transition == "run_decision" else "submitted"
-        if evidence_basis != expected_basis or transition not in _OPERATOR_WRITES:
-            return "receipt_writer_unauthorized"
-    elif evidence_basis == "submitted" or transition in {
-        "context_injected",
-        "action_resolved",
-    }:
-        return "receipt_writer_unauthorized"
+    authority_finding = transition_authority_finding(
+        writer_role,
+        transition,
+        evidence_basis,
+    )
+    if authority_finding is not None:
+        return authority_finding
     if not isinstance(transition, str) or not isinstance(payload, Mapping):
         return "receipt_payload_invalid"
     return validate_receipt_payload(
@@ -102,6 +100,91 @@ def _canonical(value: Mapping[str, Any]) -> bytes:
 
 def _canonical_json(value: Mapping[str, Any]) -> str:
     return _canonical(value).decode("ascii")
+
+
+def _fsync_directory(path: Path) -> None:
+    """Durably commit directory metadata where the platform exposes it."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        create_file = _windows_dll("kernel32").CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            str(path),
+            0x80000000,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000,
+            None,
+        )
+        invalid = wintypes.HANDLE(-1).value
+        if handle == invalid:
+            raise OSError(_windows_last_error(), "receipt_directory_open_failed")
+        try:
+            if not _windows_dll("kernel32").FlushFileBuffers(handle):
+                error = _windows_last_error()
+                # Some Windows filesystems reject directory flushes. Atomic
+                # replacement remains valid there; file data was flushed first.
+                if error not in {1, 5, 87}:
+                    raise OSError(error, "receipt_directory_fsync_failed")
+        finally:
+            _windows_dll("kernel32").CloseHandle(handle)
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write(
+    path: Path,
+    payload: bytes,
+    *,
+    mode: int = 0o600,
+    observer: Callable[[str], None] | None = None,
+) -> None:
+    """Write, flush, replace, and directory-flush one security artifact."""
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, mode)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("receipt_atomic_short_write")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.chmod(temporary, mode)
+        if observer is not None:
+            observer("temporary_fsynced")
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+        if observer is not None:
+            observer("replaced")
+        _fsync_directory(path.parent)
+        if observer is not None:
+            observer("directory_fsynced")
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _windows_dll(name: str) -> Any:
@@ -480,6 +563,7 @@ class RunKeys:
     orchestrator: bytes
     supervisor: bytes
     operator_gateway: bytes
+    recovery: bytes
     artifact: bytes
 
 
@@ -487,6 +571,36 @@ class RunKeyStore(Protocol):
     def get_or_create(self, run_id: str) -> bytes: ...
 
     def get_or_create_run_keys(self, run_id: str) -> RunKeys: ...
+
+
+class ReceiptWriter(Protocol):
+    @property
+    def run_id(self) -> str: ...
+
+    @property
+    def root(self) -> Path: ...
+
+    @property
+    def receipts_path(self) -> Path: ...
+
+    @property
+    def sequence(self) -> int: ...
+
+    def append(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        writer_role: str = "orchestrator",
+        evidence_basis: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    def write_artifact(self, name: str, content: str) -> Path: ...
+
+    def seal(self) -> Path: ...
+
+    @staticmethod
+    def hash_file(path: Path) -> str: ...
 
 
 class MemoryRunKeyStore:
@@ -501,7 +615,7 @@ class MemoryRunKeyStore:
     def get_or_create_run_keys(self, run_id: str) -> RunKeys:
         if run_id not in self._run_keys:
             self._run_keys[run_id] = RunKeys(
-                *(secrets.token_bytes(32) for _ in range(5))
+                *(secrets.token_bytes(32) for _ in range(6))
             )
         return self._run_keys[run_id]
 
@@ -598,6 +712,7 @@ class FileRunKeyStore:
             operator_gateway=self._get_or_create_secret(
                 directory / "operator-gateway.key"
             ),
+            recovery=self._get_or_create_secret(directory / "recovery.key"),
             artifact=self._get_or_create_secret(directory / "artifact.key"),
         )
 
@@ -617,6 +732,7 @@ class StoreVerification:
     def exit_code(self) -> int:
         return {
             "verified": 0,
+            "live_catching_up": 0,
             "tampered": 3,
             "incomplete": 4,
             "unreadable": 4,
@@ -626,12 +742,22 @@ class StoreVerification:
 class ReceiptChain:
     schema_version = _RECEIPT_SCHEMA_VERSION
 
-    def __init__(self, evidence_root: Path, run_id: str, keys: RunKeyStore, *, profile_version: str, policy_version: str) -> None:
+    def __init__(
+        self,
+        evidence_root: Path,
+        run_id: str,
+        keys: RunKeyStore,
+        *,
+        profile_version: str,
+        policy_version: str,
+        commit_observer: Callable[[str], None] | None = None,
+    ) -> None:
         self.run_id = run_id
         self.root = evidence_root / run_id
         self.root.mkdir(parents=True, exist_ok=True)
         self.receipts_path = self.root / "receipts.jsonl"
         self.key = keys.get_or_create(run_id)
+        self._commit_observer = commit_observer
         self._pin_signing_identity(evidence_root)
         self.run_keys = keys.get_or_create_run_keys(run_id)
         self.certificate_path = self._write_run_certificate()
@@ -641,6 +767,7 @@ class ReceiptChain:
         self._lock = RLock()
         self._sequence = 0
         self._previous: str | None = None
+        self._sealed = False
 
     def _pin_signing_identity(self, evidence_root: Path) -> None:
         public_key = Ed25519PrivateKey.from_private_bytes(self.key).public_key().public_bytes_raw()
@@ -672,6 +799,7 @@ class ReceiptChain:
             "orchestrator": self.run_keys.orchestrator,
             "supervisor": self.run_keys.supervisor,
             "operator_gateway": self.run_keys.operator_gateway,
+            "recovery": self.run_keys.recovery,
         }
         writers: dict[str, dict[str, str]] = {}
         for role, private_bytes in writer_keys.items():
@@ -707,13 +835,12 @@ class ReceiptChain:
             .hex(),
         }
         target = self.root / _RUN_CERTIFICATE_NAME
-        encoded = json.dumps(signed, sort_keys=True).encode("utf-8")
+        encoded = _canonical(signed)
         if target.exists():
             if not hmac.compare_digest(target.read_bytes(), encoded):
                 raise ValueError("run_certificate_mismatch")
             return target
-        target.write_bytes(encoded)
-        os.chmod(target, 0o600)
+        _atomic_write(target, encoded)
         return target
 
     @staticmethod
@@ -728,6 +855,25 @@ class ReceiptChain:
     @staticmethod
     def _hash(payload: Mapping[str, Any]) -> str:
         return "sha256:" + hashlib.sha256(_canonical(payload)).hexdigest()
+
+    def _assert_store_writable(self) -> None:
+        manifest = self.root / "terminal-manifest.json"
+        if not self.receipts_path.exists() and not manifest.exists():
+            return
+        trusted = (
+            Ed25519PrivateKey.from_private_bytes(self.key)
+            .public_key()
+            .public_bytes_raw()
+        )
+        verification = verify_receipt_store(
+            self.root,
+            trusted_public_key=trusted,
+        )
+        if verification.status != "verified":
+            raise ValueError(
+                "receipt_store_not_writable:"
+                + str(verification.finding or verification.status)
+            )
 
     def _sanitize(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         serialized = json.dumps(payload, sort_keys=True)
@@ -745,6 +891,8 @@ class ReceiptChain:
         writer_role: str = "orchestrator",
         evidence_basis: str | None = None,
     ) -> dict[str, Any]:
+        if self._sealed:
+            raise ValueError("receipt_after_terminal_decision")
         if evidence_basis is None:
             evidence_basis = (
                 "derived"
@@ -761,6 +909,7 @@ class ReceiptChain:
         if writer_finding is not None:
             raise ValueError(writer_finding)
         with self._lock:
+            self._assert_store_writable()
             clean = self._sanitize(payload)
             payload_finding = validate_receipt_payload(
                 transition,
@@ -797,10 +946,25 @@ class ReceiptChain:
             signed_receipt = {**receipt, "writer_signature": writer_signature}
             receipt_hash = self._hash(signed_receipt)
             envelope = {**signed_receipt, "receipt_hash": receipt_hash}
+            prior_receipts: list[dict[str, Any]] = []
+            if self.receipts_path.exists():
+                prior_receipts = [
+                    json.loads(line)
+                    for line in self.receipts_path.read_text(encoding="utf-8").splitlines()
+                ]
+            lifecycle_finding = validate_v2_receipt_contract(
+                [*prior_receipts, envelope],
+                sealed=False,
+            )
+            if lifecycle_finding is not None:
+                self._sequence -= 1
+                raise ValueError(lifecycle_finding)
             with self.receipts_path.open("a", encoding="utf-8") as stream:
                 stream.write(_canonical_json(envelope) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+                if self._commit_observer is not None:
+                    self._commit_observer("receipt_fsynced")
             os.chmod(self.receipts_path, 0o600)
             self._previous = receipt_hash
             self._write_manifest(sealed=False)
@@ -809,19 +973,36 @@ class ReceiptChain:
     def write_artifact(self, name: str, content: str) -> Path:
         with self._lock:
             clean, _ = self.registry.scan(content)
-            nonce = secrets.token_bytes(16)
+            nonce = secrets.token_bytes(12)
             plain = clean.encode()
-            stream = bytearray()
-            counter = 0
-            while len(stream) < len(plain):
-                stream.extend(hmac.new(self.run_keys.artifact, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest())
-                counter += 1
-            cipher = bytes(a ^ b for a, b in zip(plain, stream, strict=False))
+            cipher = AESGCM(self.run_keys.artifact).encrypt(
+                nonce,
+                plain,
+                self.run_id.encode("utf-8"),
+            )
             target = self.root / "artifacts" / (name + ".enc")
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(nonce + cipher)
-            os.chmod(target, 0o600)
+            _atomic_write(target, _ARTIFACT_FORMAT + nonce + cipher)
             return target
+
+    def read_artifact(self, path: Path) -> str:
+        """Authenticate, decrypt, and decode an artifact belonging to this run."""
+        resolved_root = self.root.resolve()
+        resolved = path.resolve()
+        if not resolved.is_relative_to(resolved_root):
+            raise ValueError("artifact_path_escape")
+        payload = resolved.read_bytes()
+        if not payload.startswith(_ARTIFACT_FORMAT) or len(payload) < 38:
+            raise ValueError("artifact_format_invalid")
+        offset = len(_ARTIFACT_FORMAT)
+        nonce = payload[offset : offset + 12]
+        cipher = payload[offset + 12 :]
+        plain = AESGCM(self.run_keys.artifact).decrypt(
+            nonce,
+            cipher,
+            self.run_id.encode("utf-8"),
+        )
+        return plain.decode("utf-8")
 
     def _write_manifest(self, *, sealed: bool) -> Path:
         manifest = {
@@ -843,16 +1024,22 @@ class ReceiptChain:
             "signature": private.sign(_canonical(manifest)).hex(),
         }
         target = self.root / "terminal-manifest.json"
-        temporary = self.root / ".terminal-manifest.tmp"
-        temporary.write_text(json.dumps(signed, sort_keys=True), encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, target)
-        os.chmod(target, 0o600)
+        _atomic_write(target, _canonical(signed), observer=self._commit_observer)
         return target
 
     def seal(self) -> Path:
         with self._lock:
-            return self._write_manifest(sealed=True)
+            self._assert_store_writable()
+            receipts = [
+                json.loads(line)
+                for line in self.receipts_path.read_text(encoding="utf-8").splitlines()
+            ]
+            lifecycle_finding = validate_v2_receipt_contract(receipts, sealed=True)
+            if lifecycle_finding is not None:
+                raise ValueError(lifecycle_finding)
+            target = self._write_manifest(sealed=True)
+            self._sealed = True
+            return target
 
     def verify(self, manifest_path: Path) -> Verification:
         trusted_public_key = (
@@ -864,7 +1051,10 @@ class ReceiptChain:
             manifest_path.parent,
             trusted_public_key=trusted_public_key,
         )
-        return Verification(result.status == "verified", result.finding)
+        return Verification(
+            result.status in {"verified", "live_catching_up"},
+            result.finding,
+        )
 
 
 def _trusted_public_key_from_private_identity(evidence_root: Path) -> bytes:
@@ -895,9 +1085,22 @@ def verify_receipt_store(
     if not receipts_path.exists() or not manifest_path.exists():
         return StoreVerification("incomplete", "evidence_missing")
     try:
-        lines = receipts_path.read_text(encoding="utf-8").splitlines()
-        if not lines:
+        manifest_bytes = manifest_path.read_bytes()
+        signed_preview = json.loads(manifest_bytes)
+        if not isinstance(signed_preview, dict):
+            return StoreVerification("unreadable", "evidence_unreadable")
+        receipt_count = signed_preview.get("receipt_count")
+        if not isinstance(receipt_count, int) or isinstance(receipt_count, bool):
+            return StoreVerification("unreadable", "manifest_receipt_count_invalid")
+        all_lines = receipts_path.read_text(encoding="utf-8").splitlines()
+        if not all_lines or receipt_count <= 0:
             return StoreVerification("incomplete", "receipt_chain_truncated")
+        if len(all_lines) < receipt_count:
+            return StoreVerification("incomplete", "receipt_chain_truncated")
+        uncovered_tail = len(all_lines) > receipt_count
+        if uncovered_tail and bool(signed_preview.get("sealed")):
+            return StoreVerification("tampered", "receipt_after_terminal_decision")
+        lines = all_lines[:receipt_count]
         previous: str | None = None
         versions: tuple[object, object, object] | None = None
         receipts: list[dict[str, Any]] = []
@@ -965,7 +1168,7 @@ def verify_receipt_store(
         if not hmac.compare_digest(pinned_public_key, trusted_public_key):
             return StoreVerification("tampered", "trust_anchor_substituted")
 
-        signed = json.loads(manifest_path.read_text(encoding="utf-8"))
+        signed = json.loads(manifest_bytes)
         if not isinstance(signed, dict):
             return StoreVerification("unreadable", "evidence_unreadable")
         signature = bytes.fromhex(str(signed.pop("signature")))
@@ -1072,7 +1275,10 @@ def verify_receipt_store(
                 signature,
                 _canonical(signed),
             )
-        return StoreVerification("verified", None)
+        return StoreVerification(
+            "live_catching_up" if uncovered_tail else "verified",
+            "manifest_coverage_lag" if uncovered_tail else None,
+        )
     except InvalidSignature:
         return StoreVerification("tampered", "manifest_signature_invalid")
     except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError):

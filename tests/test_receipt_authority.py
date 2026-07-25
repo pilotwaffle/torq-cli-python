@@ -75,7 +75,7 @@ def _rewrite_v2_and_resign(
     )
     chain._sequence = len(rows)
     chain._previous = previous
-    chain.seal()
+    chain._write_manifest(sealed=True)
 
 
 def _convert_to_legacy(chain: ReceiptChain) -> None:
@@ -146,6 +146,7 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
         "orchestrator",
         "supervisor",
         "operator_gateway",
+        "recovery",
     }
     assert first.run_keys.manifest != second.run_keys.manifest
     assert first.run_keys.orchestrator != second.run_keys.orchestrator
@@ -189,15 +190,6 @@ def test_writer_permissions_allow_only_certified_role_basis_transitions(
         writer_role="supervisor",
         evidence_basis="derived",
     )
-    chain.append(
-        "run_decision",
-        {
-            "status": "workflow_failed",
-            "interruption_sequence": interrupted["sequence"],
-        },
-        writer_role="supervisor",
-        evidence_basis="derived",
-    )
     opened = chain.append(
         "action_opened",
         {
@@ -207,6 +199,14 @@ def test_writer_permissions_allow_only_certified_role_basis_transitions(
             "target": "operator",
             "caused_by_sequence": interrupted["sequence"],
             "summary": "Review interruption",
+        },
+    )
+    chain.append(
+        "run_decision",
+        {
+            "status": "execution_complete_action_open",
+            "action_id": "approve-1",
+            "action_opened_sequence": opened["sequence"],
         },
     )
     resolved = chain.append(

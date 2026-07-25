@@ -13,7 +13,7 @@ from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.orchestrator import GovernedOrchestrator
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces.cli import main
-from torq_cli.interfaces.fleet_http import create_fleet_server
+from torq_cli.interfaces.fleet_http import FleetSessionManager, create_fleet_server
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
@@ -235,12 +235,23 @@ def test_fleet_projects_certified_writer_provenance(
 def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-http")
     _planned(chain)
-    server = create_fleet_server(FleetProjector(chain.root), port=0)
+    sessions = FleetSessionManager()
+    token = sessions.exchange(sessions.bootstrap_nonce)
+    cookie = {"Cookie": f"torq_fleet_session={token}"}
+    server = create_fleet_server(
+        FleetProjector(chain.root),
+        port=0,
+        sessions=sessions,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
     try:
-        with urllib.request.urlopen(f"http://{host}:{port}/api/v1/fleet") as response:
+        first_request = urllib.request.Request(
+            f"http://{host}:{port}/api/v1/fleet",
+            headers=cookie,
+        )
+        with urllib.request.urlopen(first_request) as response:
             assert response.headers["Cache-Control"] == "no-store"
             first = json.loads(response.read())
         assert first["verification"]["status"] == "verified"
@@ -268,7 +279,11 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
 
         receipts = chain.root / "receipts.jsonl"
         receipts.write_text(receipts.read_text(encoding="utf-8").replace("live", "forged"), encoding="utf-8")
-        with urllib.request.urlopen(f"http://{host}:{port}/api/v1/fleet") as response:
+        second_request = urllib.request.Request(
+            f"http://{host}:{port}/api/v1/fleet",
+            headers=cookie,
+        )
+        with urllib.request.urlopen(second_request) as response:
             second = json.loads(response.read())
         assert second["verification"]["status"] == "tampered"
         assert second["data_status"] == "unavailable"
@@ -276,6 +291,7 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
         request = urllib.request.Request(
             f"http://{host}:{port}/api/v1/fleet",
             data=b"{}",
+            headers=cookie,
             method="POST",
         )
         with pytest.raises(urllib.error.HTTPError) as denied:

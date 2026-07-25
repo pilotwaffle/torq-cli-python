@@ -19,7 +19,7 @@ from torq_cli.domain.registry_schema import BindingSpec, ProfileSpec
 from torq_cli.domain.run_evidence import CONDITIONAL_LANES, LANE_ORDER
 from torq_cli.safety.entitlements import EntitlementLedger, PlanWindow
 from torq_cli.safety.pricing import RateTable, load_default_rate_table
-from torq_cli.safety.receipts import ReceiptChain
+from torq_cli.safety.receipts import ReceiptWriter
 from torq_cli.safety.usage import summarize_usage
 
 
@@ -132,7 +132,7 @@ class GovernedOrchestrator:
 
     def inject_context(
         self,
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
         content: str,
         *,
         target_role: str | None = None,
@@ -194,7 +194,7 @@ class GovernedOrchestrator:
 
     def resolve_action(
         self,
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
         *,
         action_id: str,
         resolution: str,
@@ -256,7 +256,7 @@ class GovernedOrchestrator:
         goal: str,
         profile: ProfileSpec,
         mode: ExecutionMode,
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
     ) -> OrchestrationResult:
         planned = self._PLANNED_ROLES
         self._attempt_ordinals = {}
@@ -328,7 +328,7 @@ class GovernedOrchestrator:
         *,
         goal: str,
         profile: ProfileSpec,
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
         planned: tuple[str, ...],
         dispatched: list[str],
         usage_rows: list[dict[str, Any]],
@@ -419,7 +419,7 @@ class GovernedOrchestrator:
         goal: str,
         context: Mapping[str, Any],
         profile: ProfileSpec,
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
         dispatched: list[str],
         usage_rows: list[dict[str, Any]],
         attempt: StageAttempt | None = None,
@@ -589,7 +589,7 @@ class GovernedOrchestrator:
         artifact: Path,
         artifact_hash: str,
         attempt_evidence: Mapping[str, Any],
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
         usage_rows: list[dict[str, Any]],
     ) -> Mapping[str, Any]:
         provenance = response.provenance
@@ -669,7 +669,7 @@ class GovernedOrchestrator:
         binding: BindingSpec,
         budget: StageBudget,
         attempt_evidence: Mapping[str, Any],
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
     ) -> str:
         injected = self._consume_context(role)
         prompt_context: dict[str, Any] = dict(context)
@@ -901,7 +901,7 @@ class GovernedOrchestrator:
 
     def _finish(
         self,
-        chain: ReceiptChain,
+        chain: ReceiptWriter,
         status: str,
         planned: tuple[str, ...],
         dispatched: list[str],
