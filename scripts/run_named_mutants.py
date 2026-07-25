@@ -2,8 +2,9 @@
 
 M01-M14 cover configuration, registry, and hermeticity. M15-M18 cover the
 schema-v2 evidence-authority guards added during Fleet Release 0 hardening.
-M19-M22 cover the rest of the evidence layer: the signing encoder (distinct
-from the sanitizer M15 covers), lane state projection, and monetary accounting.
+M19-M23 cover the rest of the evidence layer: the signing encoder (distinct
+from the sanitizer M15 covers), lane state projection, monetary accounting, and
+Windows binary-write fidelity.
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ class Mutation:
     before: str
     after: str
     target: str
+    platforms: tuple[str, ...] = ()
+
+    def applies_here(self) -> bool:
+        return not self.platforms or os.name in self.platforms
 
 
 MUTATIONS = (
@@ -121,6 +126,14 @@ MUTATIONS = (
         "amount = Decimal(float(value))",
         "tests/test_phase4_safety.py::test_usage_summary_reconstructs_totals_and_preserves_unreported",
     ),
+    Mutation(
+        "M23",
+        "src/torq_cli/safety/receipts.py",
+        '_BINARY = getattr(os, "O_BINARY", 0)',
+        "_BINARY = 0",
+        "tests/test_fleet_release0.py::test_atomic_binary_write_preserves_ciphertext_newlines",
+        ("nt",),
+    ),
 )
 
 
@@ -152,8 +165,12 @@ def main() -> int:
     temporary_parent = Path(os.environ.get("TORQ_T06B_MUTANT_ROOT", str(DEFAULT_MUTANT_ROOT)))
     temporary_parent.mkdir(parents=True, exist_ok=True)
     killed = 0
+    applicable = tuple(mutation for mutation in MUTATIONS if mutation.applies_here())
+    skipped = tuple(m.identifier for m in MUTATIONS if not m.applies_here())
+    if skipped:
+        print(f"named_mutants: skipping {', '.join(skipped)} (not observable on {os.name})")
     try:
-        for mutation in MUTATIONS:
+        for mutation in applicable:
             with tempfile.TemporaryDirectory(dir=temporary_parent, prefix=f"{mutation.identifier}-") as directory:
                 worktree = Path(directory)
                 ignore = shutil.ignore_patterns(
@@ -168,8 +185,8 @@ def main() -> int:
                     print(result.stdout)
                     return 1
                 killed += 1
-        print(f"named_mutants: {killed}/{len(MUTATIONS)} killed")
-        return 0 if killed == len(MUTATIONS) else 1
+        print(f"named_mutants: {killed}/{len(applicable)} killed")
+        return 0 if killed == len(applicable) else 1
     finally:
         try:
             temporary_parent.rmdir()
