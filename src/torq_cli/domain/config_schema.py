@@ -236,7 +236,10 @@ def validate_config_shape(config: Mapping[str, Any], registry: Registry) -> tupl
         return (FindingCatalog.make("config_schema_invalid", path="/"),)
     findings.extend(reject_unknown_keys(
         config,
-        {"config_version", "profile", "binding_overrides", "connectors", "policy", "credential_source"},
+        {
+            "config_version", "profile", "binding_overrides", "connectors",
+            "policy", "credential_source", "entitlement_accounts",
+        },
         "/",
     ))
     findings.extend(validate_config_version(config))
@@ -299,6 +302,55 @@ def validate_config_shape(config: Mapping[str, Any], registry: Registry) -> tupl
                     or not (source_path.startswith("/") or _WINDOWS_ABSOLUTE.match(source_path))
                 ):
                     findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/path"))
+    entitlement_accounts = config.get("entitlement_accounts")
+    if entitlement_accounts is not None:
+        if not isinstance(entitlement_accounts, Mapping) or not entitlement_accounts:
+            findings.append(FindingCatalog.make("config_schema_invalid", path="/entitlement_accounts"))
+        else:
+            seen_providers: set[str] = set()
+            allowed_providers = {"anthropic", "deepseek", "openai", "moonshot", "qwen", "zai"}
+            for account, raw_window in entitlement_accounts.items():
+                path = f"/entitlement_accounts/{account}"
+                if not isinstance(account, str) or not account or not isinstance(raw_window, Mapping):
+                    findings.append(FindingCatalog.make("config_schema_invalid", path=path))
+                    continue
+                findings.extend(reject_unknown_keys(
+                    raw_window,
+                    {
+                        "providers", "settlement", "used", "limit", "resets_at",
+                        "used_source", "limit_source",
+                    },
+                    path,
+                ))
+                providers = raw_window.get("providers")
+                if not isinstance(providers, Mapping) or not providers:
+                    findings.append(FindingCatalog.make("config_schema_invalid", path=f"{path}/providers"))
+                else:
+                    for provider, enabled in providers.items():
+                        if (
+                            not isinstance(provider, str)
+                            or provider not in allowed_providers
+                            or enabled is not True
+                            or provider in seen_providers
+                        ):
+                            findings.append(FindingCatalog.make("config_schema_invalid", path=f"{path}/providers"))
+                        else:
+                            seen_providers.add(provider)
+                if raw_window.get("settlement") not in {"plan_covered", "metered"}:
+                    findings.append(FindingCatalog.make("config_schema_invalid", path=f"{path}/settlement"))
+                used = raw_window.get("used")
+                limit = raw_window.get("limit")
+                if (
+                    not isinstance(used, int) or isinstance(used, bool) or used < 0
+                    or not isinstance(limit, int) or isinstance(limit, bool) or limit < used
+                ):
+                    findings.append(FindingCatalog.make("config_schema_invalid", path=path))
+                if not isinstance(raw_window.get("resets_at"), str) or not raw_window.get("resets_at"):
+                    findings.append(FindingCatalog.make("config_schema_invalid", path=f"{path}/resets_at"))
+                if raw_window.get("used_source") not in {"receipt_derived", "provider_reported"}:
+                    findings.append(FindingCatalog.make("config_schema_invalid", path=f"{path}/used_source"))
+                if raw_window.get("limit_source") not in {"operator_declared", "provider_reported"}:
+                    findings.append(FindingCatalog.make("config_schema_invalid", path=f"{path}/limit_source"))
     policy = config.get("policy")
     if not isinstance(policy, Mapping):
         findings.append(FindingCatalog.make("config_schema_invalid", path="/policy"))

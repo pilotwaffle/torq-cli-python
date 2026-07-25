@@ -19,21 +19,29 @@ _PROVIDER_KEYS: Mapping[str, tuple[str, ...]] = {
     "claude": ("ANTHROPIC_API_KEY",),
     "codex": ("OPENAI_API_KEY",),
     "qwen": ("QWEN_TOKEN_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY"),
-    "deepseek": ("DEEPSEEK_API_KEY",),
+    # DeepSeek is billed to the Alibaba/Qwen Token Plan, not to a direct
+    # DeepSeek account, so it draws on the Qwen entitlement and credential.
+    # DEEPSEEK_API_KEY is deliberately absent: falling back to it would
+    # silently switch the lane from plan-covered to metered settlement.
+    "deepseek": ("QWEN_TOKEN_PLAN_API_KEY", "BAILIAN_CODING_PLAN_API_KEY"),
     "kimi": ("KIMI_CODE_API_KEY", "KIMI_API_KEY"),
     "zai": ("GLM_API_KEY", "ZAI_API_KEY"),
 }
 _PROVIDER_BASE_URL_KEYS: Mapping[str, tuple[str, ...]] = {
     "qwen": ("QWEN_TOKEN_PLAN_BASE_URL",),
+    "deepseek": ("QWEN_TOKEN_PLAN_BASE_URL",),
 }
+# The Token Plan is regional. This is the documented default host; an operator
+# entitled to another region names it in their credential source and it wins.
+_TOKEN_PLAN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
 _SAFE_CHILD_KEYS = frozenset({
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
     "LANG", "LC_ALL", "HOME", "USERPROFILE",
 })
 _CLAUDE_COMPAT = {
-    "deepseek": ("https://api.deepseek.com/anthropic", "deepseek-v4-pro"),
+    "deepseek": (_TOKEN_PLAN_BASE_URL, "deepseek-v4-pro"),
     "kimi": ("https://api.kimi.com/coding/", "k3"),
-    "qwen": ("", "qwen3.8-max-preview"),
+    "qwen": (_TOKEN_PLAN_BASE_URL, "qwen3.8-max-preview"),
     "zai": ("https://api.z.ai/api/anthropic", ""),
 }
 
@@ -137,13 +145,18 @@ def claude_compatible_environment(
     if credential is None:
         raise CredentialSourceError("provider_credential_missing")
     base_url, model = _CLAUDE_COMPAT[normalized]
-    if normalized == "qwen":
+    if normalized in _PROVIDER_BASE_URL_KEYS:
+        # One Token Plan, one regional host: both plan lanes follow whichever
+        # region the operator's credential source declares. A source that
+        # declares none (the native keychain) keeps the documented default; one
+        # that declares something unusable fails closed rather than silently
+        # falling back to a region the account may not be entitled to.
         reader = getattr(vault, "base_url", None)
-        if not callable(reader):
-            raise CredentialSourceError("provider_base_url_missing")
-        base_url = reader(normalized)
-        if not isinstance(base_url, str) or not base_url.startswith("https://"):
-            raise CredentialSourceError("provider_base_url_missing")
+        declared = reader(normalized) if callable(reader) else None
+        if declared is not None:
+            if not isinstance(declared, str) or not declared.startswith("https://"):
+                raise CredentialSourceError("provider_base_url_invalid")
+            base_url = declared
     child = safe_child_environment(base_environment)
     child.update({
         "ANTHROPIC_AUTH_TOKEN": credential,
@@ -151,6 +164,18 @@ def claude_compatible_environment(
         "ANTHROPIC_MODEL": model,
         "ANTHROPIC_API_KEY": "",
     })
+    if normalized == "deepseek":
+        child.update({
+            "ANTHROPIC_DEFAULT_FABLE_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            "CLAUDE_CODE_EFFORT_LEVEL": "",
+            "MAX_THINKING_TOKENS": "",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "262144",
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
+        })
     return child
 
 

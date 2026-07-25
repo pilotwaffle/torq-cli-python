@@ -454,3 +454,104 @@ def test_live_orchestration_fails_closed_without_dispatcher_or_model_attestation
             mode=ExecutionMode.LIVE,
             chain=chain,
         )
+
+
+def test_stage_receipts_preserve_the_input_output_token_split(tmp_path: Path) -> None:
+    """Output tokens bill higher than input, so a single total cannot be priced."""
+    profile = load_registry().profiles["torq-v5-6-live"]
+    dispatcher = _ScriptedDispatcher(
+        {
+            "g1d": [
+                NormalizedResponse(
+                    json.dumps({"status": "design_complete"}, sort_keys=True),
+                    "",
+                    {"prompt_tokens": 400, "completion_tokens": 90, "reasoning_tokens": 10},
+                    Provenance("anthropic", "claude-fable-5", False),
+                )
+            ],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject"})],
+        }
+    )
+    chain = ReceiptChain(
+        tmp_path / "evidence",
+        "token-split",
+        MemoryRunKeyStore(),
+        profile_version=profile.profile_version,
+        policy_version="3.1.3",
+    )
+
+    result = _orchestrator(dispatcher).execute(
+        goal="Record priceable usage",
+        profile=profile,
+        mode=ExecutionMode.LIVE,
+        chain=chain,
+    )
+
+    receipts = [
+        json.loads(line)
+        for line in (chain.root / "receipts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    sealed = next(
+        receipt["payload"]
+        for receipt in receipts
+        if receipt["transition"] == "stage_completed" and receipt["payload"]["role"] == "g1d"
+    )
+    assert sealed["usage"] == {
+        "input_tokens": 400,
+        "output_tokens": 90,
+        "reasoning_tokens": 10,
+        "tokens": 500,
+    }
+    assert result.usage["agents"]["g1d"]["usage"]["input_tokens"] == 400
+    assert result.usage["agents"]["g1d"]["usage"]["output_tokens"] == 90
+    assert result.usage["agents"]["g1d"]["usage"]["reasoning_tokens"] == 10
+    assert result.usage["agents"]["g1d"]["usage"]["tokens"] == 500
+
+
+def test_blocked_preflight_seals_an_auditable_refusal(tmp_path: Path) -> None:
+    """A refusal must leave verifiable evidence that no egress occurred."""
+    profile = load_registry().profiles["torq-v5-6-live"]
+    dispatcher = _ScriptedDispatcher(
+        {"g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})]}
+    )
+    controller = RunController(tmp_path / "evidence", _orchestrator(dispatcher, budget_usd=0.05))
+    identity = RunIdentity(
+        profile.profile_version,
+        "3.1.3",
+        "registry-v1",
+        "profile-bound",
+        "sandbox-test",
+        1,
+        "prior-chain",
+    )
+
+    with pytest.raises(OrchestrationBlocked, match="budget_preflight_blocked:g1d"):
+        controller.start(
+            identity,
+            {"profile": profile.profile_id},
+            expected={"profile": profile.profile_id},
+            live=True,
+            live_opt_in=True,
+            policy_opt_in=True,
+            goal="Do not exceed the budget",
+            profile=profile,
+        )
+
+    assert dispatcher.calls == []
+    run_root = next((tmp_path / "evidence").glob("run-*"))
+    assert verify_receipt_store(run_root).status == "verified"
+    receipts = [
+        json.loads(line)
+        for line in (run_root / "receipts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    transitions = [receipt["transition"] for receipt in receipts]
+    assert "stage_started" not in transitions
+    blocked = next(r["payload"] for r in receipts if r["transition"] == "stage_blocked")
+    assert blocked["role"] == "g1d"
+    assert blocked["provider"] == "anthropic"
+    assert blocked["reason"] == "budget_preflight_blocked:g1d"
+    assert blocked["provider_dispatch"] is False
+    assert blocked["usage"]["output_tokens"] == 0
+    decision = next(r["payload"] for r in receipts if r["transition"] == "run_decision")
+    assert decision["status"] == "blocked"
+    assert decision["provider_dispatch"] is False

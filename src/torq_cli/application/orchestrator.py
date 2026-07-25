@@ -13,6 +13,8 @@ from torq_cli.core.graph import ExecutionMode
 from torq_cli.core.policy import Defect, G2APolicy
 from torq_cli.core.redaction import PatternRegistry
 from torq_cli.domain.registry_schema import BindingSpec, ProfileSpec
+from torq_cli.safety.entitlements import EntitlementLedger, PlanWindow
+from torq_cli.safety.pricing import RateTable, load_default_rate_table
 from torq_cli.safety.receipts import ReceiptChain
 from torq_cli.safety.usage import summarize_usage
 
@@ -30,6 +32,13 @@ class StageDispatcher(Protocol):
         model: str,
         prompt: str,
     ) -> NormalizedResponse: ...
+
+
+@dataclass(frozen=True)
+class StageBudget:
+    settlement: str
+    ceiling_usd: float
+    window: PlanWindow | None = None
 
 
 class ConnectorDispatcher:
@@ -84,6 +93,9 @@ class GovernedOrchestrator:
         loop_budget: int = 1,
         budget_usd: float = 0.0,
         cost_ceiling_usd_by_role: Mapping[str, float] | None = None,
+        entitlement_ledger: EntitlementLedger | None = None,
+        projected_calls_by_role: Mapping[str, int] | None = None,
+        rate_table: RateTable | None = None,
     ) -> None:
         if loop_budget < 0:
             raise ValueError("loop_budget_must_be_nonnegative")
@@ -95,6 +107,11 @@ class GovernedOrchestrator:
         self.cost_ceiling_usd_by_role = dict(cost_ceiling_usd_by_role or {})
         if any(cost < 0 for cost in self.cost_ceiling_usd_by_role.values()):
             raise ValueError("cost_ceiling_must_be_nonnegative")
+        self.entitlement_ledger = entitlement_ledger
+        self.projected_calls_by_role = dict(projected_calls_by_role or {})
+        if any(calls < 0 for calls in self.projected_calls_by_role.values()):
+            raise ValueError("projected_calls_must_be_nonnegative")
+        self.rate_table = rate_table or load_default_rate_table()
         self.registry = PatternRegistry.default()
         self.policy = G2APolicy()
 
@@ -117,6 +134,7 @@ class GovernedOrchestrator:
                 "profile_id": profile.profile_id,
                 "strategy_id": profile.strategy_id,
                 "planned_roles": planned,
+                "rate_table_version": self.rate_table.version,
             },
         )
         if mode is ExecutionMode.DRY_RUN:
@@ -140,6 +158,40 @@ class GovernedOrchestrator:
 
         dispatched: list[str] = []
         usage_rows: list[dict[str, Any]] = []
+        try:
+            return self._execute_live(
+                goal=goal,
+                profile=profile,
+                chain=chain,
+                planned=planned,
+                dispatched=dispatched,
+                usage_rows=usage_rows,
+            )
+        except OrchestrationBlocked as exc:
+            # A refusal that leaves no terminal receipt is indistinguishable
+            # from a run that never happened. Record the decision, then let the
+            # caller seal and re-raise.
+            chain.append(
+                "run_decision",
+                {
+                    "status": "blocked",
+                    "reason": str(exc),
+                    "provider_dispatch": bool(dispatched),
+                    "dispatched_roles": tuple(dispatched),
+                },
+            )
+            raise
+
+    def _execute_live(
+        self,
+        *,
+        goal: str,
+        profile: ProfileSpec,
+        chain: ReceiptChain,
+        planned: tuple[str, ...],
+        dispatched: list[str],
+        usage_rows: list[dict[str, Any]],
+    ) -> OrchestrationResult:
         outputs: dict[str, Mapping[str, Any]] = {}
 
         outputs["g1d"] = self._dispatch(
@@ -231,7 +283,38 @@ class GovernedOrchestrator:
         binding = profile.bindings.get(role)
         if binding is None:
             raise OrchestrationBlocked(f"profile_binding_missing:{role}")
-        cost_usd = self._preflight_cost(role, usage_rows)
+        window = (
+            self.entitlement_ledger.window(binding.provider_id)
+            if self.entitlement_ledger is not None
+            else None
+        )
+        try:
+            budget = self._preflight_stage(role, binding, usage_rows, window)
+        except OrchestrationBlocked as exc:
+            settlement = window.settlement if window is not None else "metered"
+            chain.append(
+                "stage_blocked",
+                {
+                    "role": role,
+                    "provider": binding.provider_id,
+                    "model": binding.model_id,
+                    "prompt_id": binding.prompt_id,
+                    "reason": str(exc),
+                    "basis": (
+                        "plan_entitlement"
+                        if settlement in {"plan_covered", "unknown"}
+                        else "configured_worst_case"
+                    ),
+                    "usage": self._usage_record({}),
+                    "cost_usd": 0.0,
+                    "billed_usd": 0.0,
+                    "metered_usd": 0.0,
+                    "settlement": settlement,
+                    "entitlement": window.as_receipt() if window is not None else None,
+                    "provider_dispatch": False,
+                },
+            )
+            raise
         prompt = self._prompt(role, goal, context, binding)
         clean_prompt, findings = self.registry.scan(prompt)
         chain.append(
@@ -242,6 +325,10 @@ class GovernedOrchestrator:
                 "model": binding.model_id,
                 "prompt_id": binding.prompt_id,
                 "redactions": findings,
+                "settlement": budget.settlement,
+                "entitlement": (
+                    budget.window.as_receipt() if budget.window is not None else None
+                ),
             },
         )
         assert self.dispatcher is not None
@@ -265,15 +352,45 @@ class GovernedOrchestrator:
             "model": provenance.model,
             "artifact_hash": artifact_hash,
         }
-        tokens = sum(int(response.usage.get(name, 0)) for name in (
-            "prompt_tokens", "completion_tokens", "reasoning_tokens"
-        ))
-        usage = {"tokens": tokens}
+        usage = self._usage_record(response.usage)
+        entitlement: PlanWindow | None
+        if self.entitlement_ledger is not None and budget.settlement == "plan_covered":
+            self.entitlement_ledger.reconcile(binding.provider_id, calls=1)
+            entitlement = self.entitlement_ledger.window(binding.provider_id)
+        else:
+            entitlement = budget.window
+        quote = self.rate_table.quote(
+            binding.provider_id,
+            binding.model_id,
+            usage,
+        )
+        billed_usd: float | None
+        if self.entitlement_ledger is None:
+            # Compatibility mode retains the v0.1 configured-worst-case
+            # accounting. Production settlement mode is activated by an
+            # explicit ledger and records actual token-derived values.
+            billed_usd = budget.ceiling_usd
+            cost_basis = "configured_worst_case"
+        else:
+            billed_usd = (
+                0.0 if budget.settlement == "plan_covered" else quote.metered_usd
+            )
+            cost_basis = (
+                "sealed_token_counts"
+                if quote.pricing_status == "priced"
+                else "rate_unknown"
+            )
         usage_rows.append({
             "provider": binding.provider_id,
             "agent": role,
-            "cost_usd": cost_usd,
-            "cost_basis": "configured_worst_case",
+            "cost_usd": billed_usd,
+            "billed_usd": billed_usd,
+            "metered_usd": quote.metered_usd,
+            "settlement": budget.settlement,
+            "pricing_status": quote.pricing_status,
+            "rate_table_version": quote.rate_table_version,
+            "preflight_ceiling_usd": budget.ceiling_usd,
+            "cost_basis": cost_basis,
             "usage": usage,
         })
         dispatched.append(role)
@@ -285,13 +402,41 @@ class GovernedOrchestrator:
                 "model": provenance.model,
                 "fallback_used": provenance.fallback_used,
                 "usage": usage,
-                "cost_usd": cost_usd,
-                "cost_basis": "configured_worst_case",
+                "cost_usd": billed_usd,
+                "billed_usd": billed_usd,
+                "metered_usd": quote.metered_usd,
+                "settlement": budget.settlement,
+                "pricing_status": quote.pricing_status,
+                "rate_table_version": quote.rate_table_version,
+                "cost_basis": cost_basis,
+                "entitlement": (
+                    entitlement.as_receipt() if entitlement is not None else None
+                ),
                 "artifact": str(artifact.relative_to(chain.root)),
                 "artifact_hash": artifact_hash,
             },
         )
         return body
+
+    @staticmethod
+    def _usage_record(reported: Mapping[str, Any]) -> dict[str, int]:
+        """Preserve the input/output split that pricing depends on.
+
+        Output tokens bill several times higher than input on every provider in
+        the profile, and reasoning tokens bill at the output rate. A single
+        total cannot be priced, so the sealed receipt keeps the three counts
+        separately. ``tokens`` is retained as a derived convenience total and
+        must never be used as a pricing input.
+        """
+        input_tokens = int(reported.get("prompt_tokens", 0))
+        output_tokens = int(reported.get("completion_tokens", 0))
+        reasoning_tokens = int(reported.get("reasoning_tokens", 0))
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_tokens": reasoning_tokens,
+            "tokens": input_tokens + output_tokens + reasoning_tokens,
+        }
 
     def _preflight_cost(
         self, role: str, usage_rows: list[dict[str, Any]]
@@ -303,6 +448,38 @@ class GovernedOrchestrator:
         if consumed + ceiling > self.budget_usd:
             raise OrchestrationBlocked(f"budget_preflight_blocked:{role}")
         return ceiling
+
+    def _preflight_stage(
+        self,
+        role: str,
+        binding: BindingSpec,
+        usage_rows: list[dict[str, Any]],
+        window: PlanWindow | None,
+    ) -> StageBudget:
+        # No ledger means the legacy metered-budget contract. This keeps the
+        # public orchestrator compatible while production callers opt into the
+        # explicit settlement map and fail closed for unknown providers.
+        if self.entitlement_ledger is None or window is None:
+            return StageBudget("metered", self._preflight_cost(role, usage_rows))
+        if window.settlement == "unknown":
+            raise OrchestrationBlocked(f"entitlement_unknown:{role}")
+        if window.settlement == "metered":
+            return StageBudget(
+                "metered",
+                self._preflight_cost(role, usage_rows),
+                window,
+            )
+        projected = self.projected_calls_by_role.get(role, 1)
+        if window.used + projected > window.limit:
+            raise OrchestrationBlocked(f"plan_window_exceeded:{role}")
+        try:
+            self.entitlement_ledger.reserve(
+                binding.provider_id,
+                calls=projected,
+            )
+        except ValueError as exc:
+            raise OrchestrationBlocked(f"plan_window_exceeded:{role}") from exc
+        return StageBudget("plan_covered", 0.0, window)
 
     @staticmethod
     def _prompt(
@@ -432,4 +609,5 @@ __all__ = [
     "OrchestrationBlocked",
     "OrchestrationResult",
     "StageDispatcher",
+    "StageBudget",
 ]
