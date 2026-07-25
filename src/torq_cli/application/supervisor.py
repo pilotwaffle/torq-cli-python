@@ -82,7 +82,7 @@ class RunSupervisor:
             },
         )
         decision_capability = self.broker.issue("supervisor")
-        decision = self.broker.append(
+        decision = self.broker.terminalize(
             decision_capability.token,
             "run_decision",
             {
@@ -110,7 +110,7 @@ class RunSupervisor:
 
     def abandon(self, attempt_ids: list[str], last_sequence: int) -> dict[str, Any]:
         capability = self.broker.issue("recovery")
-        receipt = self.broker.append(
+        receipt = self.broker.terminalize(
             capability.token,
             "run_abandoned",
             {

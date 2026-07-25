@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import stat
 from collections.abc import Mapping
@@ -20,6 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from torq_cli.core.redaction import PatternRegistry
+from torq_cli.core.canonical_json import canonical_json
 from torq_cli.domain.evidence_transitions import transition_authority_finding
 from torq_cli.domain.run_evidence import (
     validate_receipt_payload,
@@ -92,13 +94,7 @@ def _key_id(public_key: bytes) -> str:
 
 
 def _canonical(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode()
+    return canonical_json(value)
 
 
 def _canonical_for_verification(value: Mapping[str, Any]) -> bytes:
@@ -614,6 +610,19 @@ class ReceiptWriter(Protocol):
 
     def write_artifact(self, name: str, content: str) -> Path: ...
 
+    def read_artifact(self, path: Path) -> str: ...
+
+    def covered_receipts(self) -> tuple[dict[str, Any], ...]: ...
+
+    def terminalize(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        writer_role: str = "orchestrator",
+        evidence_basis: str | None = None,
+    ) -> dict[str, Any]: ...
+
     def seal(self) -> Path: ...
 
     @staticmethod
@@ -1006,6 +1015,8 @@ class ReceiptChain:
 
     def write_artifact(self, name: str, content: str) -> Path:
         with self._lock:
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name) is None:
+                raise ValueError("artifact_name_invalid")
             clean, _ = self.registry.scan(content)
             nonce = secrets.token_bytes(12)
             plain = clean.encode()
@@ -1014,10 +1025,78 @@ class ReceiptChain:
                 plain,
                 self.run_id.encode("utf-8"),
             )
-            target = self.root / "artifacts" / (name + ".enc")
-            target.parent.mkdir(parents=True, exist_ok=True)
+            artifact_root = self.root / "artifacts"
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            if artifact_root.resolve() != self.root.resolve() / "artifacts":
+                raise ValueError("artifact_directory_unsafe")
+            target = artifact_root / (name + ".enc")
+            if target.exists():
+                raise ValueError("artifact_name_collision")
             _atomic_write(target, _ARTIFACT_FORMAT + nonce + cipher)
             return target
+
+    def terminalize(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        writer_role: str = "orchestrator",
+        evidence_basis: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically close command admission, finalize pending input, and decide."""
+        if transition not in {"run_decision", "run_abandoned"}:
+            raise ValueError("terminal_transition_invalid")
+        with self._lock:
+            receipts = self.covered_receipts()
+            finalized = {
+                str(receipt.get("payload", {}).get("command_id"))
+                for receipt in receipts
+                if receipt.get("transition") in {"context_injected", "command_unapplied"}
+                and isinstance(receipt.get("payload"), Mapping)
+            }
+            pending = [
+                receipt
+                for receipt in receipts
+                if receipt.get("transition") == "command_accepted"
+                and isinstance(receipt.get("payload"), Mapping)
+                and str(receipt["payload"].get("command_id")) not in finalized
+            ]
+            if pending:
+                self.append(
+                    "run_decision",
+                    {
+                        "status": "terminating",
+                        "outcome": "pending_commands_unapplied",
+                        "provider_dispatch": False,
+                    },
+                    writer_role="orchestrator",
+                    evidence_basis="derived",
+                )
+                for receipt in pending:
+                    command = receipt["payload"]
+                    assert isinstance(command, Mapping)
+                    self.append(
+                        "command_unapplied",
+                        {
+                            "command_id": command["command_id"],
+                            "accepted_sequence": receipt["sequence"],
+                            "target_role": command["target_role"],
+                            "reason": "run_terminating",
+                            "last_covered_sequence": self.sequence,
+                            "provider_dispatch": False,
+                        },
+                        writer_role="orchestrator",
+                        evidence_basis="derived",
+                    )
+            final_payload = dict(payload)
+            if transition == "run_abandoned":
+                final_payload["last_covered_sequence"] = self.sequence
+            return self.append(
+                transition,
+                final_payload,
+                writer_role=writer_role,
+                evidence_basis=evidence_basis,
+            )
 
     def read_artifact(self, path: Path) -> str:
         """Authenticate, decrypt, and decode an artifact belonging to this run."""
@@ -1037,6 +1116,20 @@ class ReceiptChain:
             self.run_id.encode("utf-8"),
         )
         return plain.decode("utf-8")
+
+    def covered_receipts(self) -> tuple[dict[str, Any], ...]:
+        """Return only the receipt prefix committed by the signed manifest."""
+        with self._lock:
+            manifest = json.loads(
+                (self.root / "terminal-manifest.json").read_text(encoding="utf-8")
+            )
+            count = manifest.get("receipt_count")
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                raise ValueError("manifest_receipt_count_invalid")
+            lines = self.receipts_path.read_text(encoding="utf-8").splitlines()
+            if len(lines) < count:
+                raise ValueError("receipt_chain_truncated")
+            return tuple(json.loads(line) for line in lines[:count])
 
     def _write_manifest(self, *, sealed: bool) -> Path:
         manifest = {

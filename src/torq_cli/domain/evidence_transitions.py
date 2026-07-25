@@ -47,6 +47,7 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
             "awaiting_approval",
             "blocked",
             "execution_complete_action_open",
+            "terminating",
             "workflow_closed",
         }),
     ),
@@ -62,7 +63,22 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         frozenset({"workflow_failed"}),
     ),
     TransitionRule(
+        "operator_gateway", "command_accepted", "submitted", "command_new"
+    ),
+    TransitionRule(
+        "operator_gateway", "command_rejected", "submitted", "command_new"
+    ),
+    TransitionRule(
         "operator_gateway", "context_injected", "submitted", "run_open"
+    ),
+    TransitionRule(
+        "orchestrator", "context_injected", "derived", "eligible_attempt_open"
+    ),
+    TransitionRule(
+        "orchestrator", "command_unapplied", "derived", "run_terminating"
+    ),
+    TransitionRule(
+        "orchestrator", "run_replanned", "derived", "accepted_lead_command_eligible"
     ),
     TransitionRule(
         "operator_gateway", "action_resolved", "submitted", "action_open"

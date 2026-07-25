@@ -28,10 +28,24 @@ class PatternRegistry:
     @classmethod
     def default(cls) -> PatternRegistry:
         registry = cls()
-        registry.add("PRIVATE_KEY", r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----", block=True)
-        registry.add("AWS_ACCESS_KEY", r"\bAKIA[0-9A-Z]{16}\b", block=True)
-        registry.add("OPENAI_STYLE_KEY", r"\bsk-[A-Za-z0-9]{20,}\b", block=True)
-        registry.add("KEY_ASSIGNMENT", r"(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token)\b\s*[:=]\s*['\"][^'\"]{12,}['\"]", block=False)
+        registry.add(
+            "PRIVATE_KEY",
+            r"-----BEGIN (?:(?:RSA|EC|OPENSSH) )?PRIVATE KEY-----",
+            block=True,
+        )
+        registry.add("AWS_ACCESS_KEY", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", block=True)
+        registry.add(
+            "OPENAI_STYLE_KEY",
+            r"\bsk-(?:(?:proj|ant)-)?[A-Za-z0-9_-]{20,}\b",
+            block=True,
+        )
+        registry.add(
+            "KEY_ASSIGNMENT",
+            r"(?im)\b(?:[A-Z][A-Z0-9_]*_)?"
+            r"(?:API[_-]?KEY|SECRET[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN)"
+            r"\s*[:=]\s*(?:['\"][^'\"\r\n]{12,}['\"]|[^\s'\"#]{12,})",
+            block=False,
+        )
         registry.add("BEARER_TOKEN", r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]{12,}", block=False)
         return registry
 
@@ -73,4 +87,3 @@ class SafePersistence:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(clean, encoding="utf-8")
         return findings
-

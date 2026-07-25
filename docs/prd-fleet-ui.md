@@ -941,7 +941,7 @@ checks on 2026-07-25. Rows marked not landed are the Release 2/3 workload.
 | Rate table, entitlement ledger, settlement receipts | Release 2 implemented: canonical rate identity, decimal strings, durable account windows, and cross-run lifecycle |
 | DeepSeek/Qwen routing | implemented through the shared Token Plan account; Southeast Asia is the HTTPS default and `QWEN_TOKEN_PLAN_BASE_URL` is the explicit override |
 | Verified Fleet projector and loopback server | Release 1 landed with stable v2 snapshot, directional coverage, bootstrap/session capability, and exact Host validation |
-| Governed textual context injection | foundation landed; command lifecycle, attempt boundary, and replan outstanding |
+| Governed context control | Release 3 backend implemented: durable accepted/rejected/unapplied lifecycle, future-attempt boundary, narrow file extractor, confirmed direct routing, and reproducible replan chain |
 | Root-certified per-run writer identities binding `(run_id, role, key)` | **landed** — `receipts.py:670-717`, verifier at `:993-994` |
 | Two-sided writer-role check (declared vs certified) | **landed** — `receipts.py:1042-1060`; mismatch verifies as tampered |
 | Artifact key separated from signing keys (TC-5) | **landed** — five independent secrets in `RunKeys` (`receipts.py:477-483`); artifact `:817`, manifest `:840` |

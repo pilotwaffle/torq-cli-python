@@ -135,6 +135,12 @@ def test_happy_path_projects_catalog_attempts_action_and_linked_closure(
     assert snapshot["summary"]["open_actions"] == 1
     action = snapshot["actions"][0]
 
+    accepted = orchestrator.inject_context(
+        chain,
+        "Apply this constraint if execution resumes.",
+        source_name="late-operator-note.txt",
+    )
+
     closure = orchestrator.resolve_action(
         chain,
         action_id=action["action_id"],
@@ -150,6 +156,16 @@ def test_happy_path_projects_catalog_attempts_action_and_linked_closure(
     assert closed["run"]["decision_writer"]["writer_role"] == "operator_gateway"
     assert closed["summary"]["open_actions"] == 0
     assert closed["actions"][0]["state"] == "resolved"
+    receipts = chain.covered_receipts()
+    terminating = next(
+        row
+        for row in receipts
+        if row["transition"] == "run_decision"
+        and row["payload"].get("status") == "terminating"
+    )
+    unapplied = next(row for row in receipts if row["transition"] == "command_unapplied")
+    assert terminating["sequence"] < unapplied["sequence"] < closure["run_decision_sequence"]
+    assert unapplied["payload"]["command_id"] == accepted["command_id"]
 
 
 def test_transport_exception_writes_one_failed_terminal_attempt(tmp_path: Path) -> None:

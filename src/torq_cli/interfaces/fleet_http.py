@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
 import json
 import secrets
@@ -12,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from importlib.resources import files
 from threading import RLock
+from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, urlsplit
 
@@ -36,6 +39,9 @@ def _load_fleet_assets() -> dict[str, tuple[bytes, str]]:
 
 
 class ContextInjector(Protocol):
+    @property
+    def root(self) -> Path: ...
+
     def inject(
         self,
         content: str,
@@ -43,6 +49,17 @@ class ContextInjector(Protocol):
         target_role: str | None = None,
         media_type: str = "text/plain",
         source_name: str | None = None,
+        confirm_direct: bool = False,
+    ) -> Mapping[str, Any]: ...
+
+    def inject_artifact(
+        self,
+        content: bytes,
+        *,
+        target_role: str | None = None,
+        media_type: str,
+        source_name: str,
+        confirm_direct: bool = False,
     ) -> Mapping[str, Any]: ...
 
 
@@ -121,11 +138,36 @@ class FleetSessionManager:
             token = secrets.token_urlsafe(48)
             self._sessions[token] = _Session(
                 token,
-                now,
+                session.issued_at,
                 now,
                 read_only=session.read_only,
             )
             return token
+
+    def claim_mutation(self, cookie_header: str | None) -> _Session | None:
+        """Atomically consume a write session so concurrent POSTs cannot fork it."""
+        if not cookie_header:
+            return None
+        cookie = SimpleCookie()
+        try:
+            cookie.load(cookie_header)
+        except ValueError:
+            return None
+        morsel = cookie.get("torq_fleet_session")
+        if morsel is None:
+            return None
+        with self._lock:
+            session = self._sessions.pop(morsel.value, None)
+            if session is None:
+                return None
+            now = self._clock()
+            if (
+                now - session.last_seen >= self._idle_seconds
+                or now - session.issued_at >= self._absolute_seconds
+            ):
+                return None
+            session.last_seen = now
+            return session
 
 
 def _loopback_host(host: str) -> bool:
@@ -135,6 +177,20 @@ def _loopback_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("context_request_duplicate_field")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(value: str) -> object:
+    del value
+    raise ValueError("context_request_non_finite")
 
 
 def create_fleet_server(
@@ -149,6 +205,11 @@ def create_fleet_server(
         raise ValueError("fleet_loopback_required")
     if not 0 <= port <= 65535:
         raise ValueError("fleet_port_invalid")
+    if (
+        context_injector is not None
+        and context_injector.root.resolve() != projector.run_root.resolve()
+    ):
+        raise ValueError("fleet_control_run_mismatch")
     session_manager = sessions or FleetSessionManager()
     fleet_assets = _load_fleet_assets()
 
@@ -197,6 +258,15 @@ def create_fleet_server(
             if parsed.path == "/api/v1/fleet":
                 snapshot = projector.snapshot()
                 run = snapshot.get("run")
+                verification = snapshot.get("verification")
+                mutable = (
+                    context_injector is not None
+                    and isinstance(run, Mapping)
+                    and run.get("workflow_state") not in {"closed", "abandoned"}
+                    and isinstance(verification, Mapping)
+                    and verification.get("status") == "verified"
+                )
+                snapshot["controls"] = {"context_mutation": mutable}
                 if isinstance(run, Mapping) and run.get("workflow_state") in {
                     "closed",
                     "abandoned",
@@ -210,15 +280,37 @@ def create_fleet_server(
             if not self._host_allowed():
                 self._json(421, {"status": "blocked", "finding": "fleet_host_denied"})
                 return
-            session = session_manager.authenticate(self.headers.get("Cookie"))
+            if self.path != "/api/v1/context" or context_injector is None:
+                self._json(405, {"status": "read_only"})
+                return
+            session = session_manager.claim_mutation(self.headers.get("Cookie"))
             if session is None:
                 self._json(401, {"status": "blocked", "finding": "fleet_session_required"})
                 return
             if session.read_only:
-                self._json(409, {"status": "blocked", "finding": "fleet_session_read_only"})
+                token = session_manager.rotate(session)
+                self._json(
+                    409,
+                    {"status": "blocked", "finding": "fleet_session_read_only"},
+                    session_token=token,
+                )
                 return
-            if self.path != "/api/v1/context" or context_injector is None:
-                self._json(405, {"status": "read_only"})
+            snapshot = projector.snapshot()
+            verification = snapshot.get("verification")
+            run = snapshot.get("run")
+            if (
+                not isinstance(verification, Mapping)
+                or verification.get("status") != "verified"
+                or not isinstance(run, Mapping)
+                or run.get("workflow_state") in {"closed", "abandoned"}
+            ):
+                session.read_only = True
+                token = session_manager.rotate(session)
+                self._json(
+                    409,
+                    {"status": "blocked", "finding": "fleet_run_not_mutable"},
+                    session_token=token,
+                )
                 return
             address = self.server.server_address
             if not isinstance(address, tuple) or len(address) < 2:
@@ -230,48 +322,122 @@ def create_fleet_server(
                 f"http://localhost:{port_number}",
                 f"http://[::1]:{port_number}",
             }
-            if self.headers.get("Origin") not in allowed_origins:
-                self._json(403, {"status": "blocked", "finding": "fleet_origin_denied"})
+            origin_values = self.headers.get_all("Origin", failobj=[])
+            if len(origin_values) != 1 or origin_values[0] not in allowed_origins:
+                token = session_manager.rotate(session)
+                self._json(
+                    403,
+                    {"status": "blocked", "finding": "fleet_origin_denied"},
+                    session_token=token,
+                )
                 return
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                if length <= 0 or length > 1_048_576:
+                content_types = self.headers.get_all("Content-Type", failobj=[])
+                if len(content_types) != 1 or content_types[0].casefold() not in {
+                    "application/json",
+                    "application/json; charset=utf-8",
+                }:
+                    raise ValueError("context_content_type_invalid")
+                if self.headers.get_all("Transfer-Encoding", failobj=[]):
+                    raise ValueError("context_transfer_encoding_denied")
+                lengths = self.headers.get_all("Content-Length", failobj=[])
+                if len(lengths) != 1 or not lengths[0].isdigit():
+                    raise ValueError("context_size_invalid")
+                length = int(lengths[0])
+                if length <= 0 or length > 1_500_000:
                     raise ValueError("context_size_invalid")
                 raw = self.rfile.read(length)
-                payload = json.loads(raw)
-                if not isinstance(payload, Mapping) or set(payload) - {
-                    "content", "target_role", "media_type", "source_name",
-                }:
+                payload = json.loads(
+                    raw,
+                    object_pairs_hook=_unique_json_object,
+                    parse_constant=_reject_json_constant,
+                )
+                if not isinstance(payload, Mapping):
                     raise ValueError("context_request_invalid")
-                content = payload.get("content")
-                if not isinstance(content, str):
+                allowed = {
+                    "input_kind",
+                    "content",
+                    "content_base64",
+                    "target_role",
+                    "media_type",
+                    "source_name",
+                    "confirm_direct",
+                }
+                if set(payload) - allowed:
                     raise ValueError("context_request_invalid")
                 target_role = payload.get("target_role")
-                media_type = payload.get("media_type", "text/plain")
+                confirm_direct = payload.get("confirm_direct", False)
                 source_name = payload.get("source_name")
                 if target_role is not None and not isinstance(target_role, str):
                     raise ValueError("context_request_invalid")
-                if not isinstance(media_type, str):
+                if not isinstance(confirm_direct, bool):
                     raise ValueError("context_request_invalid")
-                if source_name is not None and not isinstance(source_name, str):
+                input_kind = payload.get("input_kind", "inline_text")
+                if input_kind == "inline_text":
+                    content = payload.get("content")
+                    if (
+                        not isinstance(content, str)
+                        or "content_base64" in payload
+                        or source_name is not None and not isinstance(source_name, str)
+                    ):
+                        raise ValueError("context_request_invalid")
+                    media_type = payload.get("media_type", "text/plain")
+                    if not isinstance(media_type, str):
+                        raise ValueError("context_request_invalid")
+                    result = context_injector.inject(
+                        content,
+                        target_role=target_role,
+                        media_type=media_type,
+                        source_name=source_name,
+                        confirm_direct=confirm_direct,
+                    )
+                elif input_kind == "file":
+                    encoded = payload.get("content_base64")
+                    media_type = payload.get("media_type")
+                    if (
+                        not isinstance(encoded, str)
+                        or "content" in payload
+                        or not isinstance(media_type, str)
+                        or not isinstance(source_name, str)
+                    ):
+                        raise ValueError("context_request_invalid")
+                    try:
+                        decoded = base64.b64decode(encoded, validate=True)
+                    except (binascii.Error, ValueError) as exc:
+                        raise ValueError("context_base64_invalid") from exc
+                    if base64.b64encode(decoded).decode("ascii") != encoded:
+                        raise ValueError("context_base64_invalid")
+                    result = context_injector.inject_artifact(
+                        decoded,
+                        target_role=target_role,
+                        media_type=media_type,
+                        source_name=source_name,
+                        confirm_direct=confirm_direct,
+                    )
+                else:
                     raise ValueError("context_request_invalid")
-                result = context_injector.inject(
-                    content,
-                    target_role=target_role,
-                    media_type=media_type,
-                    source_name=source_name,
-                )
             except RedactionBlocked as exc:
-                self._json(400, {"status": "blocked", "finding": str(exc)})
+                token = session_manager.rotate(session)
+                self._json(
+                    400,
+                    {"status": "blocked", "finding": str(exc)},
+                    session_token=token,
+                )
                 return
             except OrchestrationBlocked as exc:
-                self._json(400, {"status": "blocked", "finding": str(exc)})
+                token = session_manager.rotate(session)
+                self._json(
+                    400,
+                    {"status": "blocked", "finding": str(exc)},
+                    session_token=token,
+                )
                 return
             except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                token = session_manager.rotate(session)
                 self._json(400, {
                     "status": "blocked",
                     "finding": "context_request_invalid",
-                })
+                }, session_token=token)
                 return
             rotated = session_manager.rotate(session)
             self._json(
