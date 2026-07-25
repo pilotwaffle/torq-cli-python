@@ -43,8 +43,10 @@ chain, writer key, writer signature, and writer permission before returning
   run decisions, using `observed` or `derived` evidence.
 - `supervisor` may write only `stage_interrupted` and `run_decision`, and only
   with `derived` evidence.
-- `operator_gateway` may write only submitted `context_injected` and
-  `action_resolved` receipts.
+- `operator_gateway` may write submitted `context_injected` and
+  `action_resolved` receipts plus the derived post-action `run_decision`. That
+  decision is accepted only when it closes a prior resolution for the same
+  action ID and names that receipt sequence.
 
 An invalid role, basis, key, signature, or writer/transition combination is
 `tampered`, including when all receipt hashes and the manifest are regenerated

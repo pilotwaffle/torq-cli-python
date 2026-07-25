@@ -274,6 +274,27 @@ def test_high_bug_routes_to_refine_bug_and_targeted_reaudit(tmp_path: Path) -> N
         and receipt["payload"]["role"] == "g2a"
         for receipt in receipts
     ) == 2
+    g2a_created = [
+        receipt["payload"]
+        for receipt in receipts
+        if receipt["transition"] == "stage_attempt_created"
+        and receipt["payload"]["role"] == "g2a"
+    ]
+    assert [payload["attempt_ordinal"] for payload in g2a_created] == [1, 2]
+    assert len({payload["attempt_id"] for payload in g2a_created}) == 2
+    route = next(
+        receipt["payload"]
+        for receipt in receipts
+        if receipt["transition"] == "repair_routed"
+    )
+    repair_created = next(
+        receipt["payload"]
+        for receipt in receipts
+        if receipt["transition"] == "stage_attempt_created"
+        and receipt["payload"]["role"] == "refine_bug"
+    )
+    assert route["attempt_id"] == repair_created["attempt_id"]
+    assert route["cycle"] == repair_created["repair_cycle"] == 1
 
 
 def test_critical_defect_preempts_earlier_repairable_defect(tmp_path: Path) -> None:
