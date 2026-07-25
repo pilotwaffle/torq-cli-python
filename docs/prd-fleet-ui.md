@@ -1,6 +1,6 @@
 # PRD - TORQ Fleet UI
 
-Status: **Requirements Rev 5.3; Release 1 implementation status updated 2026-07-25.**
+Status: **Requirements Rev 5.5; reconciled to protected main at `8367514` on 2026-07-25.**
 
 The Release 0 gate in Section 11 has passed. Release 1 completed protected-main
 CI on Windows, macOS, Linux, and headless Linux after merge. Release 2
@@ -23,25 +23,29 @@ identity, makes its preconditions checkable by an offline verifier, narrows
 run-decision authority, and adds the durability and anti-rollback properties the
 broker and registry depend on. Changes are listed in Section 18.
 
-Rev 5.3 changes no requirement. It reconciles the document with `origin/main` at
+Rev 5.3 changed no requirement. It reconciled the document with `origin/main` at
 56b8bff, where PRs #15-#19 landed seven of the properties this PRD listed as
-outstanding, and re-derives every code citation against that commit. Changes are
-listed in Section 19.
+outstanding. Changes are listed in Section 19.
 
-The post-Rev-5.3 implementation implements build-order steps 0-7, closes
-canonical-encoding decision 6
-in favor of the pinned standard-library encoder, and adds the Release 0
-adversarial fixtures. At that checkpoint, Fleet Read UI implementation remained
-the next release step; Release 2 accounting and Release 3 control dependencies
-remained gated.
+Rev 5.5 reconciles the later review draft directly against protected main after
+PRs #21, #23, #24, #26, and #27. It adopts the draft's closed decision-status
+authority, lane-state precedence, evidence-basis definitions, stable snapshot
+and route inventory, and accessibility clarifications. It rejects migrations
+that would invalidate shipped schema-v2 evidence and rejects a same-filesystem
+manifest counter as a security boundary. The complete disposition is in
+Section 20.
 
-The next implementation update completes build-order step 8 as a
+Protected main implements build-order steps 0-8, closes canonical-encoding
+decision 6 in favor of the pinned standard-library encoder, and includes the
+Release 0 adversarial fixtures plus the Fleet Read UI. Release 2 accounting and
+Release 3 control remain gated by steps 9 and 10 respectively.
+
+Release 1 completed build-order step 8 as a
 wheel-bundled, loopback-only Fleet Read board. It adds the six-lane governance
 rail, orchestrator and action ledgers, in-place evidence detail, persistent
 monitor, deduplicated local notifications, secure static routes, responsive and
-reduced-motion treatments, and real-browser verification. These paragraphs are
-implementation status, not uncommitted Rev 5.4 or Rev 5.5 requirement bodies.
-Release 2 accounting and Release 3 control remain gated.
+reduced-motion treatments, and real-browser verification. Release 2 accounting
+and Release 3 control remain gated.
 
 Depends on:
 
@@ -129,11 +133,12 @@ explicitly non-evidentiary.
 **SR-3.** Worker death creates an operational `recovery_required` annotation.
 Reduced state changes only when authenticated evidence records interruption.
 
-**SR-3a.** A run with no live worker and no terminal decision is annotated
-`orphaned`. Like `recovery_required`, this is operational: it marks a run that
-needs operator or recovery attention and changes no reduced state. It is the
-signal Fleet surfaces after a double death, where no writer survived to record
-what happened (LC-1).
+**SR-3a.** A run with no live worker, at least one unterminated attempt, no
+terminal decision, and no open operator action is annotated `orphaned`. A run
+in `awaiting_approval` or `execution_complete_action_open` is waiting on its
+operator, not orphaned. Like `recovery_required`, this annotation changes no
+reduced state. It is the signal Fleet surfaces after a double death, where no
+writer survived to record what happened (LC-1).
 
 **SR-4.** The supervisor is authorized to request only `stage_interrupted` and
 the linked terminal failure decision, under its supervisor capability. It never
@@ -144,6 +149,12 @@ attempts.
 `run_abandoned`. It is the only path by which an unterminated attempt becomes
 `abandoned` in reduced state (VC-6), and it never asserts dispatch, provider
 observation, or an outcome for any attempt.
+
+Recovery fails closed while the latest run decision is `awaiting_approval` or
+`execution_complete_action_open`, or while any action remains open. The
+enumerated attempt list is non-empty. If every attempt terminated but the
+orchestrator died before its decision, the run is reconciled or superseded by a
+new linked run; recovery does not manufacture an empty abandonment event.
 
 The receipt carries `evidence_basis: submitted`, not `derived`. The claim that
 no worker is alive is an operator assertion. It is not observed by the writer
@@ -272,38 +283,35 @@ is never re-signed under the new root: rotation moves forward only.
 - `writer_key_id`
 - `writer_signature`
 
+The evidence bases are closed terms:
+
+- `observed`: the writer directly performed or received the event it records;
+- `derived`: the value is a deterministic consequence of earlier covered
+  evidence, with a referenced sequence where one exists;
+- `submitted`: an operator or external caller asserted the value. The chain
+  authenticates who submitted it, not whether the assertion is true.
+
+Lease state, process liveness, and wall-clock expiry are operational context,
+not evidence. Fleet displays that context and its basis without upgrading it
+into a provider observation.
+
 The writer signature covers the canonical receipt body excluding
 `writer_signature` and `receipt_hash`. `receipt_hash` covers that body plus the
 writer signature. The next receipt links to that hash.
 
-"Canonical" is one named function, not a convention. The choice is made before
-schema v2 freezes, because it is the input to every signature and hash below it
-and cannot be revised afterward without invalidating sealed evidence. The
-options are RFC 8785 (JCS) or exactly `json.dumps(value, sort_keys=True,
-separators=(",", ":"), ensure_ascii=True)`; decision 6 records the tradeoff.
-Whichever is chosen, the stored JSONL line and the signed body derive from the
-same function, and the pinned choice is recorded in an import oracle so drift is
-a test failure.
+"Canonical" is one named function, not a convention. Decision 6 is closed in
+favor of exactly `json.dumps(value, sort_keys=True, separators=(",", ":"),
+ensure_ascii=True, allow_nan=False)`. The stored JSONL line and signed body
+derive from the same function, and the packaged import oracle makes byte drift
+a test failure. Changing encoding requires a new schema version; it cannot
+silently reinterpret sealed v2 evidence.
 
-The **receipt** path now satisfies this. `_canonical` (`receipts.py:94-100`,
-`origin/main` at 56b8bff) is a single function serving both the hash
-(`receipts.py:729-730`) and the persisted line (`receipts.py:801`), so stored
-bytes and hashed bytes are identical. It implements the `json.dumps` option
-above; decision 6 remains open only in the sense that adopting JCS instead would
-now require changing a landed function before schema v2 freezes.
-
-Two paths still dual-encode. The run certificate is signed over
-`_canonical(body)` (`receipts.py:706`) but persisted as
-`json.dumps(signed, sort_keys=True)` (`receipts.py:710`), and the manifest is
-signed over `_canonical(manifest)` (`receipts.py:843`) but persisted the same
-non-canonical way (`receipts.py:847`). Both are then hashed *as persisted* —
-`certificate_hash` at `receipts.py:838` digests the file bytes, not the canonical
-bytes. This is not unverifiable: a verifier can parse and re-serialize. The cost
-is that an independent implementation must know that for these two objects the
-persisted bytes are not the signed bytes, which is precisely the assumption it is
-most likely to get wrong, and the drift is silent when it does. Extending
-`_canonical` to the certificate and manifest writers removes the class of error
-rather than documenting it.
+Protected main uses the pinned standard-library encoder for receipt hashes and
+lines, certificates, and manifests. It sets `allow_nan=False`; a non-finite
+number is rejected before append and writes nothing. Verification retains a
+read-only compatibility encoder for evidence produced before this restriction,
+so upgrading does not silently invalidate an already signed local run. The
+packaged import oracle pins the exact byte representation.
 
 **TC-3.** The signed rolling manifest covers run ID, receipt count, terminal
 receipt hash, schema version, and sealed state. Its per-run manifest key is
@@ -313,23 +321,31 @@ certified by the evidence-root identity.
 is admissible only if every column holds; any violation is `tampered`, not
 merely unreadable.
 
-| Writer | Transition | Evidence basis | Required prior state | Referenced sequence |
-|---|---|---|---|---|
-| orchestrator | `run_planned` | `observed` | no prior `run_planned` | none |
-| orchestrator | `stage_attempt_created` | `observed` | lane in catalog; no open attempt for that lane | none |
-| orchestrator | `stage_dispatch_started` | `observed` | its attempt created and unterminated | that attempt creation |
-| orchestrator | `stage_blocked` | `observed` | its attempt created, unterminated, undispatched | that attempt creation |
-| orchestrator | `stage_completed`, `stage_failed` | `observed` | its attempt created and unterminated | that attempt creation |
-| orchestrator | `repair_routed` | `derived` | target lane dormant; qualifying defect sealed | the stage result that justifies it |
-| orchestrator | `run_decision: completed` | `derived` | every required lane sealed `stage_completed`; zero open actions; no terminal decision | none |
-| orchestrator | `run_decision: blocked`/`failed` | `derived` | a qualifying terminal `stage_blocked`/`stage_failed` sealed; no terminal decision | that stage result |
-| orchestrator | `run_decision: awaiting_approval` | `derived` | execution complete; at least one open action; no terminal decision | the `action_opened` |
-| supervisor | `stage_interrupted` | `derived` | attempt created and unterminated | the attempt creation it closes |
-| supervisor | terminal failure decision | `derived` | its own `stage_interrupted` sealed; no terminal decision | that `stage_interrupted` |
-| operator gateway | `context_injected` | `submitted` | run not closed | its command ID |
-| operator gateway | `action_resolved` | `submitted` | referenced action opened and unresolved | the `action_opened` |
-| operator gateway | terminal run decision | `derived` | `execution_complete_action_open`; zero open actions after this resolution | the `action_resolved` that closed the last one |
-| recovery | `run_abandoned` | `submitted` | no terminal run decision; at least one created, unterminated attempt; enumerated set equals exactly the unterminated attempts | the last covered sequence |
+| Writer | Transition | `payload.status` | Evidence basis | Required prior state | Referenced sequence |
+|---|---|---|---|---|---|
+| orchestrator | `run_planned` | - | `derived` | no prior `run_planned` | none |
+| orchestrator | `stage_attempt_created` | - | `observed` | lane in catalog; no open attempt for that lane | none |
+| orchestrator | `stage_dispatch_started` | - | `observed` | its attempt created and unterminated | that attempt creation |
+| orchestrator | `stage_blocked` | - | `observed` | its attempt created, unterminated, undispatched | that attempt creation |
+| orchestrator | `stage_completed`, `stage_failed` | - | `observed` | its attempt created and unterminated | that attempt creation |
+| orchestrator | `repair_routed` | - | `derived` | target lane dormant; qualifying defect sealed | the stage result that justifies it |
+| orchestrator | `action_opened` | - | `derived` | action ID not previously opened | its caused-by sequence |
+| orchestrator | `run_decision` | `awaiting_approval` | `derived` | zero open attempts; at least one open action; no terminal decision | latest `action_opened` |
+| orchestrator | `run_decision` | `blocked` | `derived` | qualifying `stage_blocked`; zero open attempts/actions; no terminal decision | that stage result |
+| orchestrator | `run_decision` | `execution_complete_action_open` | `derived` | execution complete; at least one open action; no terminal decision | latest `action_opened` |
+| orchestrator | `run_decision` | `workflow_closed` | `derived` | execution complete; zero open attempts/actions; no terminal decision | none |
+| supervisor | `stage_interrupted` | - | `derived` | attempt created and unterminated | the attempt creation it closes |
+| supervisor | `run_decision` | `workflow_failed` | `derived` | its own `stage_interrupted` sealed; no terminal decision | that `stage_interrupted` |
+| operator gateway | `context_injected` | - | `submitted` | run not closed | its command ID |
+| operator gateway | `action_resolved` | - | `submitted` | referenced action opened and unresolved | the `action_opened` |
+| operator gateway | `run_decision` | `workflow_closed` | `derived` | `execution_complete_action_open`; zero open actions after this resolution | the `action_resolved` that closed the last one |
+| recovery | `run_abandoned` | - | `submitted` | no terminal decision; not awaiting operator action; at least one created, unterminated attempt; enumerated set equals exactly the unterminated attempts | the last covered sequence |
+
+The authority key is `(writer_role, transition, payload.status)`, with status
+treated as null for non-decision transitions. A schema build fails on a missing,
+duplicate, or ambiguous key. The closed matrix governs schema 2.x and later;
+schema 1.x remains readable through the explicit legacy compatibility path and
+is never reclassified as schema-v2 authority evidence.
 
 A role table alone constrains too little. Without the prior-state and referenced
 -sequence columns, the operator gateway could seal a terminal decision on a run
@@ -715,6 +731,13 @@ Fleet renders four core and two conditional rows in sealed catalog order.
 | interrupted | violet/red outline plus `!` glyph | verified interruption |
 | abandoned | slate plus `?` glyph | verified `run_abandoned` enumerating this lane's attempt |
 
+Lane-state precedence is deterministic: an open lane-scoped action yields
+`needs you`; otherwise the latest attempt yields `running`, `sealed`, `blocked`,
+`failed`, `interrupted`, or `abandoned`; otherwise an inactive conditional lane
+is `dormant`; all other planned lanes are `queued`. A run-level action changes
+the action tally but does not relabel every lane. Attempt state and lane state
+are separate domains.
+
 `abandoned` is visually distinct from both `failed` and `interrupted`. It says
 less than either: nobody survived to record what happened, so the outcome is
 unknown rather than known-bad. Its detail view says `Attempt outcome unrecorded`
@@ -752,6 +775,44 @@ Notification text contains no decrypted content, secrets, or capability tokens.
 **FR-8.** Artifact viewing is optional and local. Decryption failure is separate
 from receipt integrity. Fleet never tails provider stdout.
 
+### 9.1 Stable Release 1 interface
+
+The server-side reducer is the only evidence reducer. The browser receives a
+complete `torq-fleet-snapshot-v2` document and never reconstructs lifecycle
+state from receipts. Its top-level fields are `schema`, `verification`,
+`data_status`, `run`, `summary`, `lanes`, `actions`, and `settlement`.
+
+`verification` carries raw and normalized verification state plus a finding.
+`run` carries identity, decision, execution/workflow state, coverage, time,
+waiting action IDs, and explicitly non-evidentiary operational annotations.
+`summary` carries one count for each ordered lane state, open-action count,
+operator-attention boolean, and reduction errors. Lane rows include their
+attempt history and certified writer provenance. Actions retain open/resolved
+linkage. Settlement values obey AR-2.
+
+The Release 1 route inventory is closed:
+
+| Route | Method | Authentication | Purpose |
+|---|---|---|---|
+| `/healthz` | GET | none | fixed `{status: ok}` liveness only |
+| `/`, `/fleet.css`, `/fleet.js` | GET | none | packaged static application assets; no run data |
+| `/bootstrap?nonce=...` | GET | single-use bootstrap nonce | set an HttpOnly, SameSite session cookie and redirect to `/` |
+| `/api/v1/fleet` | GET | Fleet session | complete v2 snapshot |
+| `/api/v1/context` | POST | write-capable Fleet session plus exact same origin | governed textual context injection when configured |
+
+No other Release 1 route exists. The client polls the complete snapshot every
+three seconds with `no-store`; it retains the last verified display while
+reconnecting and never merges partial state. A future event stream or Release 3
+mutation route requires an explicit versioned contract and does not silently
+change this surface.
+
+The board, action panel, and mini monitor project the same snapshot. State is
+never conveyed by colour alone. Expanders expose `aria-expanded`, status changes
+use deduplicated live announcements, focus remains on the activated control,
+and `prefers-reduced-motion` removes decorative transitions. The mini monitor
+offers no mutation control and suppresses plausible counts when evidence is
+unavailable.
+
 ## 10. Release 2 and 3 requirements
 
 ### 10.1 Accounting
@@ -777,8 +838,14 @@ binary JSON floats. Unrounded attempts are summed and rounded once for display.
 as `unpriced`. Legacy unsplit usage is excluded, never imputed.
 
 **AR-4.** Entitlement meters aggregate only verified eligible runs whose run-key
-certificates chain to the selected root trust anchor. They show verified coverage
-as numerator and denominator.
+certificates chain to the current trust set: the active root plus every
+`trusted_legacy` root. A `distrusted_compromised` root is excluded from the
+numerator while its active-window entries remain in the denominator.
+
+Coverage is `verified eligible active-window entries / all enrolled
+active-window entries`. Both integer counts are displayed; a percentage alone
+is insufficient. Missing, deleted, unverifiable, or distrusted entries remain in
+the denominator until their rolling window expires.
 
 **AR-4a (dispatch registry).** Coverage is measured against a root-level,
 append-only run registry stored outside any individual run directory and signed
@@ -806,17 +873,23 @@ every dispatch.
 
 **AR-4c (anti-rollback).** Signing entries detects modification but not deletion
 of the registry or restoration of an older, still-validly-signed copy. The
-registry therefore maintains a hash-chained head, and the broker anchors the
-current head outside the mutable journal, alongside the trust anchor and under
-the same protections. Verification compares the journal's computed head against
-the anchored head.
+registry therefore maintains a hash-chained head and monotonic entry count. The
+broker anchors both outside the mutable journal, alongside the trust anchor and
+under the same protections. Verification compares the journal's computed head
+and count against the anchored values.
 
 A registry that is missing, whose head does not match, or whose head is an
 ancestor of the anchored head fails closed: AR-4b refuses, and the condition is
 reported as `registry_rollback_detected` rather than as reduced coverage. A
 rolled-back registry is not a run with weaker evidence; it is an attack on the
 denominator itself, and treating it as ordinary missing coverage would let it be
-reconciled away. Recovery is explicit operator reconciliation under AR-6.
+reconciled away.
+
+Recovery requires a distinct broker-signed re-anchor record naming the old and
+new head/count, actor, time, and operator confirmation. The entire affected
+account window is quarantined at its configured limit before the new head is
+accepted, so rollback recovery yields no quota. Ordinary AR-6 reconciliation
+cannot clear `registry_rollback_detected`.
 
 **AR-4b.** Any preflight consuming these meters fails closed with
 `entitlement_coverage_incomplete` when coverage is below 100 percent. Excluding
@@ -828,9 +901,14 @@ Display continues to show the partial figure against its denominator.
 **AR-5.** Used, reserved, and limit remain separate with independent provenance.
 Reservations begin at transport attempt, expire with their rolling window, and
 remain counted after uncertain failures until expiry or reconciliation.
+Reconciliation may release a reservation but never removes its registry entry
+from the active denominator.
 
-**AR-6.** Operator reconciliation is non-evidentiary configuration but has a
-durable local history: account, old/new value, source, actor, and time.
+**AR-6.** Operator reconciliation is non-evidentiary configuration with a
+broker-signed, hash-chained, rollback-anchored history: account, old/new value,
+source, actor, time, and the exact registry entry IDs affected. A deleted or
+unverifiable entry retains that state for the life of its rolling window even
+after its conservative reservation is reconciled.
 
 ### 10.2 Control
 
@@ -852,18 +930,17 @@ affected future attempts. Prior evidence is immutable.
 
 ## 11. Dependencies and release gates
 
-Status is relative to protected `main` at **8d00380** plus the current audit
-blocker implementation. Local quality, adversarial, headless, package, wheel,
-and browser checks passed on 2026-07-25; protected-main CI remains the merge
-gate for these final blocker fixes.
+Status is relative to protected `main` at **8367514**. Release 0 and Release 1
+passed protected-main quality, adversarial, headless, package, wheel, and browser
+checks on 2026-07-25. Rows marked not landed are the Release 2/3 workload.
 
 | Dependency | Status |
 |---|---|
 | Split token counts and preflight refusal | landed |
 | Receipt `observed_at` and signed rolling manifest foundation | landed |
-| Rate table, in-memory entitlement ledger, settlement receipts | foundation landed; Rev 4 hashing/decimal/cross-run lifecycle outstanding |
-| DeepSeek/Qwen routing | implemented; default region pending |
-| Verified Fleet projector and loopback server | foundation landed; stable snapshot, directional coverage, and capability checks outstanding |
+| Rate table, in-memory entitlement ledger, settlement receipts | foundation landed; immutable rate hashes and cross-run lifecycle outstanding |
+| DeepSeek/Qwen routing | implemented through the shared Token Plan account; Southeast Asia is the HTTPS default and `QWEN_TOKEN_PLAN_BASE_URL` is the explicit override |
+| Verified Fleet projector and loopback server | Release 1 landed with stable v2 snapshot, directional coverage, bootstrap/session capability, and exact Host validation |
 | Governed textual context injection | foundation landed; command lifecycle, attempt boundary, and replan outstanding |
 | Root-certified per-run writer identities binding `(run_id, role, key)` | **landed** — `receipts.py:670-717`, verifier at `:993-994` |
 | Two-sided writer-role check (declared vs certified) | **landed** — `receipts.py:1042-1060`; mismatch verifies as tampered |
@@ -952,16 +1029,12 @@ command lifecycle, sanitizer, attempt boundaries, and replan receipts.
 
 ## 12. Build order
 
-The post-Rev-5.3 implementation locally verifies steps 0-7 and implements step
-8, Fleet Read UI. Steps 9-10 remain gated as Release 2 and Release 3 work.
+Protected main at `8367514` verifies steps 0-8, including Fleet Read UI. Step 9
+is the next implementation phase; step 10 remains gated as Release 3 work.
 
 0. One pinned canonical JSON encoder shared by hashing, signing, and storage.
-   Everything below signs over its output, so it lands first. Partly done:
-   `_canonical` already covers the receipt path, so the remaining work is
-   extending it to the manifest and certificate writers, hashing the certificate
-   over canonical bytes, and adding the import oracle. If decision 6 selects JCS
-   over the landed `json.dumps` form, that substitution happens here, before
-   schema v2 freezes.
+   Complete: the standard-library encoder covers receipts, certificates, and
+   manifests, rejects non-finite values on append, and is pinned by an oracle.
 1. Evidence broker: key custody, capability issuance and binding, serialized
    commit, crash-durable WC-1. Every writer below reaches the chain through it,
    so it precedes them.
@@ -1293,3 +1366,78 @@ writers, `certificate_hash` over canonical bytes, and the import oracle — and
 decision 6 is still open while the `json.dumps` form is now shipped code, so
 selecting JCS means replacing a landed function before schema v2 freezes. That
 decision closes before step 0 proceeds.
+
+## 20. Rev 5.5 reconciliation
+
+Rev 5.5 was reconciled against protected main at `8367514`, not against the
+never-pushed 1,525-line Rev 5.4 working copy cited by the review draft. This
+section is normative and supersedes conflicting status or forward-work claims
+in the historical Sections 16-19.
+
+### Adopted contract corrections
+
+| Draft item | Rev 5.5 disposition |
+|---|---|
+| 1.1 decision authority | Adopted with the shipped field name `payload.status`. Authority is keyed by writer, transition, and status; the allowed values are closed per writer. Existing v2 vocabulary is retained. |
+| 1.2 blocked lanes | Landed in #26. `blocked` is distinct from `needs you`; a lane-scoped open action has precedence and promotes the lane to operator attention. |
+| 1.3 abandonment | The destructive empty-enumeration proposal is rejected. Recovery requires a non-empty exact enumeration and fails while any operator action is open or the run is awaiting approval. |
+| 1.4 orphan annotation | Adopted. Waiting for an operator is not orphaned, and irreversible recovery is unavailable in that state. |
+| 1.5 manifest rollback | The proposed same-filesystem generation anchor is rejected as a false boundary under TC-7b. TC-7c remains the explicit local residual. The Release 2 registry has a separate anchored head because deleting registry entries changes the entitlement denominator. |
+| 1.6 schema-v1 closure | Adopted as compatibility policy: the closed authority matrix begins at schema 2.x; schema 1.x is legacy read-only evidence. |
+| 1.7 receipt `run_id` | No migration. Run identity is bound by the certified per-run keys, run certificate, manifest, and directory identity. Adding a mandatory receipt field would invalidate shipped v2 evidence without strengthening the stated same-user boundary. |
+| 1.8 computable preconditions | Adopted as a matrix rule: every precondition is chain-derived and named. Future Release 3 transitions must extend the same specification before becoming admissible. |
+| 1.9 reader boundary | Adopted. The broker is the only receipt-store writer; Fleet is a keyless, read-only evidence consumer. |
+| 1.10 evidence bases | Adopted in TC-2. Operational lease/liveness context is labelled and never presented as provider observation. |
+
+No schema-v2 rewrite follows from these corrections. New appends obey the
+strict canonical encoder and authority matrix; legacy non-finite signed values
+remain verifiable through a read-only byte-compatibility path.
+
+### UI contract decisions
+
+| Draft item | Rev 5.5 disposition |
+|---|---|
+| 3.1 reducer ownership | Adopted. The reference reducer is server-side and the browser never reduces receipts. |
+| 3.2 snapshot v3 | Rejected for Release 1. `torq-fleet-snapshot-v2` is now pinned in Section 9.1. A v3 requires an additive Release 2/3 need and an explicit migration. |
+| 3.3 annotations | Operational annotations remain explicitly nested under `run.operational_annotations`; they are outside evidence-derived lane state without requiring another transport envelope. |
+| 3.4 mutation eligibility | Deferred to Release 3. Release 1 has only the already-governed context-injection route. |
+| 3.5 fixture corpus | Adopted as a gate principle: each reachable state in the current release needs a fixture; unavailable later-release transitions are negative fixtures. |
+| 3.6 pips/monitor/accessibility | Adopted and reconciled to the wheel-bundled board. Pips are catalog-driven, the monitor is a projection rather than a reducer, and keyboard/live-region/reduced-motion behavior is normative. |
+| 3.7 routes/refresh | Reconciled to the shipped closed route inventory and complete-snapshot three-second polling. SSE and additional mutation routes require a future versioned contract. |
+
+The delivery shell is settled: wheel-bundled static HTML, CSS, and JavaScript
+served by the loopback Python process. The shipped assets are the Release 1
+visual baseline; Release 2 extends settlement/coverage panels without replacing
+the evidence model, and Release 3 adds controls only after their command PRD is
+implemented.
+
+### Remaining correction dispositions
+
+| Draft item | Rev 5.5 disposition |
+|---|---|
+| 4.1 receipts after closure | Already enforced by sealed-chain append and verification rules; later receipts are refused or verify as tampered. |
+| 4.2 crash outcomes | The WC-1 invariant is no false tampering and no truncated manifest that verifies. Platform-specific directory-flush support is tested without requiring one universal intermediate label. |
+| 4.3 registry rollback recovery | Adopted for Release 2: anchored head plus entry count, distinct signed re-anchor record, and full-window quarantine so recovery yields no quota. |
+| 4.4 unknown dispatch | `unknown` is reserved for interruption where transport invocation cannot be proven either way; it never authorizes automatic retry. |
+| 4.5 unfinalized commands | Release 3 terminal decisions require zero accepted, unfinalized commands. |
+| 4.6 reconciled legacy runs | A linked external reconciliation may be terminal for supervisor/UI purposes while leaving the immutable legacy manifest unchanged. |
+| 4.7 trust roots and coverage | Adopted in AR-4 with an explicit numerator/denominator and active plus trusted-legacy root set. |
+| 4.8 reconciliation bypass | Closed in AR-5/AR-6: reconciliation is signed and anchored, names entries, and cannot remove an active-window entry from coverage. |
+| 4.9 non-finite JSON | Landed in #26 with legacy verification compatibility; M15 in #27 mutation-tests the guard. |
+| 4.10 registry in early gates | Split by release. Chain resume is Release 1; registry-head verification begins when Release 2 creates the registry. |
+| 4.11 unavailable transition tests | Current-release rows require positive and negative coverage; future unavailable rows require negative refusal until their release. |
+| 4.12-4.14 terminology/traceability | Machine identifiers use underscores; display names use words. `broker capability`, `Fleet session`, `manifest coverage`, `entitlement coverage`, and `pricing coverage` are distinct terms. Normative generated tables are referenced by their requirement IDs. |
+
+### Release order after reconciliation
+
+1. Release 0 evidence foundation: complete.
+2. Release 1 Fleet Read: complete.
+3. Release 2 accounting (build-order step 9): immutable rate identity, root
+   dispatch registry, anchored rollback detection, cross-run trust-set
+   aggregation, reservations, reconciliation, and coverage-gated preflight.
+4. Release 3 control (build-order step 10): command lifecycle, supported
+   artifacts, attempt-bound application, and replanning.
+
+Rev 5.5 therefore removes the draft's false blockers without erasing its valid
+findings. It gives Release 2 a closed accounting contract and keeps Release 3
+control work gated behind its own transition and route definitions.
