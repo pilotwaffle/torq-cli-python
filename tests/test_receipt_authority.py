@@ -129,7 +129,7 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
     evidence_root = tmp_path / "evidence"
     first = _chain(evidence_root, "run-1")
     second = _chain(evidence_root, "run-2")
-    receipt = first.append("run_planned", {"mode": "live"})
+    receipt = first.append("run_attested", {"mode": "live"})
     first.seal()
 
     certificate = json.loads(first.certificate_path.read_text(encoding="utf-8"))
@@ -139,7 +139,7 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
 
     assert receipt["schema_version"] == "2.0.0"
     assert receipt["writer_role"] == "orchestrator"
-    assert receipt["evidence_basis"] == "derived"
+    assert receipt["evidence_basis"] == "observed"
     assert "writer_signature" in receipt
     assert manifest["manifest_key_id"] == certificate["manifest_key"]["key_id"]
     assert set(certificate["writers"]) == {
@@ -173,43 +173,96 @@ def test_writer_permissions_allow_only_certified_role_basis_transitions(
     tmp_path: Path,
 ) -> None:
     chain = _chain(tmp_path / "evidence", "run")
-    chain.append("stage_interrupted", {"role": "g1d"})
+    attempt = {
+        "role": "g1r",
+        "attempt_id": "attempt-g1r-1",
+        "attempt_ordinal": 1,
+        "repair_cycle": 0,
+    }
     chain.append(
+        "stage_attempt_created",
+        {**attempt, "provider_dispatch": False},
+    )
+    interrupted = chain.append(
         "stage_interrupted",
-        {"role": "g1r"},
+        {**attempt, "provider_dispatch": "unknown"},
         writer_role="supervisor",
         evidence_basis="derived",
     )
     chain.append(
         "run_decision",
-        {"status": "recovery_required"},
+        {
+            "status": "workflow_failed",
+            "interruption_sequence": interrupted["sequence"],
+        },
         writer_role="supervisor",
         evidence_basis="derived",
     )
-    chain.append(
+    opened = chain.append(
+        "action_opened",
+        {
+            "action_id": "approve-1",
+            "type": "approval_required",
+            "scope": "run",
+            "target": "operator",
+            "caused_by_sequence": interrupted["sequence"],
+            "summary": "Review interruption",
+        },
+    )
+    resolved = chain.append(
         "action_resolved",
-        {"action_id": "approve-1"},
+        {
+            "action_id": "approve-1",
+            "resolution": "rejected",
+            "resolver_identity": "operator:test",
+            "opened_sequence": opened["sequence"],
+        },
         writer_role="operator_gateway",
         evidence_basis="submitted",
+    )
+    chain.append(
+        "run_decision",
+        {
+            "status": "workflow_closed",
+            "action_id": "approve-1",
+            "action_resolved_sequence": resolved["sequence"],
+        },
+        writer_role="operator_gateway",
+        evidence_basis="derived",
     )
     assert verify_receipt_store(chain.root).status == "verified"
 
     with pytest.raises(ValueError, match="receipt_writer_unauthorized"):
         chain.append(
             "stage_completed",
-            {"role": "g1d"},
+            {**attempt, "provider_dispatch": True},
             writer_role="supervisor",
             evidence_basis="derived",
         )
     with pytest.raises(ValueError, match="receipt_writer_unauthorized"):
         chain.append(
             "action_opened",
-            {"action_id": "approve-2"},
+            {
+                "action_id": "approve-2",
+                "type": "approval_required",
+                "scope": "run",
+                "target": "operator",
+                "caused_by_sequence": resolved["sequence"],
+                "summary": "Review",
+            },
             writer_role="operator_gateway",
             evidence_basis="submitted",
         )
     with pytest.raises(ValueError, match="receipt_writer_unauthorized"):
-        chain.append("action_resolved", {"action_id": "approve-2"})
+        chain.append(
+            "action_resolved",
+            {
+                "action_id": "approve-2",
+                "resolution": "approved",
+                "resolver_identity": "operator:test",
+                "opened_sequence": opened["sequence"],
+            },
+        )
 
 
 @pytest.mark.parametrize(
@@ -239,7 +292,7 @@ def test_validly_resigned_unauthorized_writer_fails_closed(
     finding: str,
 ) -> None:
     chain = _chain(tmp_path / finding, "run")
-    chain.append("stage_completed", {"role": "g1d"})
+    chain.append("run_attested", {"mode": "live"})
     _rewrite_v2_and_resign(chain, mutate)
 
     result = verify_receipt_store(chain.root)
@@ -251,10 +304,10 @@ def test_validly_resigned_unauthorized_writer_fails_closed(
 def test_cross_run_certificate_and_chain_transplant_fails(tmp_path: Path) -> None:
     evidence_root = tmp_path / "evidence"
     first = _chain(evidence_root, "run-1")
-    first.append("run_planned", {"mode": "live"})
+    first.append("run_attested", {"mode": "live"})
     first.seal()
     second = _chain(evidence_root, "run-2")
-    second.append("run_planned", {"mode": "live"})
+    second.append("run_attested", {"mode": "live"})
     second.seal()
 
     for name in ("receipts.jsonl", "terminal-manifest.json", "run-certificate.json"):
@@ -270,10 +323,6 @@ def test_schema_v1_verifies_and_fleet_labels_writer_legacy_unclassified(
     tmp_path: Path,
 ) -> None:
     chain = _chain(tmp_path / "legacy", "run")
-    chain.append(
-        "run_planned",
-        {"mode": "dry_run", "profile_id": "legacy", "planned_roles": ["g1d"]},
-    )
     chain.append("stage_started", {"role": "g1d"})
     _convert_to_legacy(chain)
 
@@ -282,4 +331,4 @@ def test_schema_v1_verifies_and_fleet_labels_writer_legacy_unclassified(
     lane = snapshot["lanes"][0]
     assert lane["latest_writer_role"] == "legacy_unclassified"
     assert lane["latest_evidence_basis"] == "legacy_unclassified"
-    assert lane["transitions"][0]["writer_role"] == "legacy_unclassified"
+    assert lane["latest_writer_key_id"] == "legacy_unclassified"

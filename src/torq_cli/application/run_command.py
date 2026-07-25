@@ -103,7 +103,8 @@ class RunController:
             # nothing at all.
             chain.seal()
             raise
-        chain.seal()
+        if result.status not in {"awaiting_approval", "human_escalation"}:
+            chain.seal()
         verification = verify_receipt_store(chain.root)
         if verification.status != "verified":
             raise RuntimeError(f"receipt_verification_failed:{verification.finding}")

@@ -148,7 +148,8 @@ def test_direct_lane_context_waits_for_that_lane(tmp_path: Path) -> None:
     started = next(
         row["payload"]
         for row in receipts
-        if row["transition"] == "stage_started" and row["payload"]["role"] == "builder"
+        if row["transition"] == "stage_dispatch_started"
+        and row["payload"]["role"] == "builder"
     )
     assert len(started["context_ids"]) == 1
 
@@ -174,11 +175,23 @@ def test_context_validation_fails_before_receipt_or_artifact(tmp_path: Path) -> 
 
 def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-http-context")
-    chain.append("run_planned", {
-        "mode": "live",
-        "profile_id": "torq-v5-6-live",
-        "planned_roles": ("g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui"),
-    })
+    profile = load_registry().profiles["torq-v5-6-live"]
+    chain.append(
+        "run_planned",
+        {
+            "mode": "live",
+            "profile_id": "torq-v5-6-live",
+            "planned_roles": (
+                "g1d",
+                "g1r",
+                "builder",
+                "g2a",
+                "refine_bug",
+                "refine_ui",
+            ),
+            "lane_catalog": GovernedOrchestrator._lane_catalog(profile),
+        },
+    )
     orchestrator = GovernedOrchestrator()
     injector = GovernedContextInjector(orchestrator, chain)
     server = create_fleet_server(

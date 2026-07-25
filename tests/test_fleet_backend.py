@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.orchestrator import GovernedOrchestrator
+from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces.cli import main
 from torq_cli.interfaces.fleet_http import create_fleet_server
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
@@ -27,6 +29,7 @@ def _chain(tmp_path: Path, name: str = "run-fleet") -> ReceiptChain:
 
 
 def _planned(chain: ReceiptChain) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
     chain.append(
         "run_planned",
         {
@@ -34,20 +37,41 @@ def _planned(chain: ReceiptChain) -> None:
             "profile_id": "torq-v5-6-live",
             "strategy_id": "standard_v1",
             "planned_roles": ("g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui"),
+            "lane_catalog": GovernedOrchestrator._lane_catalog(profile),
         },
     )
+
+
+def _attempt(role: str, ordinal: int = 1, cycle: int = 0) -> dict[str, object]:
+    return {
+        "role": role,
+        "attempt_id": f"attempt-{role}-{ordinal}",
+        "attempt_ordinal": ordinal,
+        "repair_cycle": cycle,
+    }
+
+
+def _created(chain: ReceiptChain, role: str, ordinal: int = 1) -> dict[str, object]:
+    attempt = _attempt(role, ordinal)
+    chain.append(
+        "stage_attempt_created",
+        {**attempt, "provider_dispatch": False},
+    )
+    return attempt
 
 
 def test_rolling_manifest_authenticates_a_live_unsealed_snapshot(tmp_path: Path) -> None:
     chain = _chain(tmp_path)
     _planned(chain)
+    attempt = _created(chain, "g1d")
     chain.append(
-        "stage_started",
+        "stage_dispatch_started",
         {
-            "role": "g1d",
+            **attempt,
             "provider": "anthropic",
             "model": "claude-fable-5",
             "settlement": "plan_covered",
+            "provider_dispatch": True,
         },
     )
 
@@ -55,17 +79,13 @@ def test_rolling_manifest_authenticates_a_live_unsealed_snapshot(tmp_path: Path)
     manifest = json.loads((chain.root / "terminal-manifest.json").read_text(encoding="utf-8"))
     assert manifest["sealed"] is False
     snapshot = FleetProjector(chain.root).snapshot()
-    assert snapshot["verification"] == {"status": "verified", "finding": None}
+    assert snapshot["verification"]["normalized_state"] == "live_verified"
     assert snapshot["run"]["sealed"] is False
     assert snapshot["run"]["status"] == "running"
-    assert snapshot["summary"] == {
-        "sealed": 0,
-        "running": 1,
-        "needs_you": 0,
-        "queued": 5,
-        "refused": False,
-        "needs_operator": False,
-    }
+    assert snapshot["summary"]["running"] == 1
+    assert snapshot["summary"]["queued"] == 3
+    assert snapshot["summary"]["dormant"] == 2
+    assert snapshot["summary"]["open_actions"] == 0
     assert snapshot["lanes"][0]["role"] == "g1d"
     assert snapshot["lanes"][0]["state"] == "running"
     assert snapshot["run"]["elapsed_status"] == "receipt_timestamps_available"
@@ -74,10 +94,15 @@ def test_rolling_manifest_authenticates_a_live_unsealed_snapshot(tmp_path: Path)
 def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-blocked")
     _planned(chain)
+    completed_attempt = _created(chain, "g1d")
+    chain.append(
+        "stage_dispatch_started",
+        {**completed_attempt, "provider_dispatch": True},
+    )
     chain.append(
         "stage_completed",
         {
-            "role": "g1d",
+            **completed_attempt,
             "provider": "anthropic",
             "model": "claude-fable-5",
             "usage": {
@@ -99,12 +124,14 @@ def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Pat
                 "used_source": "receipt_derived",
                 "limit_source": "operator_declared",
             },
+            "provider_dispatch": True,
         },
     )
+    blocked_attempt = _created(chain, "g1r")
     chain.append(
         "stage_blocked",
         {
-            "role": "g1r",
+            **blocked_attempt,
             "provider": "anthropic",
             "model": "claude-opus-4-8",
             "reason": "plan_window_exceeded:g1r",
@@ -126,8 +153,7 @@ def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Pat
 
     assert snapshot["run"]["sealed"] is True
     assert snapshot["run"]["status"] == "blocked"
-    assert snapshot["run"]["waiting_on"] == ["g1r"]
-    assert snapshot["summary"]["refused"] is True
+    assert snapshot["run"]["waiting_on"] == []
     assert snapshot["summary"]["needs_you"] == 1
     assert snapshot["settlement"]["metered_equivalent_usd"] == 0.002
     blocked = next(row for row in snapshot["lanes"] if row["role"] == "g1r")
@@ -162,7 +188,7 @@ def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.Cap
     output = json.loads(capsys.readouterr().out)
 
     assert code == 0
-    assert output["schema"] == "torq-fleet-snapshot-v1"
+    assert output["schema"] == "torq-fleet-snapshot-v2"
     assert output["run"]["run_id"] == "run-cli"
 
 
@@ -171,16 +197,23 @@ def test_fleet_projects_certified_writer_provenance(
 ) -> None:
     chain = _chain(tmp_path, "run-authority")
     _planned(chain)
-    chain.append("stage_started", {"role": "g1d"})
-    chain.append(
+    attempt = _created(chain, "g1d")
+    interrupted = chain.append(
         "stage_interrupted",
-        {"role": "g1d", "reason": "worker_lease_expired"},
+        {
+            **attempt,
+            "reason": "worker_lease_expired",
+            "provider_dispatch": "unknown",
+        },
         writer_role="supervisor",
         evidence_basis="derived",
     )
     chain.append(
         "run_decision",
-        {"status": "recovery_required"},
+        {
+            "status": "workflow_failed",
+            "interruption_sequence": interrupted["sequence"],
+        },
         writer_role="supervisor",
         evidence_basis="derived",
     )
@@ -191,7 +224,9 @@ def test_fleet_projects_certified_writer_provenance(
 
     assert snapshot["run"]["decision_writer"]["writer_role"] == "supervisor"
     assert lane["latest_writer_role"] == "supervisor"
-    assert [row["writer_role"] for row in lane["transitions"]] == [
+    assert [
+        row["writer_role"] for row in lane["attempts"][0]["transitions"]
+    ] == [
         "orchestrator",
         "supervisor",
     ]

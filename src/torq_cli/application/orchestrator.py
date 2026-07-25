@@ -6,6 +6,7 @@ import json
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, cast
 
@@ -15,6 +16,7 @@ from torq_cli.core.graph import ExecutionMode
 from torq_cli.core.policy import Defect, G2APolicy
 from torq_cli.core.redaction import PatternRegistry
 from torq_cli.domain.registry_schema import BindingSpec, ProfileSpec
+from torq_cli.domain.run_evidence import CONDITIONAL_LANES, LANE_ORDER
 from torq_cli.safety.entitlements import EntitlementLedger, PlanWindow
 from torq_cli.safety.pricing import RateTable, load_default_rate_table
 from torq_cli.safety.receipts import ReceiptChain
@@ -41,6 +43,14 @@ class StageBudget:
     settlement: str
     ceiling_usd: float
     window: PlanWindow | None = None
+
+
+@dataclass(frozen=True)
+class StageAttempt:
+    attempt_id: str
+    role: str
+    ordinal: int
+    repair_cycle: int
 
 
 class ConnectorDispatcher:
@@ -118,6 +128,7 @@ class GovernedOrchestrator:
         self.policy = G2APolicy()
         self._context_lock = RLock()
         self._pending_context: list[dict[str, str]] = []
+        self._attempt_ordinals: dict[str, int] = {}
 
     def inject_context(
         self,
@@ -181,6 +192,64 @@ class GovernedOrchestrator:
             "receipt_hash": receipt["receipt_hash"],
         }
 
+    def resolve_action(
+        self,
+        chain: ReceiptChain,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]:
+        """Resolve one open action and seal its linked workflow closure."""
+        if not action_id or not resolution or not resolver_identity:
+            raise OrchestrationBlocked("action_resolution_invalid")
+        opened_sequence: int | None = None
+        already_resolved = False
+        for line in chain.receipts_path.read_text(encoding="utf-8").splitlines():
+            receipt = json.loads(line)
+            payload = receipt.get("payload", {})
+            if not isinstance(payload, Mapping) or payload.get("action_id") != action_id:
+                continue
+            if receipt.get("transition") == "action_opened":
+                opened_sequence = int(receipt["sequence"])
+            elif receipt.get("transition") == "action_resolved":
+                already_resolved = True
+        if opened_sequence is None:
+            raise OrchestrationBlocked("action_open_missing")
+        if already_resolved:
+            raise OrchestrationBlocked("action_already_resolved")
+        resolved = chain.append(
+            "action_resolved",
+            {
+                "action_id": action_id,
+                "resolution": resolution,
+                "resolver_identity": resolver_identity,
+                "opened_sequence": opened_sequence,
+                "provider_dispatch": False,
+            },
+            writer_role="operator_gateway",
+            evidence_basis="submitted",
+        )
+        decision = chain.append(
+            "run_decision",
+            {
+                "status": "workflow_closed",
+                "outcome": resolution,
+                "action_id": action_id,
+                "action_resolved_sequence": resolved["sequence"],
+                "provider_dispatch": False,
+            },
+            writer_role="operator_gateway",
+            evidence_basis="derived",
+        )
+        chain.seal()
+        return {
+            "action_id": action_id,
+            "action_resolved_sequence": resolved["sequence"],
+            "run_decision_sequence": decision["sequence"],
+            "status": "workflow_closed",
+        }
+
     def execute(
         self,
         *,
@@ -190,6 +259,7 @@ class GovernedOrchestrator:
         chain: ReceiptChain,
     ) -> OrchestrationResult:
         planned = self._PLANNED_ROLES
+        self._attempt_ordinals = {}
         missing = tuple(role for role in planned if role not in profile.bindings)
         if missing:
             raise OrchestrationBlocked("profile_binding_missing:" + ",".join(missing))
@@ -200,13 +270,18 @@ class GovernedOrchestrator:
                 "profile_id": profile.profile_id,
                 "strategy_id": profile.strategy_id,
                 "planned_roles": planned,
+                "lane_catalog": self._lane_catalog(profile),
                 "rate_table_version": self.rate_table.version,
             },
         )
         if mode is ExecutionMode.DRY_RUN:
             chain.append(
                 "run_decision",
-                {"status": "dry_run_complete", "provider_dispatch": False},
+                {
+                    "status": "workflow_closed",
+                    "outcome": "dry_run_complete",
+                    "provider_dispatch": False,
+                },
             )
             return OrchestrationResult(
                 "dry_run_complete",
@@ -264,12 +339,10 @@ class GovernedOrchestrator:
             role="g1d", goal=goal, context={}, profile=profile,
             chain=chain, dispatched=dispatched, usage_rows=usage_rows,
         )
-        self._require_value(outputs["g1d"], "status", "design_complete", "g1d")
         outputs["g1r"] = self._dispatch(
             role="g1r", goal=goal, context=outputs["g1d"], profile=profile,
             chain=chain, dispatched=dispatched, usage_rows=usage_rows,
         )
-        self._require_verdict(outputs["g1r"], "g1r")
         if self._verdict(outputs["g1r"]) != "approve":
             return self._finish(
                 chain, "design_rejected", planned, dispatched, None, usage_rows
@@ -279,7 +352,6 @@ class GovernedOrchestrator:
             role="builder", goal=goal, context=outputs["g1d"], profile=profile,
             chain=chain, dispatched=dispatched, usage_rows=usage_rows,
         )
-        self._require_value(outputs["builder"], "status", "build_complete", "builder")
         proposal: dict[str, Any] = {
             "source_role": "builder",
             "status": outputs["builder"].get("status", "unreported"),
@@ -288,7 +360,6 @@ class GovernedOrchestrator:
             role="g2a", goal=goal, context=outputs["builder"], profile=profile,
             chain=chain, dispatched=dispatched, usage_rows=usage_rows,
         )
-        self._require_verdict(audit, "g2a")
 
         repair_cycles = 0
         while self._verdict(audit) != "approve":
@@ -310,25 +381,31 @@ class GovernedOrchestrator:
                     "repair_budget_exhausted", planned, dispatched, proposal,
                     usage_rows, repair_cycles=repair_cycles,
                 )
+            repair_attempt = self._allocate_attempt(
+                repair_role,
+                repair_cycle=repair_cycles + 1,
+            )
             chain.append(
                 "repair_routed",
                 {
                     "target_role": repair_role,
                     "cycle": repair_cycles + 1,
+                    "attempt_id": repair_attempt.attempt_id,
+                    "attempt_ordinal": repair_attempt.ordinal,
                     "targeted_reaudit": True,
                 },
             )
             repair = self._dispatch(
                 role=repair_role, goal=goal, context=audit, profile=profile,
                 chain=chain, dispatched=dispatched, usage_rows=usage_rows,
+                attempt=repair_attempt,
             )
-            self._require_value(repair, "status", "repair_complete", repair_role)
             repair_cycles += 1
             audit = self._dispatch(
                 role="g2a", goal=goal, context=repair, profile=profile,
                 chain=chain, dispatched=dispatched, usage_rows=usage_rows,
+                repair_cycle=repair_cycles,
             )
-            self._require_verdict(audit, "g2a")
 
         return self._finish(
             chain, "awaiting_approval", planned, dispatched, proposal, usage_rows,
@@ -345,10 +422,24 @@ class GovernedOrchestrator:
         chain: ReceiptChain,
         dispatched: list[str],
         usage_rows: list[dict[str, Any]],
+        attempt: StageAttempt | None = None,
+        repair_cycle: int = 0,
     ) -> Mapping[str, Any]:
         binding = profile.bindings.get(role)
         if binding is None:
             raise OrchestrationBlocked(f"profile_binding_missing:{role}")
+        attempt = attempt or self._allocate_attempt(role, repair_cycle=repair_cycle)
+        attempt_evidence = self._attempt_evidence(attempt)
+        chain.append(
+            "stage_attempt_created",
+            {
+                **attempt_evidence,
+                "provider": binding.provider_id,
+                "model": binding.model_id,
+                "prompt_id": binding.prompt_id,
+                "provider_dispatch": False,
+            },
+        )
         window = (
             self.entitlement_ledger.window(binding.provider_id)
             if self.entitlement_ledger is not None
@@ -361,6 +452,7 @@ class GovernedOrchestrator:
             chain.append(
                 "stage_blocked",
                 {
+                    **attempt_evidence,
                     "role": role,
                     "provider": binding.provider_id,
                     "model": binding.model_id,
@@ -381,45 +473,126 @@ class GovernedOrchestrator:
                 },
             )
             raise
-        injected = self._consume_context(role)
-        prompt_context: dict[str, Any] = dict(context)
-        if injected:
-            prompt_context["injected_context"] = [
-                {"context_id": item["context_id"], "content": item["content"]}
-                for item in injected
-            ]
-        prompt = self._prompt(role, goal, prompt_context, binding)
-        clean_prompt, findings = self.registry.scan(prompt)
-        chain.append(
-            "stage_started",
-            {
-                "role": role,
-                "provider": binding.provider_id,
-                "model": binding.model_id,
-                "prompt_id": binding.prompt_id,
-                "redactions": findings,
-                "context_ids": tuple(item["context_id"] for item in injected),
-                "settlement": budget.settlement,
-                "entitlement": (
-                    budget.window.as_receipt() if budget.window is not None else None
-                ),
-            },
-        )
+        try:
+            clean_prompt = self._start_dispatch(
+                role=role,
+                goal=goal,
+                context=context,
+                binding=binding,
+                budget=budget,
+                attempt_evidence=attempt_evidence,
+                chain=chain,
+            )
+        except Exception as exc:
+            reason = (
+                str(exc)
+                if isinstance(exc, OrchestrationBlocked)
+                else f"unexpected_stage_failure:{role}:{type(exc).__name__}"
+            )
+            chain.append(
+                "stage_failed",
+                {
+                    **attempt_evidence,
+                    "provider": binding.provider_id,
+                    "model": binding.model_id,
+                    "reason": reason,
+                    "provider_dispatch": False,
+                },
+            )
+            if isinstance(exc, OrchestrationBlocked):
+                raise
+            raise OrchestrationBlocked(reason) from exc
         assert self.dispatcher is not None
-        response = self.dispatcher.dispatch(
-            role=role,
-            provider=binding.provider_id,
-            model=binding.model_id,
-            prompt=clean_prompt,
-        )
+        dispatched.append(role)
+        try:
+            response = self.dispatcher.dispatch(
+                role=role,
+                provider=binding.provider_id,
+                model=binding.model_id,
+                prompt=clean_prompt,
+            )
+            provenance = response.provenance
+            if (
+                provenance.provider != binding.provider_id
+                or provenance.model != binding.model_id
+            ):
+                raise OrchestrationBlocked(f"resolved_model_mismatch:{role}")
+            if provenance.fallback_used:
+                raise OrchestrationBlocked(f"unattested_fallback:{role}")
+            body = dict(self._response_object(role, response.visible_text))
+            self._validate_response_contract(role, body)
+            artifact = chain.write_artifact(
+                f"{chain.sequence + 1:02d}-{role}-output",
+                response.visible_text,
+            )
+            artifact_hash = chain.hash_file(artifact)
+        except Exception as exc:
+            reason = (
+                str(exc)
+                if isinstance(exc, OrchestrationBlocked)
+                else f"unexpected_stage_failure:{role}:{type(exc).__name__}"
+            )
+            chain.append(
+                "stage_failed",
+                {
+                    **attempt_evidence,
+                    "provider": binding.provider_id,
+                    "model": binding.model_id,
+                    "reason": reason,
+                    "provider_dispatch": True,
+                },
+            )
+            if isinstance(exc, OrchestrationBlocked):
+                raise
+            raise OrchestrationBlocked(reason) from exc
+        try:
+            return self._complete_stage(
+                role=role,
+                binding=binding,
+                budget=budget,
+                response=response,
+                body=body,
+                artifact=artifact,
+                artifact_hash=artifact_hash,
+                attempt_evidence=attempt_evidence,
+                chain=chain,
+                usage_rows=usage_rows,
+            )
+        except Exception as exc:
+            reason = (
+                str(exc)
+                if isinstance(exc, OrchestrationBlocked)
+                else f"unexpected_stage_failure:{role}:{type(exc).__name__}"
+            )
+            chain.append(
+                "stage_failed",
+                {
+                    **attempt_evidence,
+                    "provider": binding.provider_id,
+                    "model": binding.model_id,
+                    "reason": reason,
+                    "provider_dispatch": True,
+                },
+            )
+            if isinstance(exc, OrchestrationBlocked):
+                raise
+            raise OrchestrationBlocked(reason) from exc
+
+    def _complete_stage(
+        self,
+        *,
+        role: str,
+        binding: BindingSpec,
+        budget: StageBudget,
+        response: NormalizedResponse,
+        body: dict[str, Any],
+        artifact: Path,
+        artifact_hash: str,
+        attempt_evidence: Mapping[str, Any],
+        chain: ReceiptChain,
+        usage_rows: list[dict[str, Any]],
+    ) -> Mapping[str, Any]:
         provenance = response.provenance
-        if provenance.provider != binding.provider_id or provenance.model != binding.model_id:
-            raise OrchestrationBlocked(f"resolved_model_mismatch:{role}")
-        if provenance.fallback_used:
-            raise OrchestrationBlocked(f"unattested_fallback:{role}")
-        body = dict(self._response_object(role, response.visible_text))
-        artifact = chain.write_artifact(f"{len(dispatched) + 1:02d}-{role}-output", response.visible_text)
-        artifact_hash = chain.hash_file(artifact)
         body["_torq_stage_evidence"] = {
             "role": role,
             "provider": provenance.provider,
@@ -433,16 +606,9 @@ class GovernedOrchestrator:
             entitlement = self.entitlement_ledger.window(binding.provider_id)
         else:
             entitlement = budget.window
-        quote = self.rate_table.quote(
-            binding.provider_id,
-            binding.model_id,
-            usage,
-        )
+        quote = self.rate_table.quote(binding.provider_id, binding.model_id, usage)
         billed_usd: float | None
         if self.entitlement_ledger is None:
-            # Compatibility mode retains the v0.1 configured-worst-case
-            # accounting. Production settlement mode is activated by an
-            # explicit ledger and records actual token-derived values.
             billed_usd = budget.ceiling_usd
             cost_basis = "configured_worst_case"
         else:
@@ -454,24 +620,25 @@ class GovernedOrchestrator:
                 if quote.pricing_status == "priced"
                 else "rate_unknown"
             )
-        usage_rows.append({
-            "provider": binding.provider_id,
-            "agent": role,
-            "cost_usd": billed_usd,
-            "billed_usd": billed_usd,
-            "metered_usd": quote.metered_usd,
-            "settlement": budget.settlement,
-            "pricing_status": quote.pricing_status,
-            "rate_table_version": quote.rate_table_version,
-            "preflight_ceiling_usd": budget.ceiling_usd,
-            "cost_basis": cost_basis,
-            "usage": usage,
-        })
-        dispatched.append(role)
+        usage_rows.append(
+            {
+                "provider": binding.provider_id,
+                "agent": role,
+                "cost_usd": billed_usd,
+                "billed_usd": billed_usd,
+                "metered_usd": quote.metered_usd,
+                "settlement": budget.settlement,
+                "pricing_status": quote.pricing_status,
+                "rate_table_version": quote.rate_table_version,
+                "preflight_ceiling_usd": budget.ceiling_usd,
+                "cost_basis": cost_basis,
+                "usage": usage,
+            }
+        )
         chain.append(
             "stage_completed",
             {
-                "role": role,
+                **attempt_evidence,
                 "provider": provenance.provider,
                 "model": provenance.model,
                 "fallback_used": provenance.fallback_used,
@@ -488,9 +655,48 @@ class GovernedOrchestrator:
                 ),
                 "artifact": str(artifact.relative_to(chain.root)),
                 "artifact_hash": artifact_hash,
+                "provider_dispatch": True,
             },
         )
         return body
+
+    def _start_dispatch(
+        self,
+        *,
+        role: str,
+        goal: str,
+        context: Mapping[str, Any],
+        binding: BindingSpec,
+        budget: StageBudget,
+        attempt_evidence: Mapping[str, Any],
+        chain: ReceiptChain,
+    ) -> str:
+        injected = self._consume_context(role)
+        prompt_context: dict[str, Any] = dict(context)
+        if injected:
+            prompt_context["injected_context"] = [
+                {"context_id": item["context_id"], "content": item["content"]}
+                for item in injected
+            ]
+        prompt = self._prompt(role, goal, prompt_context, binding)
+        clean_prompt, findings = self.registry.scan(prompt)
+        chain.append(
+            "stage_dispatch_started",
+            {
+                **attempt_evidence,
+                "provider": binding.provider_id,
+                "model": binding.model_id,
+                "prompt_id": binding.prompt_id,
+                "redactions": findings,
+                "context_ids": tuple(item["context_id"] for item in injected),
+                "settlement": budget.settlement,
+                "entitlement": (
+                    budget.window.as_receipt() if budget.window is not None else None
+                ),
+                "provider_dispatch": True,
+            },
+        )
+        return clean_prompt
 
     def _consume_context(self, role: str) -> list[dict[str, str]]:
         with self._context_lock:
@@ -507,6 +713,62 @@ class GovernedOrchestrator:
                     if item["context_id"] not in selected_ids
                 ]
             return selected
+
+    def _allocate_attempt(self, role: str, *, repair_cycle: int) -> StageAttempt:
+        ordinal = self._attempt_ordinals.get(role, 0) + 1
+        self._attempt_ordinals[role] = ordinal
+        return StageAttempt(
+            attempt_id="attempt-" + secrets.token_hex(12),
+            role=role,
+            ordinal=ordinal,
+            repair_cycle=repair_cycle,
+        )
+
+    @staticmethod
+    def _attempt_evidence(attempt: StageAttempt) -> dict[str, Any]:
+        return {
+            "role": attempt.role,
+            "attempt_id": attempt.attempt_id,
+            "attempt_ordinal": attempt.ordinal,
+            "repair_cycle": attempt.repair_cycle,
+        }
+
+    @staticmethod
+    def _lane_catalog(profile: ProfileSpec) -> list[dict[str, Any]]:
+        catalog: list[dict[str, Any]] = []
+        for index, role in enumerate(LANE_ORDER):
+            binding = profile.bindings[role]
+            catalog.append(
+                {
+                    "role": role,
+                    "order": index,
+                    "kind": "conditional" if role in CONDITIONAL_LANES else "core",
+                    "provider": binding.provider_id,
+                    "model": binding.model_id,
+                    "prompt_id": binding.prompt_id,
+                    "prompt_version": binding.prompt_version,
+                    "contract_id": "torq-stage-response",
+                    "contract_version": "1.0.0",
+                }
+            )
+        return catalog
+
+    def _validate_response_contract(
+        self,
+        role: str,
+        body: Mapping[str, Any],
+    ) -> None:
+        if role == "g1d":
+            self._require_value(body, "status", "design_complete", role)
+        elif role == "builder":
+            self._require_value(body, "status", "build_complete", role)
+        elif role in CONDITIONAL_LANES:
+            self._require_value(body, "status", "repair_complete", role)
+        elif role in {"g1r", "g2a"}:
+            self._require_verdict(body, role)
+            defects = body.get("defects", [])
+            if role == "g2a" and not isinstance(defects, list):
+                raise OrchestrationBlocked("malformed_audit_defects")
 
     @staticmethod
     def _usage_record(reported: Mapping[str, Any]) -> dict[str, int]:
@@ -648,14 +910,49 @@ class GovernedOrchestrator:
         *,
         repair_cycles: int = 0,
     ) -> OrchestrationResult:
-        chain.append(
-            "run_decision",
-            {
-                "status": status,
-                "provider_dispatch": bool(dispatched),
-                "repair_cycles": repair_cycles,
-            },
-        )
+        if status in {"awaiting_approval", "human_escalation"}:
+            action_id = "action-" + secrets.token_hex(12)
+            action = chain.append(
+                "action_opened",
+                {
+                    "action_id": action_id,
+                    "type": (
+                        "approval_required"
+                        if status == "awaiting_approval"
+                        else "human_escalation"
+                    ),
+                    "scope": "run",
+                    "target": "operator",
+                    "caused_by_sequence": chain.sequence,
+                    "summary": (
+                        "Approve or reject the governed build proposal."
+                        if status == "awaiting_approval"
+                        else "Review the audit escalation before closure."
+                    ),
+                    "provider_dispatch": False,
+                },
+            )
+            chain.append(
+                "run_decision",
+                {
+                    "status": "execution_complete_action_open",
+                    "outcome": status,
+                    "action_id": action_id,
+                    "action_opened_sequence": action["sequence"],
+                    "provider_dispatch": bool(dispatched),
+                    "repair_cycles": repair_cycles,
+                },
+            )
+        else:
+            chain.append(
+                "run_decision",
+                {
+                    "status": "workflow_closed",
+                    "outcome": status,
+                    "provider_dispatch": bool(dispatched),
+                    "repair_cycles": repair_cycles,
+                },
+            )
         return self._result(
             status, planned, dispatched, proposal, usage_rows,
             repair_cycles=repair_cycles,

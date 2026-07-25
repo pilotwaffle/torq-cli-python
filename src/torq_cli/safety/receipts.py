@@ -19,6 +19,10 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from torq_cli.core.redaction import PatternRegistry
+from torq_cli.domain.run_evidence import (
+    validate_receipt_payload,
+    validate_v2_receipt_contract,
+)
 
 
 _PRIVATE_KEY_NAME = ".torq-receipt-signing-key"
@@ -31,7 +35,7 @@ _SUPERVISOR_TRANSITIONS = frozenset({"stage_interrupted", "run_decision"})
 _WRITER_ROLES = frozenset({"orchestrator", "supervisor", "operator_gateway"})
 _EVIDENCE_BASES = frozenset({"observed", "derived", "submitted"})
 _SUPERVISOR_WRITES = frozenset({"stage_interrupted", "run_decision"})
-_OPERATOR_WRITES = frozenset({"context_injected", "action_resolved"})
+_OPERATOR_WRITES = frozenset({"context_injected", "action_resolved", "run_decision"})
 _RUN_CERTIFICATE_NAME = "run-certificate.json"
 _RUN_IDENTITIES_DIR = ".torq-run-identities"
 
@@ -56,6 +60,7 @@ def _writer_contract_finding(
     writer_role: object,
     evidence_basis: object,
     transition: object,
+    payload: object,
 ) -> str | None:
     if writer_role not in _WRITER_ROLES:
         return "receipt_writer_role_invalid"
@@ -65,11 +70,21 @@ def _writer_contract_finding(
         if evidence_basis != "derived" or transition not in _SUPERVISOR_WRITES:
             return "receipt_writer_unauthorized"
     elif writer_role == "operator_gateway":
-        if evidence_basis != "submitted" or transition not in _OPERATOR_WRITES:
+        expected_basis = "derived" if transition == "run_decision" else "submitted"
+        if evidence_basis != expected_basis or transition not in _OPERATOR_WRITES:
             return "receipt_writer_unauthorized"
-    elif evidence_basis == "submitted" or transition in _OPERATOR_WRITES:
+    elif evidence_basis == "submitted" or transition in {
+        "context_injected",
+        "action_resolved",
+    }:
         return "receipt_writer_unauthorized"
-    return None
+    if not isinstance(transition, str) or not isinstance(payload, Mapping):
+        return "receipt_payload_invalid"
+    return validate_receipt_payload(
+        transition,
+        payload,
+        writer_role=str(writer_role),
+    )
 
 
 def _key_id(public_key: bytes) -> str:
@@ -83,6 +98,10 @@ def _canonical(value: Mapping[str, Any]) -> bytes:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode()
+
+
+def _canonical_json(value: Mapping[str, Any]) -> str:
+    return _canonical(value).decode("ascii")
 
 
 def _windows_dll(name: str) -> Any:
@@ -701,10 +720,14 @@ class ReceiptChain:
     def hash_file(path: Path) -> str:
         return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
+    @property
+    def sequence(self) -> int:
+        """Return the last successfully appended receipt sequence."""
+        return self._sequence
+
     @staticmethod
     def _hash(payload: Mapping[str, Any]) -> str:
-        body = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        return "sha256:" + hashlib.sha256(body).hexdigest()
+        return "sha256:" + hashlib.sha256(_canonical(payload)).hexdigest()
 
     def _sanitize(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         serialized = json.dumps(payload, sort_keys=True)
@@ -733,11 +756,19 @@ class ReceiptChain:
             writer_role,
             evidence_basis,
             transition,
+            payload,
         )
         if writer_finding is not None:
             raise ValueError(writer_finding)
         with self._lock:
             clean = self._sanitize(payload)
+            payload_finding = validate_receipt_payload(
+                transition,
+                clean,
+                writer_role=writer_role,
+            )
+            if payload_finding is not None:
+                raise ValueError(payload_finding)
             self._sequence += 1
             writer_private = getattr(self.run_keys, writer_role)
             writer_public = (
@@ -767,7 +798,7 @@ class ReceiptChain:
             receipt_hash = self._hash(signed_receipt)
             envelope = {**signed_receipt, "receipt_hash": receipt_hash}
             with self.receipts_path.open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(envelope, sort_keys=True) + "\n")
+                stream.write(_canonical_json(envelope) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
             os.chmod(self.receipts_path, 0o600)
@@ -1004,6 +1035,7 @@ def verify_receipt_store(
                     writer_role,
                     evidence_basis,
                     receipt.get("transition"),
+                    receipt.get("payload"),
                 )
                 if writer_finding is not None:
                     return StoreVerification("tampered", writer_finding)
@@ -1026,6 +1058,12 @@ def verify_receipt_store(
                     )
                 except InvalidSignature:
                     return StoreVerification("tampered", "receipt_writer_signature_invalid")
+            lifecycle_finding = validate_v2_receipt_contract(
+                receipts,
+                sealed=bool(signed.get("sealed")),
+            )
+            if lifecycle_finding is not None:
+                return StoreVerification("tampered", lifecycle_finding)
         else:
             public_key = bytes.fromhex(str(signed.pop("public_key")))
             if not hmac.compare_digest(public_key, trusted_public_key):
