@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -49,6 +50,295 @@ def _sha256(value: object) -> bool:
     )
 
 
+# A receipt body is signed evidence, not a place for operator prose. The
+# producer already bounds operator input, but the verifier is the portable
+# trust boundary: a receipt written by any other path must still be refused
+# here, so the shapes below constrain what each field may carry.
+#: An opaque identifier: a short token, no spaces, no sentences.
+_OPAQUE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}")
+#: A relative artifact path. Machine-generated, so the concern is not prose but
+#: length and traversal; either separator is tolerated because existing stores
+#: were written on Windows with backslashes. `..` is refused separately.
+_ARTIFACT_PATH = re.compile(r"[A-Za-z0-9][A-Za-z0-9/\\._-]{0,255}")
+#: A well-formed MIME type: type/subtype with an optional parameter (e.g.
+#: `text/plain; charset=utf-8`), case-insensitive as the producer accepts. The
+#: whole thing is bounded so a bare `startswith` cannot smuggle a megabyte of
+#: prose behind the `text/` prefix, while a real charset parameter still passes.
+_MEDIA_TYPE = re.compile(
+    r"[A-Za-z]+/[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}"
+    r"(?:\s*;\s*[A-Za-z0-9-]{1,32}=[A-Za-z0-9._-]{1,32})?"
+)
+#: A redaction is a pattern name, uppercase and bounded — never free text.
+_REDACTION_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+#: Operator-facing labels on action and decision receipts (a summary, a
+#: resolver's name, a short finding). Bounded so the body cannot become a
+#: prose channel; content that needs room belongs in an encrypted artifact.
+MAX_ACTION_TEXT_LEN = 512
+#: An operator-supplied filename is provenance, not content.
+MAX_SOURCE_NAME_LEN = 256
+#: The redaction registry has a handful of pattern names; a receipt naming more
+#: distinct hits than the registry could produce is malformed. Generous so a
+#: real list never trips it, bounded so it cannot accumulate bytes.
+MAX_REDACTION_NAMES = 64
+#: A decision names at most the lanes that were dispatched — one per lane.
+MAX_DISPATCHED_ROLES = len(LANE_ORDER)
+#: The largest a `content_bytes` count may claim. Mirrors the 1 MiB ingress cap
+#: in application/artifact_extraction.py (MAX_ARTIFACT_BYTES); kept local rather
+#: than imported because domain must not depend on application.
+MAX_CONTENT_BYTES = 1_048_576
+
+
+def _matches(pattern: re.Pattern[str], value: object) -> bool:
+    return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+#: A label is one line of printable text. Newlines, tabs, and other control
+#: characters are refused so a bounded field cannot carry a formatted document
+#: within its length budget.
+_CONTROL_CHARS = frozenset(chr(c) for c in range(0x20)) | {"\x7f"}
+
+
+def _bounded_label(value: object, limit: int = MAX_ACTION_TEXT_LEN) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= limit
+        and _CONTROL_CHARS.isdisjoint(value)
+    )
+
+
+def _bounded_content_bytes(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_CONTENT_BYTES
+    )
+
+
+def _redaction_names(value: object) -> bool:
+    # A tuple pre-append, a list after the JSON round-trip; a str is refused so
+    # prose cannot ride through one character at a time. The list is also
+    # length-capped: the registry has a handful of pattern names, so a long
+    # list is not evidence — it is bytes accumulating one valid token at a time.
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_REDACTION_NAMES:
+        return False
+    return all(_matches(_REDACTION_NAME, item) for item in value)
+
+
+def _extra_keys(payload: Mapping[str, Any], allowed: frozenset[str]) -> bool:
+    """True when the payload carries a key outside the allowed set."""
+    return bool(set(payload) - allowed)
+
+
+#: No single string value anywhere in a receipt may exceed this. A receipt
+#: records identifiers, hashes, enums, short labels, and bounded operator
+#: labels — none longer than this. A value past it is a document, and documents
+#: belong in the encrypted artifact. This is the floor under every transition,
+#: including those (run_planned, stage_*, repair_routed, run_abandoned) that no
+#: operator ingress reaches: it costs nothing and closes the class against a
+#: writer that is buggy or compromised, not only against operator input.
+MAX_RECEIPT_STRING = 4096
+#: Structural fan-out cap so a payload cannot smuggle bytes as a giant list or a
+#: deeply nested structure of otherwise-valid short values.
+MAX_RECEIPT_ITEMS = 512
+MAX_RECEIPT_DEPTH = 8
+
+
+def _oversized_value(value: object, *, depth: int = 0) -> bool:
+    """True when any string is too long, or the structure is too wide/deep."""
+    if depth > MAX_RECEIPT_DEPTH:
+        return True
+    if isinstance(value, str):
+        return len(value) > MAX_RECEIPT_STRING
+    if isinstance(value, Mapping):
+        if len(value) > MAX_RECEIPT_ITEMS:
+            return True
+        return any(
+            _oversized_value(item, depth=depth + 1) for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        if len(value) > MAX_RECEIPT_ITEMS:
+            return True
+        return any(_oversized_value(item, depth=depth + 1) for item in value)
+    return False
+
+
+#: Every key each governed receipt may carry. An undeclared key is refused with
+#: the transition's own `*_invalid` finding, so a renamed field cannot smuggle
+#: what the value schema keeps out of the declared ones.
+#:
+#: These sets must stay in step with what the producer emits in
+#: application/orchestrator.py (inject_context / inject_artifact) and the
+#: supervisor/recovery paths. Drift is not silent: every happy-path producer
+#: test appends a real receipt and then verifies, so a forgotten key trips
+#: `_extra_keys` and those tests fail — but add the key here when you add it
+#: there.
+COMMAND_ACCEPTED_KEYS = frozenset(
+    {
+        "command_id",
+        "command_type",
+        "context_id",
+        "target_role",
+        "route",
+        "artifact",
+        "artifact_hash",
+        "media_type",
+        "source_name",
+        "content_bytes",
+        "redactions",
+        "extraction",
+        "direct_route_confirmed",
+        "earliest_eligible_attempt",
+        "provider_dispatch",
+    }
+)
+COMMAND_REJECTED_KEYS = frozenset(
+    {
+        "command_id",
+        "command_type",
+        "target_role",
+        "finding",
+        # A rejection records the input it refused, including the operator's
+        # `media_type` and `source_name`. Those are bounded below rather than
+        # dropped, so the rejection stays truthful without becoming a channel.
+        "media_type",
+        "source_name",
+        "earliest_eligible_attempt",
+        "content_bytes",
+        "provider_dispatch",
+    }
+)
+CONTEXT_INJECTED_KEYS = frozenset(
+    {
+        "command_id",
+        "command_type",
+        "context_id",
+        "target_role",
+        "route",
+        "artifact",
+        "artifact_hash",
+        "media_type",
+        "source_name",
+        "content_bytes",
+        "redactions",
+        # Provenance carried forward from the accepted receipt so the verifier
+        # can prove the applied record matches what was acknowledged. These are
+        # structured, not prose, and are checked field-by-field downstream.
+        "extraction",
+        "direct_route_confirmed",
+        "accepted_sequence",
+        "effective_attempt",
+        "provider_dispatch",
+    }
+)
+COMMAND_UNAPPLIED_KEYS = frozenset(
+    {
+        "command_id",
+        "accepted_sequence",
+        "target_role",
+        "reason",
+        "last_covered_sequence",
+        "provider_dispatch",
+    }
+)
+RUN_REPLANNED_KEYS = frozenset(
+    {
+        "command_id",
+        "plan_contract",
+        "plan_revision",
+        "previous_replan_sequence",
+        "accepted_sequence",
+        "reason",
+        "old_plan_hash",
+        "new_plan_hash",
+        "affected_future_attempts",
+        "provider_dispatch",
+    }
+)
+ACTION_OPENED_KEYS = frozenset(
+    {"action_id", "type", "scope", "target", "summary", "caused_by_sequence", "provider_dispatch"}
+)
+ACTION_RESOLVED_KEYS = frozenset(
+    {"action_id", "resolution", "resolver_identity", "opened_sequence", "provider_dispatch"}
+)
+RUN_PLANNED_KEYS = frozenset(
+    {
+        "mode",
+        "profile_id",
+        "strategy_id",
+        "planned_roles",
+        "lane_catalog",
+        "plan_contract",
+        "plan_hash",
+        "rate_table_version",
+        "rate_table_hash",
+    }
+)
+RUN_ABANDONED_KEYS = frozenset(
+    {"attempt_ids", "last_covered_sequence", "operator_assertion"}
+)
+#: Every key any `run_decision` may carry, across all three writers.
+RUN_DECISION_KEYS = frozenset(
+    {
+        "status",
+        "provider_dispatch",
+        "reason",
+        "outcome",
+        "next_action",
+        "stage",
+        "dispatched_roles",
+        "repair_cycles",
+        "action_id",
+        "action_opened_sequence",
+        "action_resolved_sequence",
+        "interruption_sequence",
+    }
+)
+#: Free-text fields a decision receipt may carry; each is a bounded label.
+_DECISION_TEXT_FIELDS = ("reason", "outcome", "next_action", "stage")
+
+
+def _command_values_ok(payload: Mapping[str, Any]) -> bool:
+    """Whether every present command field carries a well-shaped value.
+
+    The caller reports a transition-level finding, so this returns only whether
+    the values pass, not which one failed. Each field is checked only when
+    present: an absent optional field is fine, a present malformed one is not.
+    """
+    artifact = payload.get("artifact")
+    artifact_ok = _matches(_ARTIFACT_PATH, artifact) and ".." not in str(artifact)
+    source_name = payload.get("source_name")
+    # An absent filename is provenance the operator simply did not give; only a
+    # present one must be a bounded label.
+    source_ok = source_name is None or _bounded_label(source_name, MAX_SOURCE_NAME_LEN)
+    checks: tuple[tuple[str, bool], ...] = (
+        ("command_id", _matches(_OPAQUE_ID, payload.get("command_id"))),
+        ("context_id", _matches(_OPAQUE_ID, payload.get("context_id"))),
+        ("artifact", artifact_ok),
+        ("media_type", _matches(_MEDIA_TYPE, payload.get("media_type"))),
+        ("source_name", source_ok),
+        ("redactions", _redaction_names(payload.get("redactions"))),
+        ("content_bytes", _bounded_content_bytes(payload.get("content_bytes"))),
+    )
+    return all(ok for field, ok in checks if field in payload)
+
+
+def _decision_text_finding(payload: Mapping[str, Any]) -> str | None:
+    """Bound the operator-facing strings a decision receipt may carry."""
+    if _extra_keys(payload, RUN_DECISION_KEYS):
+        return "run_decision_text_invalid"
+    for field in _DECISION_TEXT_FIELDS:
+        if field in payload and not _bounded_label(payload.get(field)):
+            return "run_decision_text_invalid"
+    roles = payload.get("dispatched_roles")
+    if roles is not None and not (
+        isinstance(roles, (list, tuple))
+        and len(roles) <= MAX_DISPATCHED_ROLES
+        and all(role in LANE_ORDER for role in roles)
+    ):
+        return "run_decision_text_invalid"
+    return None
+
+
 def validate_receipt_payload(
     transition: str,
     payload: Mapping[str, Any],
@@ -56,6 +346,12 @@ def validate_receipt_payload(
     writer_role: str,
 ) -> str | None:
     """Validate the local shape that can be checked before append."""
+    # The floor under every transition: no receipt, whatever its type, may
+    # carry a document-sized string or an accumulating structure. Transitions
+    # with their own allowlist bound their fields more tightly than this; the
+    # floor catches the rest, including the writer-only lifecycle transitions.
+    if _oversized_value(dict(payload)):
+        return "receipt_value_oversized"
     if transition in ATTEMPT_TRANSITIONS:
         if not isinstance(payload.get("role"), str):
             return "attempt_role_invalid"
@@ -83,6 +379,8 @@ def validate_receipt_payload(
         }:
             return "attempt_dispatch_invalid"
     elif transition == "run_planned":
+        if _extra_keys(payload, RUN_PLANNED_KEYS):
+            return "lane_catalog_invalid"
         catalog = payload.get("lane_catalog")
         if not isinstance(catalog, list) or len(catalog) != len(LANE_ORDER):
             return "lane_catalog_invalid"
@@ -114,6 +412,11 @@ def validate_receipt_payload(
         if not _positive_int(payload.get("cycle")):
             return "repair_route_cycle_invalid"
     elif transition == "action_opened":
+        # An undeclared key is refused, and the operator-facing strings are
+        # bounded labels, not documents: a signed receipt is no place for
+        # unbounded prose whichever transition carries it.
+        if _extra_keys(payload, ACTION_OPENED_KEYS):
+            return "action_opened_invalid"
         required: tuple[str, ...] = (
             "action_id",
             "type",
@@ -121,11 +424,13 @@ def validate_receipt_payload(
             "target",
             "summary",
         )
-        if any(not isinstance(payload.get(field), str) for field in required):
+        if any(not _bounded_label(payload.get(field)) for field in required):
             return "action_opened_invalid"
         if not _positive_int(payload.get("caused_by_sequence")):
             return "action_opened_invalid"
     elif transition == "command_accepted":
+        if _extra_keys(payload, COMMAND_ACCEPTED_KEYS):
+            return "command_accept_invalid"
         required = (
             "command_id",
             "command_type",
@@ -141,13 +446,22 @@ def validate_receipt_payload(
             for field in required
         ):
             return "command_accept_invalid"
+        # Bound the operator-influenced values, not just their presence: an id
+        # is an opaque token, a hash is a hash, media_type is a MIME token, and
+        # redactions are pattern names — none of them a place for prose.
+        if not _command_values_ok(payload):
+            return "command_accept_invalid"
+        if not _sha256(payload.get("artifact_hash")):
+            return "command_accept_invalid"
         if payload.get("command_type") not in {"context", "artifact"}:
             return "command_accept_invalid"
         extraction = payload.get("extraction")
         if payload.get("command_type") == "artifact" and (
             not isinstance(extraction, Mapping)
+            or set(extraction)
+            != {"contract_version", "extractor", "source_bytes", "extracted_bytes"}
             or extraction.get("contract_version") != "1.0.0"
-            or not isinstance(extraction.get("extractor"), str)
+            or not _bounded_label(extraction.get("extractor"))
             or not _positive_int(extraction.get("source_bytes"))
             or not _positive_int(extraction.get("extracted_bytes"))
         ):
@@ -163,6 +477,7 @@ def validate_receipt_payload(
         boundary = payload.get("earliest_eligible_attempt")
         if (
             not isinstance(boundary, Mapping)
+            or set(boundary) != {"kind"}
             or boundary.get("kind") != "attempt_created_after_acknowledgement"
         ):
             return "command_boundary_invalid"
@@ -171,21 +486,33 @@ def validate_receipt_payload(
         if payload.get("provider_dispatch") is not False:
             return "command_accept_invalid"
     elif transition == "command_rejected":
+        if _extra_keys(payload, COMMAND_REJECTED_KEYS):
+            return "command_rejection_invalid"
         if (
-            not isinstance(payload.get("command_id"), str)
-            or not payload.get("command_id")
+            not _matches(_OPAQUE_ID, payload.get("command_id"))
             or payload.get("command_type") not in {"context", "artifact"}
-            or not isinstance(payload.get("finding"), str)
-            or not payload.get("finding")
+            or not _bounded_label(payload.get("finding"))
             or payload.get("earliest_eligible_attempt") is not None
             or payload.get("provider_dispatch") is not False
             or not _nonnegative_int(payload.get("content_bytes"))
         ):
             return "command_rejection_invalid"
-        target = payload.get("target_role")
-        if target is not None and not isinstance(target, str):
+        # A rejection records the input it refused, and the reason may be that
+        # the input was itself malformed or oversized — an unknown target, a bad
+        # media type, a too-large byte count. So the echoed fields are held only
+        # to a length bound, not to accepted-grade validity: a rejection can
+        # record a bad value but not a megabyte of prose.
+        echoed = ("media_type", "source_name", "target_role")
+        if any(
+            field in payload
+            and payload.get(field) is not None
+            and not _bounded_label(payload.get(field))
+            for field in echoed
+        ):
             return "command_rejection_invalid"
     elif transition == "context_injected" and "command_id" in payload:
+        if _extra_keys(payload, CONTEXT_INJECTED_KEYS):
+            return "command_effective_attempt_invalid"
         required = (
             "command_id",
             "context_id",
@@ -200,8 +527,12 @@ def validate_receipt_payload(
                 not isinstance(payload.get(field), str) or not payload.get(field)
                 for field in required
             )
+            or not _command_values_ok(payload)
+            or not _sha256(payload.get("artifact_hash"))
             or not _positive_int(payload.get("accepted_sequence"))
             or not isinstance(effective, Mapping)
+            or set(effective)
+            != {"role", "attempt_id", "attempt_ordinal", "attempt_created_sequence"}
             or not isinstance(effective.get("role"), str)
             or not isinstance(effective.get("attempt_id"), str)
             or not _positive_int(effective.get("attempt_ordinal"))
@@ -210,9 +541,11 @@ def validate_receipt_payload(
         ):
             return "command_effective_attempt_invalid"
     elif transition == "command_unapplied":
+        if _extra_keys(payload, COMMAND_UNAPPLIED_KEYS):
+            return "command_unapplied_invalid"
+        target = payload.get("target_role")
         if (
-            not isinstance(payload.get("command_id"), str)
-            or not payload.get("command_id")
+            not _matches(_OPAQUE_ID, payload.get("command_id"))
             or not _positive_int(payload.get("accepted_sequence"))
             or payload.get("reason") not in {
                 "no_eligible_future_attempt",
@@ -220,13 +553,15 @@ def validate_receipt_payload(
             }
             or not _positive_int(payload.get("last_covered_sequence"))
             or payload.get("provider_dispatch") is not False
+            or (target is not None and target not in {"lead", *LANE_ORDER})
         ):
             return "command_unapplied_invalid"
     elif transition == "run_replanned":
+        if _extra_keys(payload, RUN_REPLANNED_KEYS):
+            return "run_replanned_invalid"
         affected = payload.get("affected_future_attempts")
         if (
-            not isinstance(payload.get("command_id"), str)
-            or not payload.get("command_id")
+            not _matches(_OPAQUE_ID, payload.get("command_id"))
             or payload.get("plan_contract") != PLAN_CONTRACT
             or not _positive_int(payload.get("plan_revision"))
             or payload.get("previous_replan_sequence") is not None
@@ -245,6 +580,8 @@ def validate_receipt_payload(
         candidate = affected[0]
         if (
             not isinstance(candidate, Mapping)
+            or set(candidate)
+            != {"role", "attempt_id", "attempt_ordinal", "attempt_created_sequence"}
             or candidate.get("role") not in LANE_ORDER
             or not isinstance(candidate.get("attempt_id"), str)
             or not _positive_int(candidate.get("attempt_ordinal"))
@@ -261,8 +598,10 @@ def validate_receipt_payload(
         if payload.get("new_plan_hash") != plan_hash(body):
             return "run_replanned_hash_invalid"
     elif transition == "action_resolved":
+        if _extra_keys(payload, ACTION_RESOLVED_KEYS):
+            return "action_resolved_invalid"
         required = ("action_id", "resolution", "resolver_identity")
-        if any(not isinstance(payload.get(field), str) for field in required):
+        if any(not _bounded_label(payload.get(field)) for field in required):
             return "action_resolved_invalid"
         if not _positive_int(payload.get("opened_sequence")):
             return "action_resolved_invalid"
@@ -271,6 +610,8 @@ def validate_receipt_payload(
             return "supervisor_decision_invalid"
         if not _positive_int(payload.get("interruption_sequence")):
             return "supervisor_decision_invalid"
+        if _decision_text_finding(payload) is not None:
+            return "supervisor_decision_invalid"
     elif transition == "run_decision" and writer_role == "operator_gateway":
         if payload.get("status") != "workflow_closed":
             return "operator_decision_invalid"
@@ -278,7 +619,15 @@ def validate_receipt_payload(
             return "operator_decision_invalid"
         if not _positive_int(payload.get("action_resolved_sequence")):
             return "operator_decision_invalid"
+        if _decision_text_finding(payload) is not None:
+            return "operator_decision_invalid"
+    elif transition == "run_decision":
+        finding = _decision_text_finding(payload)
+        if finding is not None:
+            return finding
     elif transition == "run_abandoned" and writer_role == "recovery":
+        if _extra_keys(payload, RUN_ABANDONED_KEYS):
+            return "run_abandoned_invalid"
         attempt_ids = payload.get("attempt_ids")
         if (
             not isinstance(attempt_ids, list)
