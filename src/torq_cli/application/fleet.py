@@ -76,6 +76,7 @@ def reduce_fleet_snapshot(
     manifest: Mapping[str, Any],
     *,
     verification_state: str,
+    operational_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fold one stable receipt snapshot into UI-facing normalized state."""
     lane_rows: dict[str, dict[str, Any]] = {}
@@ -91,6 +92,7 @@ def reduce_fleet_snapshot(
     decision_writer: dict[str, str] | None = None
     context_injections = 0
     reduction_errors: list[str] = []
+    abandoned_attempts: set[str] = set()
 
     def lane(role: str) -> dict[str, Any]:
         if role not in lane_rows:
@@ -177,6 +179,14 @@ def reduce_fleet_snapshot(
             decision_reason = str(raw_reason) if raw_reason is not None else None
             decision_writer = writer
             continue
+        if transition == "run_abandoned":
+            raw_attempts = payload.get("attempt_ids")
+            if isinstance(raw_attempts, list):
+                abandoned_attempts.update(str(value) for value in raw_attempts)
+            run_status = "workflow_abandoned"
+            run_outcome = "abandoned"
+            decision_writer = writer
+            continue
         if transition == "context_injected":
             context_injections += 1
             target = payload.get("target_role")
@@ -244,6 +254,7 @@ def reduce_fleet_snapshot(
         attempt_id = str(payload.get("attempt_id", ""))
         attempt: dict[str, Any] | None
         if transition == "stage_attempt_created":
+            row["state"] = "running"
             attempt = {
                 "attempt_id": attempt_id,
                 "attempt_ordinal": payload.get("attempt_ordinal"),
@@ -328,7 +339,7 @@ def reduce_fleet_snapshot(
         attempts: list[dict[str, Any]] = row["attempts"]
         if not attempts or attempts[-1]["terminal_sequence"] is not None:
             continue
-        if verification_state == "incomplete":
+        if str(attempts[-1]["attempt_id"]) in abandoned_attempts:
             row["state"] = "abandoned"
             attempts[-1]["state"] = "abandoned"
             attempts[-1]["reason"] = "Attempt outcome unrecorded"
@@ -368,6 +379,8 @@ def reduce_fleet_snapshot(
         execution_state, workflow_state = "complete", "action_open"
     elif run_status == "workflow_closed":
         execution_state, workflow_state = "complete", "closed"
+    elif run_status == "workflow_abandoned":
+        execution_state, workflow_state = "abandoned", "abandoned"
     elif run_status == "blocked":
         execution_state, workflow_state = "blocked", "closed"
     else:
@@ -379,6 +392,11 @@ def reduce_fleet_snapshot(
         if verification_state == "verified"
         else verification_state
     )
+    orphaned_roles: list[str] = []
+    if isinstance(operational_state, Mapping):
+        raw_orphans = operational_state.get("orphaned_roles", ())
+        if isinstance(raw_orphans, (list, tuple)):
+            orphaned_roles = [str(value) for value in raw_orphans]
     return {
         "schema": "torq-fleet-snapshot-v2",
         "verification": {
@@ -409,6 +427,10 @@ def reduce_fleet_snapshot(
                 else "receipt_timestamps_unavailable"
             ),
             "context_injections": context_injections,
+            "operational_annotations": {
+                "orphaned_roles": orphaned_roles,
+                "recovery_required": bool(orphaned_roles),
+            },
         },
         "summary": {
             **counts,
@@ -430,22 +452,28 @@ class FleetProjector:
         run_root: Path,
         *,
         trusted_public_key: bytes | None = None,
+        operational_state: Mapping[str, Any] | None = None,
     ) -> None:
         self.run_root = run_root
         self.trusted_public_key = trusted_public_key
+        self.operational_state = operational_state
 
     def snapshot(self) -> dict[str, Any]:
         verification = verify_receipt_store(
             self.run_root,
             trusted_public_key=self.trusted_public_key,
         )
-        if verification.status != "verified":
+        if verification.status not in {"verified", "live_catching_up"}:
             return _unavailable_snapshot(verification)
         try:
             manifest_bytes = (self.run_root / "terminal-manifest.json").read_bytes()
             receipt_bytes = (self.run_root / "receipts.jsonl").read_bytes()
             manifest = json.loads(manifest_bytes)
-            receipts = [json.loads(line) for line in receipt_bytes.splitlines()]
+            all_lines = receipt_bytes.splitlines()
+            count = manifest.get("receipt_count")
+            if not isinstance(count, int) or isinstance(count, bool):
+                raise ValueError("manifest_receipt_count_invalid")
+            receipts = [json.loads(line) for line in all_lines[:count]]
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return _unavailable_snapshot(
                 StoreVerification("incomplete", "evidence_unreadable")
@@ -461,7 +489,8 @@ class FleetProjector:
         return reduce_fleet_snapshot(
             receipts,
             manifest,
-            verification_state="verified",
+            verification_state=verification.status,
+            operational_state=self.operational_state,
         )
 
 

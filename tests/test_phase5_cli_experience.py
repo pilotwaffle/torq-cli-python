@@ -115,4 +115,4 @@ def test_evidence_verify_names_tamper_and_incomplete_without_network(tmp_path: P
     receipt_path.write_text("", encoding="utf-8")
     assert verify_receipt_store(chain.root).status == "incomplete"
     manifest.write_text("{}", encoding="utf-8")
-    assert verify_receipt_store(chain.root).status == "incomplete"
+    assert verify_receipt_store(chain.root).status == "unreadable"

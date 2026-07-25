@@ -12,6 +12,7 @@ from typing import Any
 from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import ProfileSpec, load_registry
+from torq_cli.safety.evidence_broker import BrokeredReceiptChain, EvidenceBroker
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
@@ -75,13 +76,14 @@ class RunController:
             raise ValueError("policy_version_mismatch")
         mode = "live" if live else "dry_run"
         run_id = "run-" + uuid.uuid4().hex
-        chain = ReceiptChain(
+        key_chain = ReceiptChain(
             self.run_root,
             run_id,
             FileRunKeyStore(self.run_root),
             profile_version=identity.profile_version,
             policy_version=identity.policy_version,
         )
+        chain = BrokeredReceiptChain(EvidenceBroker(key_chain))
         chain.append(
             "run_attested",
             {

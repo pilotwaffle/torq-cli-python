@@ -206,7 +206,7 @@ def test_preflight_refusal_never_claims_transport_attempt(tmp_path: Path) -> Non
     assert verify_receipt_store(chain.root).status == "verified"
 
 
-def test_incomplete_open_attempt_reduces_to_abandoned_but_sealed_is_error() -> None:
+def test_live_open_attempt_stays_running_but_sealed_is_error() -> None:
     receipts = [
         {
             "schema_version": "2.0.0",
@@ -226,10 +226,10 @@ def test_incomplete_open_attempt_reduces_to_abandoned_but_sealed_is_error() -> N
         }
     ]
 
-    incomplete = reduce_fleet_snapshot(
+    live = reduce_fleet_snapshot(
         receipts,
         {"run_id": "run", "sealed": False, "receipt_count": 1},
-        verification_state="incomplete",
+        verification_state="verified",
     )
     sealed = reduce_fleet_snapshot(
         receipts,
@@ -237,8 +237,8 @@ def test_incomplete_open_attempt_reduces_to_abandoned_but_sealed_is_error() -> N
         verification_state="verified",
     )
 
-    assert incomplete["lanes"][0]["state"] == "abandoned"
-    assert incomplete["data_status"] == "available"
+    assert live["lanes"][0]["state"] == "running"
+    assert live["data_status"] == "available"
     assert sealed["data_status"] == "reduction_error"
     assert sealed["summary"]["reduction_errors"] == ["attempt_terminal_missing"]
 

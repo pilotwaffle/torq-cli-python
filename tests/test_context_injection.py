@@ -17,7 +17,7 @@ from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.core.redaction import RedactionBlocked
 from torq_cli.domain.registry_schema import load_registry
-from torq_cli.interfaces.fleet_http import create_fleet_server
+from torq_cli.interfaces.fleet_http import FleetSessionManager, create_fleet_server
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
@@ -194,10 +194,14 @@ def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path
     )
     orchestrator = GovernedOrchestrator()
     injector = GovernedContextInjector(orchestrator, chain)
+    sessions = FleetSessionManager()
+    token = sessions.exchange(sessions.bootstrap_nonce)
+    cookie = f"torq_fleet_session={token}"
     server = create_fleet_server(
         FleetProjector(chain.root),
         port=0,
         context_injector=injector,
+        sessions=sessions,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -222,6 +226,7 @@ def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path
             headers={"Content-Type": "application/json", "Origin": "https://evil.example"},
             method="POST",
         )
+        denied.add_header("Cookie", cookie)
         with pytest.raises(urllib.error.HTTPError) as blocked:
             urllib.request.urlopen(denied)
         assert blocked.value.code == 403
@@ -232,6 +237,7 @@ def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path
             headers={
                 "Content-Type": "application/json",
                 "Origin": f"http://127.0.0.1:{port}",
+                "Cookie": cookie,
             },
             method="POST",
         )

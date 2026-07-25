@@ -135,7 +135,11 @@ def test_receipt_verifier_rejects_artifact_path_escape_before_read(tmp_path: Pat
     evidence_root = tmp_path / "evidence"
     chain = ReceiptChain(evidence_root, "run-escape", FileRunKeyStore(evidence_root), profile_version="1", policy_version="3.1.3")
     chain.append("audit", {"artifact": "../../outside.bin", "artifact_hash": chain.hash_file(outside)})
-    chain.seal()
+    with pytest.raises(
+        ValueError,
+        match="receipt_store_not_writable:artifact_path_escape",
+    ):
+        chain.seal()
     result = verify_receipt_store(chain.root)
     assert result.status == "tampered"
     assert result.finding == "artifact_path_escape"

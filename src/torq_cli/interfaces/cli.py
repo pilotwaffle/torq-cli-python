@@ -273,9 +273,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 3
             host, port = server.server_address[:2]
             host_text = host.decode("ascii") if isinstance(host, bytes) else str(host)
+            bootstrap_nonce = str(getattr(server, "fleet_bootstrap_nonce"))
             print(json.dumps({
                 "status": "serving",
-                "url": f"http://{host_text}:{port}/api/v1/fleet",
+                "url": (
+                    f"http://{host_text}:{port}/bootstrap"
+                    f"?nonce={bootstrap_nonce}"
+                ),
             }, sort_keys=True), flush=True)
             try:
                 server.serve_forever()

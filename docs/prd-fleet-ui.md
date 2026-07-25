@@ -1,6 +1,6 @@
 # PRD - TORQ Fleet UI
 
-Status: **approved product direction; implementation hold.** Revised 2026-07-24, Rev 5.3.
+Status: **Release 0 backend implemented; protected-main merge pending.** Revised 2026-07-25, Rev 5.4.
 
 Production UI work begins only after the Release 0 gate in Section 11 passes.
 Feature-branch code is implementation evidence, not proof that the complete
@@ -27,6 +27,11 @@ Rev 5.3 changes no requirement. It reconciles the document with `origin/main` at
 56b8bff, where PRs #15-#19 landed seven of the properties this PRD listed as
 outstanding, and re-derives every code citation against that commit. Changes are
 listed in Section 19.
+
+Rev 5.4 implements build-order steps 0-7, closes canonical-encoding decision 6
+in favor of the pinned standard-library encoder, and adds the Release 0
+adversarial fixtures. Fleet Read UI implementation remains the next release
+step; Release 2 accounting and Release 3 control dependencies remain gated.
 
 Depends on:
 
@@ -825,9 +830,9 @@ affected future attempts. Prior evidence is immutable.
 
 ## 11. Dependencies and release gates
 
-Status is relative to `origin/main` at **56b8bff** (PRs #15-#19, merged
-2026-07-25), verified by reading that tree rather than the local checkout. Line
-citations throughout this document refer to the same commit.
+Status is relative to the Release 0 implementation branch based on protected
+`main` at **ea70760**. Local quality, adversarial, headless, package, and wheel
+checks passed on 2026-07-25; protected-main CI remains the merge gate.
 
 | Dependency | Status |
 |---|---|
@@ -845,22 +850,22 @@ citations throughout this document refer to the same commit.
 | Manifest-before-store read order (VC-3) | **landed** — `fleet.py:445-446` |
 | Exact Host validation on the HTTP surface | **landed** — `fleet_http.py:133-144` |
 | Single canonical JSON encoder, receipt path (TC-2) | **landed** — `_canonical` at `receipts.py:94-100` serves hash `:729` and store `:801` |
-| Canonical encoder extended to manifest and certificate (TC-2) | not landed; both sign canonical bytes but persist `json.dumps(..., sort_keys=True)` (`receipts.py:710`, `:847`), and `certificate_hash` `:838` digests the persisted form |
-| Local evidence broker holding all keys (TC-7) | not landed; no broker exists — zero occurrences in the tree |
-| Broker capability issuance and binding (TC-7a) | not landed |
-| Authenticated artifact encryption (TC-5) | not landed; cipher is still unauthenticated HMAC-keystream XOR (`receipts.py:812-822`) |
-| Recovery identity, `run_abandoned`, `workflow_abandoned` (TC-1, SR-4a/b, LC-7a) | not landed; `_WRITER_ROLES` (`receipts.py:35`) holds exactly three roles |
-| Machine-readable transition matrix and generated conformance tests (TC-4a) | not landed; rules are hand-written frozensets and branches (`receipts.py:59-87`, `run_evidence.py:117-239`) |
-| Crash-durable commit (WC-1) | not landed; logical order present, no manifest or directory fsync (`receipts.py:847-849`) |
-| Covered-prefix projection (VC-3) | not landed; `fleet.py:455` still requires exact count equality, which reports a false mismatch under concurrent append |
+| Canonical encoder extended to manifest and certificate (TC-2) | implemented; receipt, certificate, and manifest storage use the pinned canonical encoder and packaged oracle |
+| Local evidence broker holding all keys (TC-7) | implemented; production run creation exposes a keyless broker facade |
+| Broker capability issuance and binding (TC-7a) | implemented; role-bound, process-bound, expiring, single-use grants fail closed on replay |
+| Authenticated artifact encryption (TC-5) | implemented with AES-256-GCM and run ID as associated data |
+| Recovery identity, `run_abandoned`, `workflow_abandoned` (TC-1, SR-4a/b, LC-7a) | implemented and certified at run creation |
+| Machine-readable transition matrix and generated conformance tests (TC-4a) | implemented in `domain/evidence_transitions.py`; append and verification share it |
+| Crash-durable commit (WC-1) | implemented with receipt fsync, canonical temporary manifest fsync, atomic replace, and directory fsync |
+| Covered-prefix projection (VC-3) | implemented; uncovered tails report `live_catching_up` and do not enter reduction |
 | Registry anti-rollback head anchor (AR-4c) | not landed |
-| Orphan annotation (SR-3a) | not landed |
-| Abandoned-attempt reduction (LC-1, VC-6, VC-7) | not landed |
+| Orphan annotation (SR-3a) | implemented as non-evidentiary supervisor state |
+| Abandoned-attempt reduction (LC-1, VC-6, VC-7) | implemented only through certified `run_abandoned` evidence |
 | Append-only dispatch registry (AR-4a) | not landed; no record survives a deleted run |
 | Coverage-gated entitlement preflight (AR-4b) | not landed |
-| Capability bootstrap and session contract (SR-5a) | not landed; no route carries a token |
-| Operator action lifecycle | not landed |
-| Local supervisor and interruption evidence | not landed |
+| Capability bootstrap and session contract (SR-5a) | implemented; a single-use URL nonce exchanges for an HttpOnly, expiring, rotating session |
+| Operator action lifecycle | implemented with linked resolution and operator-gateway closure |
+| Local supervisor and interruption evidence | implemented with atomic non-evidentiary state and role-limited interruption/recovery writes |
 | Reservation expiry/reconciliation and cross-run aggregation | not landed |
 | Binary extraction/sanitization | not landed |
 
@@ -917,6 +922,9 @@ reconciliation history, and resolved provider routing. Release 3 requires the
 command lifecycle, sanitizer, attempt boundaries, and replan receipts.
 
 ## 12. Build order
+
+Rev 5.4 implements and locally verifies steps 0-7. Step 8, Fleet Read UI, is
+next. Steps 9-10 remain gated as Release 2 and Release 3 work.
 
 0. One pinned canonical JSON encoder shared by hashing, signing, and storage.
    Everything below signs over its output, so it lands first. Partly done:
@@ -1048,12 +1056,10 @@ command lifecycle, sanitizer, attempt boundaries, and replan receipts.
 3. Default Qwen Token Plan region when configuration declares none.
 4. Whether operator-declared quota limits are sufficient for initial Release 2.
 5. Rolling-manifest cadence and maximum visible verification lag.
-6. Canonical JSON: RFC 8785 (JCS), which is externally specified and gives
-   third-party verifiers an off-the-shelf implementation, or the pinned
-   standard-library `json.dumps` triple, which adds no dependency to a package
-   whose current dependency set is three. Either satisfies TC-2; the choice is
-   whether external verifiability is worth a fourth dependency. **Must be
-   settled before schema v2 freezes.**
+6. **Settled in Rev 5.4:** canonical JSON uses the pinned standard-library
+   `json.dumps(value, sort_keys=True, separators=(",", ":"),
+   ensure_ascii=True)` encoding. A packaged non-ASCII oracle pins the exact
+   bytes and SHA-256 without adding a fourth runtime dependency.
 7. Broker key custody and identity: OS keychain (reusing the `keyring` backend
    already carrying provider credentials), an encrypted keystore the broker
    unlocks at start, or a separate OS user under which the broker runs. Only the

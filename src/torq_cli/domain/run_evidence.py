@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from torq_cli.domain.evidence_transitions import transition_authority_finding
+
 
 ATTEMPT_TRANSITIONS = frozenset(
     {
@@ -111,6 +113,17 @@ def validate_receipt_payload(
             return "operator_decision_invalid"
         if not _positive_int(payload.get("action_resolved_sequence")):
             return "operator_decision_invalid"
+    elif transition == "run_abandoned" and writer_role == "recovery":
+        attempt_ids = payload.get("attempt_ids")
+        if (
+            not isinstance(attempt_ids, list)
+            or not attempt_ids
+            or any(not isinstance(value, str) or not value for value in attempt_ids)
+            or len(set(attempt_ids)) != len(attempt_ids)
+            or not _positive_int(payload.get("last_covered_sequence"))
+            or payload.get("operator_assertion") != "no_live_worker"
+        ):
+            return "run_abandoned_invalid"
     return None
 
 
@@ -126,8 +139,11 @@ def validate_v2_receipt_contract(
     open_actions: dict[str, int] = {}
     resolved_actions: dict[int, str] = {}
     interruptions: set[int] = set()
+    terminal_decision = False
+    execution_complete_action_open = False
     saw_run_planned = False
     saw_catalog = False
+    catalog_roles: set[str] = set()
 
     for receipt in receipts:
         transition = str(receipt.get("transition", ""))
@@ -138,6 +154,16 @@ def validate_v2_receipt_contract(
             return "receipt_payload_invalid"
         assert isinstance(sequence, int) and not isinstance(sequence, bool)
         sequence_number = sequence
+        if terminal_decision:
+            return "receipt_after_terminal_decision"
+        if "evidence_basis" in receipt:
+            authority_finding = transition_authority_finding(
+                writer_role,
+                transition,
+                receipt.get("evidence_basis"),
+            )
+            if authority_finding is not None:
+                return authority_finding
         finding = validate_receipt_payload(
             transition,
             payload,
@@ -151,6 +177,12 @@ def validate_v2_receipt_contract(
             if saw_catalog:
                 return "lane_catalog_duplicate"
             saw_catalog = True
+            catalog = payload.get("lane_catalog", [])
+            catalog_roles = {
+                str(row["role"])
+                for row in catalog
+                if isinstance(row, Mapping) and isinstance(row.get("role"), str)
+            }
         if transition == "repair_routed":
             attempt_id = str(payload["attempt_id"])
             if attempt_id in repairs:
@@ -168,6 +200,13 @@ def validate_v2_receipt_contract(
             if transition == "stage_attempt_created":
                 if attempt_id in attempts:
                     return "attempt_id_duplicate"
+                if catalog_roles and role not in catalog_roles:
+                    return "attempt_lane_not_cataloged"
+                if any(
+                    attempt["role"] == role and attempt["terminal"] is None
+                    for attempt in attempts.values()
+                ):
+                    return "attempt_lane_already_open"
                 expected = ordinals.get(role, 0) + 1
                 if ordinal != expected:
                     return "attempt_ordinal_discontinuity"
@@ -227,10 +266,55 @@ def validate_v2_receipt_contract(
         elif transition == "run_decision" and writer_role == "supervisor":
             if payload["interruption_sequence"] not in interruptions:
                 return "supervisor_decision_link_invalid"
+            terminal_decision = True
         elif transition == "run_decision" and writer_role == "operator_gateway":
             resolved_sequence = int(payload["action_resolved_sequence"])
             if resolved_actions.get(resolved_sequence) != payload["action_id"]:
                 return "operator_decision_link_invalid"
+            if open_actions or not execution_complete_action_open:
+                return "operator_decision_actions_open"
+            terminal_decision = True
+        elif transition == "run_decision":
+            status = payload.get("status")
+            open_attempts = [
+                attempt
+                for attempt in attempts.values()
+                if attempt["terminal"] is None
+            ]
+            terminal_attempts = {
+                str(attempt["terminal"])
+                for attempt in attempts.values()
+                if attempt["terminal"] is not None
+            }
+            if status == "execution_complete_action_open":
+                if not open_actions or open_attempts:
+                    return "run_decision_precondition_invalid"
+                execution_complete_action_open = True
+            elif status == "workflow_closed":
+                if open_actions or open_attempts:
+                    return "run_decision_precondition_invalid"
+            elif status in {"blocked", "workflow_failed"}:
+                if not terminal_attempts.intersection(
+                    {"stage_blocked", "stage_failed", "stage_interrupted"}
+                ):
+                    return "run_decision_precondition_invalid"
+            terminal_decision = payload.get("status") not in {
+                "awaiting_approval",
+                "execution_complete_action_open",
+            }
+        elif transition == "run_abandoned":
+            open_attempt_ids = {
+                candidate_id
+                for candidate_id, attempt in attempts.items()
+                if attempt["terminal"] is None
+            }
+            if terminal_decision or set(payload["attempt_ids"]) != open_attempt_ids:
+                return "run_abandoned_attempts_invalid"
+            if int(payload["last_covered_sequence"]) != sequence_number - 1:
+                return "run_abandoned_coverage_invalid"
+            for open_attempt_id in open_attempt_ids:
+                attempts[open_attempt_id]["terminal"] = "run_abandoned"
+            terminal_decision = True
 
     if saw_run_planned and not saw_catalog:
         return "lane_catalog_missing"
