@@ -1,8 +1,8 @@
 "use strict";
 
 const POLL_MS = 3000;
-const STATES = ["dormant", "queued", "running", "sealed", "needs_you", "failed", "interrupted", "abandoned"];
-const TALLIES = ["sealed", "running", "queued", "dormant", "needs_you", "failed", "interrupted", "abandoned"];
+const STATES = ["dormant", "queued", "running", "sealed", "blocked", "needs_you", "failed", "interrupted", "abandoned"];
+const TALLIES = ["sealed", "running", "queued", "dormant", "blocked", "needs_you", "failed", "interrupted", "abandoned"];
 const FALLBACK_ROLES = ["g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui"];
 const SEEN_ACTIONS_KEY = "torq.fleet.notified-actions.v1";
 
@@ -233,7 +233,7 @@ function renderActions(actions, runId) {
 
 function formatSettlement(key, value) {
   if (value === null || value === undefined) return "—";
-  if (typeof value === "number" && key.includes("usd")) return `$${value.toFixed(4)}`;
+  if (key.includes("usd") && /^-?\d+(\.\d+)?$/.test(String(value))) return `$${value}`;
   if (typeof value === "number") return value.toLocaleString();
   return human(value);
 }

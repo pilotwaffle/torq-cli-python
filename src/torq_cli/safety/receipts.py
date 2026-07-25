@@ -69,15 +69,16 @@ def _writer_contract_finding(
         return "receipt_writer_role_invalid"
     if evidence_basis not in _EVIDENCE_BASES:
         return "receipt_evidence_basis_invalid"
+    if not isinstance(transition, str) or not isinstance(payload, Mapping):
+        return "receipt_payload_invalid"
     authority_finding = transition_authority_finding(
         writer_role,
         transition,
         evidence_basis,
+        payload,
     )
     if authority_finding is not None:
         return authority_finding
-    if not isinstance(transition, str) or not isinstance(payload, Mapping):
-        return "receipt_payload_invalid"
     return validate_receipt_payload(
         transition,
         payload,
@@ -95,6 +96,7 @@ def _canonical(value: Mapping[str, Any]) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        allow_nan=False,
     ).encode()
 
 
@@ -876,7 +878,10 @@ class ReceiptChain:
             )
 
     def _sanitize(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        serialized = json.dumps(payload, sort_keys=True)
+        try:
+            serialized = json.dumps(payload, sort_keys=True, allow_nan=False)
+        except ValueError as exc:
+            raise ValueError("receipt_payload_non_finite") from exc
         clean, _ = self.registry.scan(serialized)
         value = json.loads(clean)
         if not isinstance(value, dict):

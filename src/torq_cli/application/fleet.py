@@ -320,7 +320,7 @@ def reduce_fleet_snapshot(
                 }
             )
         elif transition == "stage_blocked":
-            row["state"] = "needs_you"
+            row["state"] = "blocked"
             attempt["state"] = "blocked"
         elif transition == "stage_failed":
             row["state"] = "failed"
@@ -363,6 +363,7 @@ def reduce_fleet_snapshot(
         "queued",
         "running",
         "sealed",
+        "blocked",
         "needs_you",
         "failed",
         "interrupted",

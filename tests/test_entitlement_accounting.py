@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -375,5 +376,5 @@ def test_mixed_run_budgets_only_openai_and_reports_both_settlements(tmp_path: Pa
     assert result.status == "awaiting_approval"
     assert result.usage["settlement"]["plan_covered_roles"] == ["builder", "g1d", "g1r"]
     assert result.usage["settlement"]["metered_roles"] == ["g2a"]
-    assert result.usage["budget"]["consumed_usd"] < 0.25
-    assert result.usage["settlement"]["billed_usd"] > 0
+    assert Decimal(result.usage["budget"]["consumed_usd"]) < Decimal("0.25")
+    assert Decimal(result.usage["settlement"]["billed_usd"]) > 0

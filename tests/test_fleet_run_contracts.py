@@ -243,6 +243,92 @@ def test_live_open_attempt_stays_running_but_sealed_is_error() -> None:
     assert sealed["summary"]["reduction_errors"] == ["attempt_terminal_missing"]
 
 
+def test_awaiting_approval_cannot_be_abandoned_even_without_open_attempts(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-awaiting-approval")
+    chain.append("run_decision", {"status": "awaiting_approval"})
+    before = chain.receipts_path.read_bytes()
+
+    with pytest.raises(ValueError, match="run_abandoned_operator_action_open"):
+        chain.append(
+            "run_abandoned",
+            {
+                "attempt_ids": ["invented-open-attempt"],
+                "last_covered_sequence": 1,
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+
+    assert chain.receipts_path.read_bytes() == before
+
+
+def test_open_operator_action_blocks_recovery_abandonment(tmp_path: Path) -> None:
+    chain = _chain(tmp_path, "run-action-open-recovery")
+    chain.append("run_attested", {"mode": "live"})
+    chain.append(
+        "action_opened",
+        {
+            "action_id": "operator-review",
+            "type": "approval_required",
+            "scope": "run",
+            "target": "operator",
+            "summary": "Review the governed result.",
+            "caused_by_sequence": 1,
+        },
+    )
+    attempt = {
+        "role": "g1d",
+        "attempt_id": "attempt-action-open",
+        "attempt_ordinal": 1,
+        "repair_cycle": 0,
+    }
+    chain.append(
+        "stage_attempt_created",
+        {**attempt, "provider_dispatch": False},
+    )
+
+    with pytest.raises(ValueError, match="run_abandoned_operator_action_open"):
+        chain.append(
+            "run_abandoned",
+            {
+                "attempt_ids": [attempt["attempt_id"]],
+                "last_covered_sequence": 3,
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+
+
+def test_invented_orchestrator_decision_status_is_rejected_before_append(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-invented-decision")
+
+    with pytest.raises(ValueError, match="run_decision_status_unauthorized"):
+        chain.append("run_decision", {"status": "looks_finished_to_me"})
+
+    assert chain.sequence == 0
+    assert not chain.receipts_path.exists()
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_payload_is_a_pre_append_finding(
+    tmp_path: Path,
+    value: float,
+) -> None:
+    chain = _chain(tmp_path, "run-non-finite")
+
+    with pytest.raises(ValueError, match="receipt_payload_non_finite"):
+        chain.append("run_attested", {"score": value})
+
+    assert chain.sequence == 0
+    assert not chain.receipts_path.exists()
+
+
 def test_non_ascii_receipt_line_is_the_canonical_hashed_encoding(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-canonical")
     receipt = chain.append("run_attested", {"summary": "café ✓"})

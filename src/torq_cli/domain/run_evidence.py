@@ -141,6 +141,7 @@ def validate_v2_receipt_contract(
     interruptions: set[int] = set()
     terminal_decision = False
     execution_complete_action_open = False
+    waiting_on_operator = False
     saw_run_planned = False
     saw_catalog = False
     catalog_roles: set[str] = set()
@@ -161,6 +162,7 @@ def validate_v2_receipt_contract(
                 writer_role,
                 transition,
                 receipt.get("evidence_basis"),
+                payload,
             )
             if authority_finding is not None:
                 return authority_finding
@@ -290,6 +292,9 @@ def validate_v2_receipt_contract(
                 if not open_actions or open_attempts:
                     return "run_decision_precondition_invalid"
                 execution_complete_action_open = True
+                waiting_on_operator = True
+            elif status == "awaiting_approval":
+                waiting_on_operator = True
             elif status == "workflow_closed":
                 if open_actions or open_attempts:
                     return "run_decision_precondition_invalid"
@@ -308,6 +313,8 @@ def validate_v2_receipt_contract(
                 for candidate_id, attempt in attempts.items()
                 if attempt["terminal"] is None
             }
+            if waiting_on_operator or open_actions:
+                return "run_abandoned_operator_action_open"
             if terminal_decision or set(payload["attempt_ids"]) != open_attempt_ids:
                 return "run_abandoned_attempts_invalid"
             if int(payload["last_covered_sequence"]) != sequence_number - 1:

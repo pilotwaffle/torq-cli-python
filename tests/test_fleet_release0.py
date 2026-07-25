@@ -107,11 +107,17 @@ def test_machine_readable_matrix_rejects_every_wrong_basis() -> None:
         {(rule.writer_role, rule.transition) for rule in TRANSITION_RULES}
     )
     for rule in TRANSITION_RULES:
+        payload = (
+            {"status": sorted(rule.permitted_statuses)[0]}
+            if rule.permitted_statuses is not None
+            else {}
+        )
         assert (
             transition_authority_finding(
                 rule.writer_role,
                 rule.transition,
                 rule.evidence_basis,
+                payload,
             )
             is None
         )
@@ -120,6 +126,7 @@ def test_machine_readable_matrix_rejects_every_wrong_basis() -> None:
             rule.writer_role,
             rule.transition,
             wrong,
+            payload,
         ) == "receipt_writer_unauthorized"
 
 

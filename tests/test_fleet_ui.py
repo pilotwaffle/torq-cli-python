@@ -116,6 +116,7 @@ def test_fleet_ui_assets_are_local_no_store_and_host_guarded(tmp_path: Path) -> 
     assert js_headers["Content-Type"] == "text/javascript; charset=utf-8"
     assert js_headers["Cache-Control"] == "no-store"
     assert b'fetch("/api/v1/fleet"' in javascript
+    assert b'"blocked"' in javascript
     assert b"innerHTML" not in javascript
     assert rebound.status == 421
     assert b"fleet_host_denied" in rebound_body
