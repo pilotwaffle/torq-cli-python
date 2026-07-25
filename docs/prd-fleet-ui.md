@@ -1,10 +1,10 @@
 # PRD - TORQ Fleet UI
 
-Status: **Release 1 Fleet Read implemented in this change; protected-main merge pending.** Revised 2026-07-25, Rev 5.5.
+Status: **Release 1 Fleet Read implemented on protected main.** Revised 2026-07-25, Rev 5.5.
 
-The Release 0 gate in Section 11 has passed. Feature-branch code remains
-implementation evidence, not proof that the complete product contract has
-landed, until protected-main CI and merge complete.
+The Release 0 gate in Section 11 has passed. Release 1 completed protected-main
+CI on Windows, macOS, Linux, and headless Linux after merge. Release 2
+accounting and Release 3 control remain gated by their later build-order steps.
 
 Rev 5 closes gaps found reviewing Rev 4 against the code: certificate role
 binding, the missing writer for post-action closure, key storage boundaries,
