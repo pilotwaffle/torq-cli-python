@@ -173,7 +173,7 @@ def _atomic_write(
 ) -> None:
     """Write, flush, replace, and directory-flush one security artifact."""
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(temporary, flags, mode)
@@ -666,7 +666,12 @@ class FileRunKeyStore:
         except FileNotFoundError:
             key = secrets.token_bytes(32)
             encoded = key.hex().encode("ascii")
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+            )
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             try:
@@ -691,7 +696,12 @@ class FileRunKeyStore:
         except FileNotFoundError:
             key = secrets.token_bytes(32)
             encoded = key.hex().encode("ascii")
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+            )
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             try:
@@ -789,7 +799,7 @@ class ReceiptChain:
         public_key = Ed25519PrivateKey.from_private_bytes(self.key).public_key().public_bytes_raw()
         pin_path = evidence_root / _PUBLIC_KEY_NAME
         encoded = public_key.hex().encode("ascii")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
