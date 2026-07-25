@@ -166,6 +166,37 @@ def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.Cap
     assert output["run"]["run_id"] == "run-cli"
 
 
+def test_fleet_projects_certified_writer_provenance(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-authority")
+    _planned(chain)
+    chain.append("stage_started", {"role": "g1d"})
+    chain.append(
+        "stage_interrupted",
+        {"role": "g1d", "reason": "worker_lease_expired"},
+        writer_role="supervisor",
+        evidence_basis="derived",
+    )
+    chain.append(
+        "run_decision",
+        {"status": "recovery_required"},
+        writer_role="supervisor",
+        evidence_basis="derived",
+    )
+    chain.seal()
+
+    snapshot = FleetProjector(chain.root).snapshot()
+    lane = next(row for row in snapshot["lanes"] if row["role"] == "g1d")
+
+    assert snapshot["run"]["decision_writer"]["writer_role"] == "supervisor"
+    assert lane["latest_writer_role"] == "supervisor"
+    assert [row["writer_role"] for row in lane["transitions"]] == [
+        "orchestrator",
+        "supervisor",
+    ]
+
+
 def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-http")
     _planned(chain)

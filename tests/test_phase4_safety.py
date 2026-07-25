@@ -166,10 +166,13 @@ def test_receipt_verifier_rejects_chain_resigned_by_untrusted_key(tmp_path: Path
     (trusted.root / "terminal-manifest.json").write_bytes(
         (forged.root / "terminal-manifest.json").read_bytes()
     )
+    (trusted.root / "run-certificate.json").write_bytes(
+        (forged.root / "run-certificate.json").read_bytes()
+    )
 
     result = verify_receipt_store(trusted.root)
     assert result.status == "tampered"
-    assert result.finding == "manifest_signer_untrusted"
+    assert result.finding == "run_certificate_signature_invalid"
 
 
 def test_receipt_verifier_rejects_anchor_substitution_with_forged_chain(
@@ -218,7 +221,7 @@ def test_receipt_verifier_rejects_anchor_substitution_with_forged_chain(
     assert result.finding == "trust_anchor_substituted"
 
 
-def test_file_key_store_persists_one_signing_identity_outside_run_directories(
+def test_file_key_store_persists_one_root_and_separate_per_run_identities(
     tmp_path: Path,
 ) -> None:
     evidence_root = tmp_path / "evidence"
@@ -242,7 +245,11 @@ def test_file_key_store_persists_one_signing_identity_outside_run_directories(
     second.append("run_attested", {"mode": "dry_run"})
     second_manifest = json.loads(second.seal().read_text(encoding="utf-8"))
 
-    assert first_manifest["public_key"] == second_manifest["public_key"]
+    assert first_manifest["manifest_key_id"] != second_manifest["manifest_key_id"]
+    first_certificate = json.loads(first.certificate_path.read_text(encoding="utf-8"))
+    second_certificate = json.loads(second.certificate_path.read_text(encoding="utf-8"))
+    assert first_certificate["manifest_key"] != second_certificate["manifest_key"]
+    assert first_certificate["writers"] != second_certificate["writers"]
     assert verify_receipt_store(first.root).status == "verified"
     assert verify_receipt_store(second.root).status == "verified"
     private_key = evidence_root / ".torq-receipt-signing-key"
