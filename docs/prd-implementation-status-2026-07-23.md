@@ -49,7 +49,7 @@ complete.
 | T-33 | Complete | The authorized proposal-only runner dispatched G1D/G1R/Builder/G2A across Anthropic, DeepSeek, and OpenAI, verified exact profile-bound model identities, and stopped at `awaiting_approval`. The portable signed receipt bundle verifies against its separately exported public key; no application transition occurred. Report SHA-256: `77CE748C5054DE8B525835287CA32F7DCB17B79101C66E71A99B8E450016B262`. |
 | T-34 | Complete | `SECURITY.md` distinguishes the authenticated private identity from the mutable public-key cache and states the same-principal/private-identity limitation. |
 | T-35 | Complete for native attended backends | Fresh hosted Windows, macOS, and Linux runners verified and installed the same exact wheel, then passed native store/resolve/revoke/absence operations with generated ephemeral values and `secret_persisted: false`. The Windows evidence report is `docs/evidence/native-credential-windows-2026-07-24.json`, SHA-256 `54F026CC0CDB0D2D8957519B648072B62121F07892224C1159697BE464BAF8FE`. The separately gated headless encrypted-file contract remains unimplemented and fails closed. |
-| T-36 | Ready for explicit authorization | All source, evidence, protected-main, and clean-machine prerequisites pass. The signed tag, immutable release artifacts/hashes, and GitHub release remain withheld until explicit operator authorization for signing/publication. |
+| T-36 | Complete | Signed annotated tag `v0.1.0` targets protected-main commit `f6df23e`; GitHub reports its registered Ed25519 signature `verified: true` with reason `valid`. The public release contains the wheel, source archive, `SHA256SUMS`, and the signed checksum manifest. Re-downloaded hashes and signature verified, and the published wheel passed an isolated install smoke test. |
 
 ## Verification
 
@@ -93,7 +93,7 @@ complete.
   and `docs/evidence/native-credential-linux-2026-07-24.json` (SHA-256
   `36A586506437C6A667A2E7D3F2986F1D4941BD9F3CFD862BD644C6FD565F34BA`).
 
-## Remaining closure work and ownership
+## T-36 closure evidence
 
 Fresh Windows clean-machine evidence completed in hosted run
 [`30123795749`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30123795749).
@@ -102,11 +102,11 @@ revoke, and absence checks with `secret_persisted: false`. Machine report:
 `docs/evidence/native-credential-windows-2026-07-24.json` (SHA-256
 `54F026CC0CDB0D2D8957519B648072B62121F07892224C1159697BE464BAF8FE`).
 
-| Task | Required closure evidence | Operator-owned prerequisite | Codex scope after authorization |
+| Task | Release evidence | Authorization | Result |
 | --- | --- | --- | --- |
-| T-36 | Create and verify a signed `v0.1.0` tag, immutable artifact hashes, and GitHub release from protected `main` | Explicit signing/publication authorization | Build, hash, sign, tag, publish, and verify only within that authorization. |
+| T-36 | Signed `v0.1.0` tag, immutable artifact hashes, checksum signature, public GitHub release, and clean re-download verification | King Flowers explicitly authorized signing/publication on 2026-07-24 | Complete: `https://github.com/pilotwaffle/torq-cli-python/releases/tag/v0.1.0`. |
 
-External evidence production is therefore in scope for Codex once King Flowers
-provides the required authority and systems. Credential ownership, model grants,
-spend approval, clean-machine access, signing identity, and the final decision to
-publish remain King Flowers’ handoff responsibilities.
+All PRD r5 tasks through T-36 are now complete at their documented boundaries.
+Headless encrypted-file credentials, remote receipt anchoring, non-exportable
+signing identity, and turnkey default CLI live transport remain explicitly
+separate future work rather than incomplete v0.1.0 claims.
