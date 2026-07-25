@@ -42,7 +42,7 @@ class PatternRegistry:
         registry.add(
             "KEY_ASSIGNMENT",
             r"(?im)\b(?:[A-Z][A-Z0-9_]*_)?"
-            r"(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN)"
+            r"(?:API[_-]?KEY|SECRET[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN)"
             r"\s*[:=]\s*(?:['\"][^'\"\r\n]{12,}['\"]|[^\s'\"#]{12,})",
             block=False,
         )

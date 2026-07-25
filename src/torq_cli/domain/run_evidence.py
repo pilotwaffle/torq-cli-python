@@ -328,7 +328,11 @@ def validate_v2_receipt_contract(
         sequence_number = sequence
         if terminal_decision:
             return "receipt_after_terminal_decision"
-        if run_terminating and transition not in {"command_unapplied", "run_decision"}:
+        if run_terminating and transition not in {
+            "command_unapplied",
+            "run_abandoned",
+            "run_decision",
+        }:
             return "receipt_after_terminating_decision"
         if "evidence_basis" in receipt:
             authority_finding = transition_authority_finding(
@@ -584,6 +588,7 @@ def validate_v2_receipt_contract(
             if payload["interruption_sequence"] not in interruptions:
                 return "supervisor_decision_link_invalid"
             terminal_decision = True
+            run_terminating = False
         elif transition == "run_decision" and writer_role == "operator_gateway":
             resolved_sequence = int(payload["action_resolved_sequence"])
             if resolved_actions.get(resolved_sequence) != payload["action_id"]:
@@ -591,6 +596,7 @@ def validate_v2_receipt_contract(
             if open_actions or not execution_complete_action_open:
                 return "operator_decision_actions_open"
             terminal_decision = True
+            run_terminating = False
         elif transition == "run_decision":
             status = payload.get("status")
             open_attempts = [
@@ -604,7 +610,7 @@ def validate_v2_receipt_contract(
                 if attempt["terminal"] is not None
             }
             if status == "terminating":
-                if run_terminating or open_actions or open_attempts:
+                if run_terminating or open_actions:
                     return "run_decision_precondition_invalid"
                 if not any(
                     command["transition"] == "command_accepted"
@@ -656,6 +662,7 @@ def validate_v2_receipt_contract(
             for open_attempt_id in open_attempt_ids:
                 attempts[open_attempt_id]["terminal"] = "run_abandoned"
             terminal_decision = True
+            run_terminating = False
             if any(
                 command["transition"] == "command_accepted"
                 and command["finalized"] is None

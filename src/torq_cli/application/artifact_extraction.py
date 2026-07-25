@@ -71,6 +71,8 @@ def extract_supported_artifact(
     normalized_type = _normalize_media_type(media_type)
     if normalized_type not in _SUPPORTED_MEDIA_TYPES:
         raise ArtifactExtractionError("artifact_media_type_unsupported")
+    if "." not in normalized_name:
+        raise ArtifactExtractionError("artifact_extension_mismatch")
     extension = "." + normalized_name.rsplit(".", 1)[-1].casefold()
     if extension not in _EXTENSIONS[normalized_type]:
         raise ArtifactExtractionError("artifact_extension_mismatch")

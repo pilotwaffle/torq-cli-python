@@ -181,7 +181,12 @@ class GovernedOrchestrator:
             ):
                 raise OrchestrationBlocked("context_media_type_invalid")
             clean, findings = self.registry.scan(content)
-        except (OrchestrationBlocked, RedactionBlocked, UnicodeError) as exc:
+        except (
+            ArtifactExtractionError,
+            OrchestrationBlocked,
+            RedactionBlocked,
+            UnicodeError,
+        ) as exc:
             finding = "context_encoding_invalid" if isinstance(exc, UnicodeError) else str(exc)
             chain.append(
                 "command_rejected",
@@ -368,7 +373,7 @@ class GovernedOrchestrator:
             writer_role="operator_gateway",
             evidence_basis="submitted",
         )
-        decision = chain.append(
+        decision = chain.terminalize(
             "run_decision",
             {
                 "status": "workflow_closed",
@@ -423,7 +428,7 @@ class GovernedOrchestrator:
             },
         )
         if mode is ExecutionMode.DRY_RUN:
-            chain.append(
+            chain.terminalize(
                 "run_decision",
                 {
                     "status": "workflow_closed",
@@ -460,8 +465,7 @@ class GovernedOrchestrator:
             # A refusal that leaves no terminal receipt is indistinguishable
             # from a run that never happened. Record the decision, then let the
             # caller seal and re-raise.
-            self._flush_unapplied_commands(chain)
-            chain.append(
+            chain.terminalize(
                 "run_decision",
                 {
                     "status": "blocked",
@@ -1006,53 +1010,6 @@ class GovernedOrchestrator:
             evidence_basis="derived",
         )
 
-    def _flush_unapplied_commands(self, chain: ReceiptWriter) -> tuple[str, ...]:
-        """Finalize accepted commands before a terminal run decision."""
-        receipts = chain.covered_receipts()
-        finalized = {
-            str(receipt.get("payload", {}).get("command_id"))
-            for receipt in receipts
-            if receipt.get("transition") in {"context_injected", "command_unapplied"}
-            and isinstance(receipt.get("payload"), Mapping)
-        }
-        pending = [
-            receipt
-            for receipt in receipts
-            if receipt.get("transition") == "command_accepted"
-            and isinstance(receipt.get("payload"), Mapping)
-            and str(receipt["payload"].get("command_id")) not in finalized
-        ]
-        if not pending:
-            return ()
-        chain.append(
-            "run_decision",
-            {
-                "status": "terminating",
-                "outcome": "pending_commands_unapplied",
-                "provider_dispatch": False,
-            },
-        )
-        command_ids: list[str] = []
-        for receipt in pending:
-            payload = receipt["payload"]
-            assert isinstance(payload, Mapping)
-            command_id = str(payload["command_id"])
-            chain.append(
-                "command_unapplied",
-                {
-                    "command_id": command_id,
-                    "accepted_sequence": receipt["sequence"],
-                    "target_role": payload["target_role"],
-                    "reason": "run_terminating",
-                    "last_covered_sequence": chain.sequence,
-                    "provider_dispatch": False,
-                },
-                writer_role="orchestrator",
-                evidence_basis="derived",
-            )
-            command_ids.append(command_id)
-        return tuple(command_ids)
-
     def _allocate_attempt(self, role: str, *, repair_cycle: int) -> StageAttempt:
         ordinal = self._attempt_ordinals.get(role, 0) + 1
         self._attempt_ordinals[role] = ordinal
@@ -1285,8 +1242,7 @@ class GovernedOrchestrator:
                 },
             )
         else:
-            self._flush_unapplied_commands(chain)
-            chain.append(
+            chain.terminalize(
                 "run_decision",
                 {
                     "status": "workflow_closed",

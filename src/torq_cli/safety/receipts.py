@@ -614,6 +614,15 @@ class ReceiptWriter(Protocol):
 
     def covered_receipts(self) -> tuple[dict[str, Any], ...]: ...
 
+    def terminalize(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        writer_role: str = "orchestrator",
+        evidence_basis: str | None = None,
+    ) -> dict[str, Any]: ...
+
     def seal(self) -> Path: ...
 
     @staticmethod
@@ -1025,6 +1034,69 @@ class ReceiptChain:
                 raise ValueError("artifact_name_collision")
             _atomic_write(target, _ARTIFACT_FORMAT + nonce + cipher)
             return target
+
+    def terminalize(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        writer_role: str = "orchestrator",
+        evidence_basis: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically close command admission, finalize pending input, and decide."""
+        if transition not in {"run_decision", "run_abandoned"}:
+            raise ValueError("terminal_transition_invalid")
+        with self._lock:
+            receipts = self.covered_receipts()
+            finalized = {
+                str(receipt.get("payload", {}).get("command_id"))
+                for receipt in receipts
+                if receipt.get("transition") in {"context_injected", "command_unapplied"}
+                and isinstance(receipt.get("payload"), Mapping)
+            }
+            pending = [
+                receipt
+                for receipt in receipts
+                if receipt.get("transition") == "command_accepted"
+                and isinstance(receipt.get("payload"), Mapping)
+                and str(receipt["payload"].get("command_id")) not in finalized
+            ]
+            if pending:
+                self.append(
+                    "run_decision",
+                    {
+                        "status": "terminating",
+                        "outcome": "pending_commands_unapplied",
+                        "provider_dispatch": False,
+                    },
+                    writer_role="orchestrator",
+                    evidence_basis="derived",
+                )
+                for receipt in pending:
+                    command = receipt["payload"]
+                    assert isinstance(command, Mapping)
+                    self.append(
+                        "command_unapplied",
+                        {
+                            "command_id": command["command_id"],
+                            "accepted_sequence": receipt["sequence"],
+                            "target_role": command["target_role"],
+                            "reason": "run_terminating",
+                            "last_covered_sequence": self.sequence,
+                            "provider_dispatch": False,
+                        },
+                        writer_role="orchestrator",
+                        evidence_basis="derived",
+                    )
+            final_payload = dict(payload)
+            if transition == "run_abandoned":
+                final_payload["last_covered_sequence"] = self.sequence
+            return self.append(
+                transition,
+                final_payload,
+                writer_role=writer_role,
+                evidence_basis=evidence_basis,
+            )
 
     def read_artifact(self, path: Path) -> str:
         """Authenticate, decrypt, and decode an artifact belonging to this run."""

@@ -155,6 +155,36 @@ class EvidenceBroker:
         with self._lock:
             return self.__chain.read_artifact(path)
 
+    def terminalize(
+        self,
+        token: str,
+        transition: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        caller = os.getpid()
+        with self._lock:
+            state = self._capabilities.get(token)
+            if state is None:
+                raise PermissionError("broker_capability_unknown")
+            capability = state.capability
+            if state.consumed:
+                raise PermissionError("broker_capability_replayed")
+            if self._clock() >= capability.expires_at:
+                state.consumed = True
+                raise PermissionError("broker_capability_expired")
+            if capability.run_id != self.run_id or capability.process_id != caller:
+                raise PermissionError("broker_capability_binding_invalid")
+            rule = transition_rule(capability.writer_role, transition)
+            if rule is None:
+                raise PermissionError("broker_transition_unauthorized")
+            state.consumed = True
+            return self.__chain.terminalize(
+                transition,
+                payload,
+                writer_role=capability.writer_role,
+                evidence_basis=rule.evidence_basis,
+            )
+
     def covered_receipts(self) -> tuple[dict[str, Any], ...]:
         with self._lock:
             return self.__chain.covered_receipts()
@@ -225,6 +255,24 @@ class BrokeredReceiptChain:
         if self.__writer_role != "orchestrator":
             raise PermissionError("broker_receipt_read_unauthorized")
         return self.__broker.covered_receipts()
+
+    def terminalize(
+        self,
+        transition: str,
+        payload: Mapping[str, Any],
+        *,
+        writer_role: str = "orchestrator",
+        evidence_basis: str | None = None,
+    ) -> dict[str, Any]:
+        if writer_role != self.__writer_role:
+            raise PermissionError("broker_writer_role_unbound")
+        rule = transition_rule(writer_role, transition)
+        if rule is None:
+            raise PermissionError("broker_transition_unauthorized")
+        if evidence_basis is not None and evidence_basis != rule.evidence_basis:
+            raise ValueError("receipt_writer_unauthorized")
+        capability = self.__broker.issue(writer_role)
+        return self.__broker.terminalize(capability.token, transition, payload)
 
     def seal(self) -> Path:
         if self.__writer_role != "orchestrator":

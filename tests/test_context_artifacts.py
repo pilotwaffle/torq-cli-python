@@ -53,6 +53,9 @@ def test_supported_artifacts_use_the_pinned_extractor_contract(
         (b"x", "../note.txt", "text/plain", "artifact_source_name_invalid"),
         (b"x", "C:note.txt", "text/plain", "artifact_source_name_invalid"),
         (b"x", "note.txt ", "text/plain", "artifact_source_name_invalid"),
+        (b"x", "txt", "text/plain", "artifact_extension_mismatch"),
+        (b"x", "md", "text/markdown", "artifact_extension_mismatch"),
+        (b"{}", "json", "application/json", "artifact_extension_mismatch"),
         (b"x", "note.json.txt", "application/json", "artifact_extension_mismatch"),
         (b"x", "note.html", "text/html", "artifact_media_type_unsupported"),
         (b"%PDF-body", "note.txt", "text/plain", "artifact_binary_signature_denied"),
@@ -107,6 +110,15 @@ def test_provider_environment_assignments_and_key_shapes_are_governed() -> None:
     assert "abcdefghijklmnopqrstuv" not in clean
     assert "zyxwvutsrqponmlkjihgfe" not in clean
     assert findings == ("KEY_ASSIGNMENT",)
+    clean, findings = registry.scan(
+        "api-key='abcdefghijklmnop'\n"
+        "secret-key=ponmlkjihgfedcba\n"
+        "apikey=abcdefgh12345678"
+    )
+    assert "abcdefghijklmnop" not in clean
+    assert "ponmlkjihgfedcba" not in clean
+    assert "abcdefgh12345678" not in clean
+    assert findings == ("KEY_ASSIGNMENT",)
     for value in (
         "sk-proj-" + "A" * 24,
         "sk-ant-" + "B" * 24,
@@ -140,6 +152,30 @@ def test_rejected_file_is_receipted_without_writing_an_artifact(tmp_path: Path) 
     assert rows[0]["transition"] == "command_rejected"
     assert rows[0]["payload"]["finding"] == "artifact_binary_signature_denied"
     assert not (chain.root / "artifacts").exists()
+
+
+def test_invalid_inline_source_name_is_durably_rejected(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence"
+    chain = ReceiptChain(
+        evidence,
+        "run-inline-source-rejected",
+        FileRunKeyStore(evidence),
+        profile_version="1.0.0",
+        policy_version="3.1.3",
+    )
+
+    with pytest.raises(ArtifactExtractionError, match="artifact_source_name_invalid"):
+        GovernedOrchestrator().inject_context(
+            chain,
+            "safe content",
+            source_name="../note.txt",
+        )
+
+    rows = [json.loads(line) for line in chain.receipts_path.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["transition"] == "command_rejected"
+    assert rows[0]["payload"]["finding"] == "artifact_source_name_invalid"
+    assert rows[0]["payload"]["source_name"] is None
 
 
 def test_artifact_storage_rejects_escape_names_and_collisions(tmp_path: Path) -> None:

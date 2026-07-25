@@ -12,14 +12,15 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.orchestrator import GovernedOrchestrator
 from torq_cli.application.supervisor import RunSupervisor, SupervisorState
 from torq_cli.domain.evidence_transitions import (
     TRANSITION_RULES,
     transition_authority_finding,
 )
 from torq_cli.interfaces.fleet_http import FleetSessionManager, create_fleet_server
-from torq_cli.safety.evidence_broker import BrokeredReceiptChain, EvidenceBroker
 import torq_cli.safety.evidence_broker as evidence_broker_module
+from torq_cli.safety.evidence_broker import BrokeredReceiptChain, EvidenceBroker
 from torq_cli.safety.receipts import (
     FileRunKeyStore,
     MemoryRunKeyStore,
@@ -294,9 +295,21 @@ def test_double_death_stays_running_until_recovery_seals_abandonment(
     key_chain = _chain(root, "run-recovery")
     broker = EvidenceBroker(
         key_chain,
-        allowed_roles=frozenset({"orchestrator", "supervisor", "recovery"}),
+        allowed_roles=frozenset({
+            "operator_gateway",
+            "orchestrator",
+            "recovery",
+            "supervisor",
+        }),
     )
     client = BrokeredReceiptChain(broker)
+    operator = BrokeredReceiptChain(broker, writer_role="operator_gateway")
+    accepted = GovernedOrchestrator().inject_context(
+        operator,
+        "Preserve this operator constraint if recovery resumes.",
+        target_role="g1d",
+        confirm_direct=True,
+    )
     client.append("stage_attempt_created", _attempt())
     state = SupervisorState(tmp_path / "supervisor.json", client.run_id)
     supervisor = RunSupervisor(broker, state)
@@ -317,6 +330,12 @@ def test_double_death_stays_running_until_recovery_seals_abandonment(
     abandoned = FleetProjector(client.root).snapshot()
     assert abandoned["lanes"][0]["state"] == "abandoned"
     assert abandoned["run"]["workflow_state"] == "abandoned"
+    unapplied = next(
+        row
+        for row in client.covered_receipts()
+        if row["transition"] == "command_unapplied"
+    )
+    assert unapplied["payload"]["command_id"] == accepted["command_id"]
 
 
 def test_http_bootstrap_is_single_use_and_all_run_reads_require_session(
