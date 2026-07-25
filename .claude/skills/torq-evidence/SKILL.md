@@ -104,8 +104,13 @@ malformed input can't itself be written.
   (`ValueError: the environment variable is longer than 32767 characters`) — it's a
   harness crash, not a real failure. Use a small string-key `case` param that looks
   up the big value inside the test body.
-- **`git checkout main` may fail** with `'main' is already used by worktree at ...`.
-  Work around with a detached checkout or `git reset --hard origin/main`.
+- **`git checkout main` may fail** with `'main' is already used by worktree at ...`
+  because another worktree owns the `main` branch. Do NOT "work around" it with
+  `git reset --hard origin/main` — you are on some other branch or detached HEAD,
+  and a hard reset silently discards any uncommitted work in the current worktree.
+  Instead add a fresh worktree for the ref you want
+  (`git worktree add ../verify origin/main`) or check it out detached in a scratch
+  dir; reset only a throwaway tree you are certain is clean.
 
 ### 6. Every guard needs a reproduced exploit AND a named mutant
 
@@ -158,9 +163,17 @@ becomes true inside the receipt loop, and again at seal.
 3. Capture real producer payloads before tightening the verifier (Gotcha 4).
 4. For each guard: reproduce the exploit → guard in the verifier → negative test →
    named mutant (Gotchas 3, 6).
-5. Run the full gate against the tree you edited:
-   `PYTHONPATH="<tree>/src" python -m ruff check src tests`,
-   `python -m mypy src`, `python -m pytest tests`, `python scripts/run_named_mutants.py`.
+5. Run the full gate against the tree you edited. `PYTHONPATH` must be set on
+   EVERY command — an inline `VAR=... cmd` prefix applies only to that one command,
+   so a shared prefix would leave `mypy`/`pytest` importing the wrong tree (the very
+   trap in Gotcha 2). Export it once for the shell, or repeat it per command:
+   ```bash
+   export PYTHONPATH="<tree>/src"
+   python -m ruff check src tests
+   python -m mypy src
+   python -m pytest tests
+   python scripts/run_named_mutants.py   # sets its own PYTHONPATH internally, but ROOT must be the edited tree
+   ```
    Report the actual numbers.
 6. Protected `main` requires the four-job CI matrix (quality Windows/macOS/Linux +
    headless Linux). Open a PR; do not merge past branch protection.
