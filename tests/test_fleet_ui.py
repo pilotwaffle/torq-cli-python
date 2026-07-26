@@ -84,7 +84,7 @@ def test_fleet_ui_shell_is_public_but_contains_no_run_data(tmp_path: Path) -> No
     assert audit.inline_scripts == 0
     assert audit.inline_styles == 0
     assert audit.landmarks == {"header", "main", "footer"}
-    assert audit.controls == {"notify-button"}
+    assert audit.controls == {"notify-button", "attach-button", "context-submit"}
     assert 'href="#fleet-board"' in markup
     assert 'aria-live="polite"' in markup
 
@@ -176,7 +176,7 @@ def test_fleet_ui_consumes_v3_controls_accessibly_and_keeps_secrets_ephemeral() 
 
     assert 'id="live-announcer"' in html
     assert 'role="list"' in html
-    assert 'role="region" aria-live="off" tabindex="0"' in html
+    assert 'id="mini-monitor" class="command-rail" role="region" aria-live="off"' in html
     assert 'id="recovery-control"' in html
     assert 'id="theme-control"' in html
     for field in ("snapshot", "annotations", "session", "eligibility", "pending"):
@@ -204,6 +204,28 @@ def test_fleet_ui_consumes_v3_controls_accessibly_and_keeps_secrets_ephemeral() 
     assert "`${runId}:${String(action.action_id" in javascript
     assert ".slice(-200)" not in javascript
     assert "innerHTML" not in javascript
+
+
+def test_fleet_command_rail_accepts_governed_text_images_and_pdf() -> None:
+    html = Path("src/torq_cli/data/fleet/index.html").read_text(encoding="utf-8")
+    javascript = Path("src/torq_cli/data/fleet/fleet.js").read_text(encoding="utf-8")
+    css = Path("src/torq_cli/data/fleet/fleet.css").read_text(encoding="utf-8")
+
+    assert 'id="context-composer"' in html
+    assert 'id="context-input"' in html
+    assert 'id="attachment-input"' in html
+    assert "image/png,image/jpeg,application/pdf" in html
+    assert "This control does not dispatch a provider" in html
+    assert 'postJson("/api/v1/fleet/context"' in javascript
+    assert 'input_kind: "inline_text"' in javascript
+    assert 'input_kind: "file"' in javascript
+    assert "MAX_ATTACHMENTS = 4" in javascript
+    assert "MAX_ATTACHMENT_BYTES = 700 * 1024" in javascript
+    assert "attachment_signature_mismatch" in javascript
+    assert "event.ctrlKey || event.metaKey" in javascript
+    assert 'value === "sealed" ? "completed"' in javascript
+    assert ".command-rail" in css
+    assert "#context-input" in css
 
 
 def test_fleet_bootstrap_lands_on_ui_without_exposing_session_in_url(

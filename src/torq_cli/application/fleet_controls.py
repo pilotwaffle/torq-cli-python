@@ -12,8 +12,9 @@ from typing import Any
 
 _ANNOTATION_PRIORITY = {
     "broker_unavailable": 0,
-    "orphaned": 1,
-    "recovery_required": 2,
+    "workflow_reconciled": 1,
+    "orphaned": 2,
+    "recovery_required": 3,
 }
 _OPERATIONS = frozenset({"context", "resolve_action", "recover_run"})
 _MAX_RECOVERY_CONFIRMATIONS = 32

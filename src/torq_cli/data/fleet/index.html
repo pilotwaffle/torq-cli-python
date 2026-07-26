@@ -73,7 +73,7 @@
 
       <section class="lane-section" aria-labelledby="lane-title">
         <div class="section-heading">
-          <div><span class="panel-kicker">SEALED CATALOG ORDER</span><h1 id="lane-title">Governed lanes</h1></div>
+          <div><span class="panel-kicker">VERIFIED CATALOG ORDER</span><h1 id="lane-title">Governed lanes</h1></div>
           <div class="poll-status"><span id="poll-dot" aria-hidden="true"></span><span id="poll-label">CONNECTING</span></div>
         </div>
         <div class="lane-columns lane-columns-head" aria-hidden="true">
@@ -89,13 +89,33 @@
     </main>
   </div>
 
-  <footer id="mini-monitor" class="mini-monitor" role="region" aria-live="off" tabindex="0" aria-label="TORQ Fleet monitor: checking; no run loaded">
+  <footer id="mini-monitor" class="command-rail" role="region" aria-live="off" aria-label="TORQ Fleet command rail: checking; no run loaded">
+    <div class="monitor-line" tabindex="0">
     <span class="monitor-brand" aria-hidden="true">TQ</span>
     <span id="monitor-verify" class="monitor-verify">CHECKING</span>
     <span id="monitor-run" class="monitor-run">Waiting for Fleet</span>
     <span id="monitor-pips" class="monitor-pips" aria-hidden="true"></span>
     <span id="monitor-elapsed" class="mono">—</span>
     <span id="monitor-open" class="monitor-open">0 OPEN</span>
+    </div>
+    <form id="context-composer" class="context-composer" aria-labelledby="composer-title">
+      <div class="composer-copy">
+        <strong id="composer-title">Add governed context</strong>
+        <span>Records evidence for a future attempt. This control does not dispatch a provider.</span>
+      </div>
+      <div id="attachment-list" class="attachment-list" aria-live="polite"></div>
+      <div class="composer-input-row">
+        <label class="sr-only" for="context-input">Context for the governed run</label>
+        <textarea id="context-input" rows="1" maxlength="32768" placeholder="Add instructions or context…" aria-describedby="composer-hint composer-status"></textarea>
+        <input id="attachment-input" class="sr-only" type="file" multiple accept=".txt,.md,.markdown,.json,.png,.jpg,.jpeg,.pdf,text/plain,text/markdown,application/json,image/png,image/jpeg,application/pdf">
+        <button id="attach-button" class="composer-button attach-button" type="button" aria-label="Attach text, image, or PDF">Attach</button>
+        <button id="context-submit" class="composer-button send-button" type="submit">Add context</button>
+      </div>
+      <div class="composer-meta">
+        <span id="composer-hint">Text, PNG, JPEG or PDF · up to 4 files · 700 KB each · Ctrl+Enter to send</span>
+        <span id="composer-status" role="status" aria-live="polite"></span>
+      </div>
+    </form>
   </footer>
 </body>
 </html>

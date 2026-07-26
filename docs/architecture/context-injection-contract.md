@@ -27,7 +27,8 @@ The Fleet projector remains read-only.
 ## HTTP boundary
 
 An active in-process runtime may pass a `GovernedContextInjector` to
-`create_fleet_server`. This enables `POST /api/v1/context`. Without that explicit
+`create_fleet_server`. This enables `POST /api/v1/fleet/context`; the legacy
+`POST /api/v1/context` spelling remains a compatibility alias. Without that explicit
 injector, every POST remains `405 read_only`, including the standalone
 `torq fleet --serve` command.
 
@@ -48,5 +49,8 @@ The approved v1 file contract accepts only strict UTF-8 `.txt`, `.md`/
 `.markdown`, and strict `.json` with exact MIME/extension pairing. JSON rejects
 duplicate keys, non-finite numbers, and excessive depth/nodes, then canonicalizes
 before scanning. BOM, NUL, known binary signatures, PDF, Office/ZIP, images,
-HTML, YAML, XML, archives, and opaque binary content fail before artifact write
+PNG, JPEG, and PDF inputs are bounded and signature checked, then preserved as
+canonical base64 envelopes so the encrypted artifact retains the submitted
+bytes without invoking an unsafe parser. HTML, YAML, XML, archives, and other
+opaque binary content fail before artifact write
 or provider dispatch.

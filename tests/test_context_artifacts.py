@@ -41,7 +41,7 @@ def test_supported_artifacts_use_the_pinned_extractor_contract(
     )
 
     assert result.extractor == extractor
-    assert result.evidence()["contract_version"] == "1.0.0"
+    assert result.evidence()["contract_version"] == "1.1.0"
     if name.endswith(".json"):
         assert result.text == '{"a":"value","z":2}'
 

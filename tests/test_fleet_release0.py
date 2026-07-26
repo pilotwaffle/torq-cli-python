@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import multiprocessing
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +24,13 @@ from torq_cli.domain.evidence_transitions import (
 )
 from torq_cli.interfaces.fleet_http import FleetSessionManager, create_fleet_server
 import torq_cli.safety.evidence_broker as evidence_broker_module
-from torq_cli.safety.evidence_broker import BrokeredReceiptChain, EvidenceBroker
+from torq_cli.safety.evidence_broker import (
+    BrokerEndpoint,
+    BrokeredReceiptChain,
+    EvidenceBroker,
+    EvidenceBrokerServer,
+    RemoteEvidenceBroker,
+)
 from torq_cli.safety.receipts import (
     FileRunKeyStore,
     MemoryRunKeyStore,
@@ -40,6 +47,23 @@ def _canonical(value: object) -> bytes:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("ascii")
+
+
+def _use_foreign_broker_capability(
+    endpoint: BrokerEndpoint,
+    token: str,
+    result: multiprocessing.Queue[str],
+) -> None:
+    try:
+        RemoteEvidenceBroker(endpoint).append(
+            token,
+            "run_attested",
+            {"mode": "dry_run"},
+        )
+    except Exception as exc:
+        result.put(str(exc))
+    else:
+        result.put("unexpected-success")
 
 
 def _chain(
@@ -85,10 +109,104 @@ def test_canonical_oracle_and_all_signed_files_share_one_encoding(tmp_path: Path
 
     assert certificate == _canonical(json.loads(certificate))
     assert manifest == _canonical(json.loads(manifest))
+    certificate_value = json.loads(certificate)
     manifest_value = json.loads(manifest)
+    assert certificate_value["canonical_encoding_marker"] == "UTF-8 ✓"
+    assert manifest_value["canonical_encoding_marker"] == "UTF-8 ✓"
+    assert b'"canonical_encoding_marker":"UTF-8 \\u2713"' in certificate
+    assert b'"canonical_encoding_marker":"UTF-8 \\u2713"' in manifest
     assert manifest_value["certificate_hash"] == ReceiptChain.hash_file(
         chain.certificate_path
     )
+
+
+def test_historical_schema_3_without_encoding_marker_remains_verifiable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-schema-3")
+    chain.append("run_attested", {"mode": "dry_run"})
+
+    certificate = json.loads(chain.certificate_path.read_text(encoding="utf-8"))
+    certificate.pop("root_signature")
+    certificate.pop("canonical_encoding_marker")
+    certificate["certificate_schema_version"] = "3.0.0"
+    historical_certificate = {
+        **certificate,
+        "root_signature": Ed25519PrivateKey.from_private_bytes(chain.key)
+        .sign(_canonical(certificate))
+        .hex(),
+    }
+    chain.certificate_path.write_bytes(_canonical(historical_certificate))
+
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    manifest.pop("canonical_encoding_marker")
+    manifest["certificate_hash"] = ReceiptChain.hash_file(chain.certificate_path)
+    historical_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(_canonical(manifest))
+        .hex(),
+    }
+    manifest_bytes = _canonical(historical_manifest)
+    manifest_path.write_bytes(manifest_bytes)
+    chain._write_manifest_anchor(historical_manifest, manifest_bytes)
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "verified"
+    assert "canonical_encoding_marker" not in historical_certificate
+    assert "canonical_encoding_marker" not in historical_manifest
+    with pytest.raises(ValueError, match="run_certificate_legacy_read_only"):
+        _chain(root, "run-schema-3")
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    anchor.unlink()
+    anchored = verify_receipt_store(chain.root)
+    assert anchored.status == "tampered"
+    assert anchored.finding == "manifest_anchor_missing"
+
+
+@pytest.mark.parametrize("missing_from", ("certificate", "manifest"))
+def test_schema_4_requires_encoding_marker_on_every_signed_container(
+    tmp_path: Path,
+    missing_from: str,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, f"run-marker-{missing_from}")
+    chain.append("run_attested", {"mode": "dry_run"})
+
+    certificate = json.loads(chain.certificate_path.read_text(encoding="utf-8"))
+    certificate.pop("root_signature")
+    if missing_from == "certificate":
+        certificate.pop("canonical_encoding_marker")
+    signed_certificate = {
+        **certificate,
+        "root_signature": Ed25519PrivateKey.from_private_bytes(chain.key)
+        .sign(_canonical(certificate))
+        .hex(),
+    }
+    chain.certificate_path.write_bytes(_canonical(signed_certificate))
+
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    if missing_from == "manifest":
+        manifest.pop("canonical_encoding_marker")
+    manifest["certificate_hash"] = ReceiptChain.hash_file(chain.certificate_path)
+    signed_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(_canonical(manifest))
+        .hex(),
+    }
+    manifest_bytes = _canonical(signed_manifest)
+    manifest_path.write_bytes(manifest_bytes)
+    chain._write_manifest_anchor(signed_manifest, manifest_bytes)
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "run_certificate_invalid"
 
 
 def test_artifacts_are_aead_authenticated_and_run_bound(tmp_path: Path) -> None:
@@ -197,6 +315,47 @@ def test_broker_capabilities_are_process_bound_single_use_and_expiring(
             "stage_completed",
             {**_attempt(), "provider_dispatch": True},
         )
+
+
+def test_authenticated_local_broker_transport_binds_capability_to_peer_pid(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-broker-ipc")
+    server = EvidenceBrokerServer(EvidenceBroker(chain))
+    endpoint = server.start()
+    remote = RemoteEvidenceBroker(endpoint)
+    socket_path = Path(endpoint.address) if endpoint.family == "AF_UNIX" else None
+    if socket_path is not None:
+        assert len(os.fsencode(endpoint.address)) < 100
+        assert socket_path.parent.stat().st_mode & 0o077 == 0
+        assert socket_path.stat().st_mode & 0o077 == 0
+    try:
+        capability = remote.issue("orchestrator")
+        assert capability.process_id == os.getpid()
+
+        context = multiprocessing.get_context("spawn")
+        result = context.Queue()
+        process = context.Process(
+            target=_use_foreign_broker_capability,
+            args=(endpoint, capability.token, result),
+        )
+        process.start()
+        process.join(timeout=15)
+        assert process.exitcode == 0
+        assert result.get(timeout=2) == "broker_capability_binding_invalid"
+
+        receipt = remote.append(
+            capability.token,
+            "run_attested",
+            {"mode": "dry_run"},
+        )
+        assert receipt["writer_role"] == "orchestrator"
+        assert remote.sequence == 1
+    finally:
+        server.close()
+    if socket_path is not None:
+        assert not socket_path.exists()
+        assert not socket_path.parent.exists()
 
 
 def test_broker_serializes_concurrent_multi_writer_appends(tmp_path: Path) -> None:
@@ -378,6 +537,32 @@ def test_seal_advances_manifest_generation_without_an_extra_receipt(
     )
 
 
+def test_workflow_reconciliation_is_external_and_leaves_manifest_unchanged(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "run-reconciled")
+    chain.append("run_attested", {"mode": "dry_run"})
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    state = SupervisorState(tmp_path / "supervisor.json", chain.run_id)
+
+    record = state.record_workflow_reconciliation(
+        manifest_generation=manifest["manifest_generation"],
+        receipt_count=manifest["receipt_count"],
+        terminal_receipt_hash=manifest["terminal_receipt_hash"],
+        operator_identity="operator:local-session",
+        reason="operator_reconciled",
+    )
+
+    assert manifest_path.read_bytes() == manifest_bytes
+    assert state.reconciliation_path.is_file()
+    assert not state.reconciliation_path.is_relative_to(chain.root)
+    assert record["evidence_assertion"] == "none"
+    assert state.snapshot()["lifecycle"] == "workflow_reconciled"
+
+
+
 def test_anchor_required_certificate_fails_closed_when_anchor_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -538,6 +723,59 @@ def test_double_death_stays_running_until_recovery_seals_abandonment(
         if row["transition"] == "command_unapplied"
     )
     assert unapplied["payload"]["command_id"] == accepted["command_id"]
+
+
+def test_recovery_abandonment_rejects_stale_operational_generation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-stale-recovery-state")
+    broker = EvidenceBroker(
+        chain,
+        allowed_roles=frozenset({"orchestrator", "recovery"}),
+    )
+    client = BrokeredReceiptChain(broker)
+    client.append("stage_attempt_created", _attempt())
+    state = SupervisorState(tmp_path / "supervisor.json", client.run_id)
+    supervisor = RunSupervisor(broker, state)
+    marked = supervisor.mark_orphaned("g1d")
+    stale_generation = int(marked["generation"])
+    state.update(lifecycle="running", worker_pid=4242)
+
+    with pytest.raises(
+        ValueError,
+        match="supervisor_state_generation_changed",
+    ):
+        supervisor.abandon(
+            ["attempt-g1d-1"],
+            client.sequence,
+            0,
+            expected_state_generation=stale_generation,
+        )
+
+    assert client.sequence == 1
+
+
+def test_recovery_abandonment_rejects_live_worker_without_issuing_receipt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-live-worker-recovery")
+    broker = EvidenceBroker(
+        chain,
+        allowed_roles=frozenset({"orchestrator", "recovery"}),
+    )
+    client = BrokeredReceiptChain(broker)
+    client.append("stage_attempt_created", _attempt())
+    state = SupervisorState(tmp_path / "supervisor.json", client.run_id)
+    supervisor = RunSupervisor(broker, state)
+    supervisor.mark_orphaned("g1d")
+    state.update(lifecycle="recovery_required", worker_pid=4242)
+
+    with pytest.raises(ValueError, match="supervisor_live_worker_present"):
+        supervisor.abandon(["attempt-g1d-1"], client.sequence, 0)
+
+    assert client.sequence == 1
 
 
 def test_http_bootstrap_is_single_use_and_all_run_reads_require_session(

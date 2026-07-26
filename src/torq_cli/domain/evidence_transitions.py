@@ -126,6 +126,26 @@ if any(
     raise RuntimeError("transition_rule_decision_discriminator_invalid")
 _GOVERNED_TRANSITIONS = frozenset(rule.transition for rule in TRANSITION_RULES)
 
+# Current-schema audit events are closed just like lifecycle transitions.  They
+# do not participate in the lifecycle state machine, but naming them here keeps
+# an orchestrator capability from becoming an unbounded, signed prose channel.
+# Legacy verification retains the historical open-event behavior below.
+CURRENT_AUDIT_TRANSITIONS = frozenset(
+    {
+        "approval_apply",
+        "audit",
+        "build",
+        "design",
+        "done",
+        "portable_export_requested",
+        "reaudit",
+        "repair",
+        "run_attested",
+        "stage_started",
+        "usage",
+    }
+)
+
 
 def transition_rule(
     writer_role: str,
@@ -164,12 +184,13 @@ def transition_authority_finding(
             for candidate in TRANSITION_RULES
         ):
             return "run_decision_value_unauthorized"
-        # Pre-v2 generic audit events remain readable while governed lifecycle
-        # transitions are closed. New governed rows must be declared above.
+        # Current evidence is closed: even non-lifecycle audit events must be
+        # declared.  Legacy evidence keeps its historical open-event rule in
+        # ``_legacy_authority_finding``.
         if (
-            transition not in _GOVERNED_TRANSITIONS
+            transition in CURRENT_AUDIT_TRANSITIONS
             and writer_role == "orchestrator"
-            and evidence_basis != "submitted"
+            and evidence_basis == "observed"
         ):
             return None
         return "receipt_writer_unauthorized"
@@ -234,6 +255,7 @@ def _legacy_authority_finding(
 
 __all__ = [
     "TRANSITION_RULES",
+    "CURRENT_AUDIT_TRANSITIONS",
     "TransitionRule",
     "transition_authority_finding",
     "transition_rule",
