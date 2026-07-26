@@ -57,7 +57,10 @@ implementation exits 3 with `production_signing_identity_exportable` and
 `production_receipt_anchor_not_independent`; owner-only permissions do not
 upgrade either result. A future ready result requires active signer and remote
 inclusion/checkpoint probes through the contract documented in
-`docs/architecture/production-trust-hardening-decision.md`.
+`docs/architecture/production-trust-hardening-decision.md`. Adapter-declared
+labels and adapter-self-verified probes are insufficient: the configured trust
+verifier must independently authenticate the platform identity and the pinned,
+fresh remote checkpoint.
 
 Provider credentials must live behind the platform keychain or the documented
 attended encrypted-file fallback. Agent subprocesses receive a filtered

@@ -23,17 +23,22 @@ of the following in the same invocation:
 
 1. a key generated inside an OS-isolated or hardware signing backend;
 2. a backend declaration that the private key is non-exportable;
-3. an active random signing challenge verified with that identity;
+3. an active, domain-separated random signing challenge verified by a trust
+   policy independent of the signer adapter;
 4. integration of that signer into the receipt path, not a sidecar demo;
 5. an independently operated append-only remote transparency service;
-6. a submitted random-digest probe with a verified inclusion proof and signed
-   checkpoint; and
+6. a submitted domain-separated random-digest probe with a fresh inclusion
+   proof and signed checkpoint, verified against a checkpoint trust root pinned
+   outside both the adapter and run volume; and
 7. integration of remote anchoring into receipt terminalization and
    verification.
 
-Metadata without successful active probes cannot produce `ready`. Adapter and
-service errors reduce to stable blocked findings; vendor details do not escape
-the CLI boundary.
+Metadata without a separately configured `ProductionTrustVerifier` and
+successful active probes cannot produce `ready`. The verifier, not either
+probed adapter, authenticates the permitted platform identity and the pinned
+remote checkpoint identity. Checkpoints older than five minutes or more than
+30 seconds in the future fail closed. Adapter and service errors reduce to
+stable blocked findings; vendor details do not escape the CLI boundary.
 
 ## Why a cross-platform wheel cannot complete this alone
 
@@ -132,9 +137,11 @@ and a privacy review confirms digest-only egress.
    certificate before platform adapters are written.
 2. Select and threat-model the remote log operator, data retention, monitoring,
    authentication, and outage policy.
-3. Implement one platform adapter at a time behind `ProductionSigner` and run
-   its clean-machine acceptance suite.
-4. Implement `ReceiptAnchor`, pin its trust root outside the run volume, and
-   integrate submit/verify into terminalization and fleet projection.
+3. Implement one platform adapter at a time behind `ProductionSigner`, add its
+   identity checks to an independently configured `ProductionTrustVerifier`,
+   and run its clean-machine acceptance suite.
+4. Implement `ReceiptAnchor`, pin its trust root in the independent verifier
+   outside the run volume, and integrate submit/verify into terminalization and
+   fleet projection.
 5. Only after the active readiness probe returns `ready` may release evidence
    use the phrase **production trust hardened**.
