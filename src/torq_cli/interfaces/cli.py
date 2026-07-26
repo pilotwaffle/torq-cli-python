@@ -340,7 +340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.chat_provider is not None:
                     if args.chat_model is None:
                         raise ValueError("chat_model_required")
-                    if sys.platform != "win32":
+                    if sys.platform != "win32" and not sys.platform.startswith("linux"):
                         raise ValueError("chat_strong_containment_unavailable")
                     vault = None
                     if args.chat_provider != "claude":

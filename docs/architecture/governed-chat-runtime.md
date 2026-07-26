@@ -56,12 +56,37 @@ an exact loopback Origin and rotate the session token after every attempt.
 
 ## Platform boundary
 
-Production chat currently enables only on Windows, where the provider is
-created suspended, assigned to a kill-on-close Job Object, and then resumed.
-Linux and macOS fail closed because POSIX process groups alone cannot prevent a
-child from escaping with `setsid()`. They remain unsupported until a tested
-kernel-backed owner can provide the same no-pre-assignment execution and
-confirmed-empty observations.
+Production chat uses kernel-backed owners on Windows and supported Linux hosts.
+On Windows, the provider is created suspended, assigned to a kill-on-close Job
+Object, and then resumed. On Linux, a systemd user service with `Type=exec`
+places a trusted supervisor in a cgroup-v2 unit before provider exec;
+`KillMode=control-group` owns double-fork and `setsid()` descendants, and
+`cgroup.events: populated` is the terminal empty observation. Provider secrets
+are framed over the service's stdin rather than placed in `systemd-run` argv.
+The stdin connection also acts as a coordinator lifetime lease: if the
+coordinator crashes, the supervisor exits and systemd kills the remaining unit
+cgroup.
+
+Linux fails closed unless cgroup v2, a functioning systemd user manager,
+`systemd-run --pipe`, `ProtectControlGroups`, and observable unit cgroups are
+available. It never falls back to a POSIX process group or post-fork cgroup
+migration. Headless CI without a user D-Bus session therefore remains
+unsupported until it provisions those primitives explicitly.
+
+macOS remains unsupported. A process group cannot prevent `setsid()` escape,
+and no weaker containment path is advertised as ownership.
+
+The Linux release gate is intentionally opt-in because hosted CI commonly has
+no user systemd session. On a clean cgroup-v2 login host, run:
+
+```bash
+TORQ_TEST_LINUX_SYSTEMD_CGROUP=1 python -m pytest -q \
+  tests/test_owned_process_linux_kernel.py tests/test_chat_end_to_end.py
+```
+
+That gate exercises `setsid()` and double-fork adversaries, 100 sequential
+stops, 20 concurrent stops, coordinator-crash lease cleanup, durable chat
+completion, and cancellation only after a known-empty cgroup observation.
 
 ## Residual threat
 

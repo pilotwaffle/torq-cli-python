@@ -40,6 +40,8 @@ def main() -> int:
             "complete",
             "failed",
             "flood",
+            "setsid-escape",
+            "double-fork-escape",
         ),
         required=True,
     )
@@ -76,6 +78,21 @@ def main() -> int:
         block = b"x" * 4096
         while True:
             os.write(1, block)
+    if args.role == "setsid-escape":
+        os.setsid()
+        _emit("ready", role="setsid-escape")
+        _sleep_forever()
+    if args.role == "double-fork-escape":
+        first = os.fork()
+        if first != 0:
+            _emit("ready", role="double-fork-parent", child_pid=first)
+            _sleep_forever()
+        os.setsid()
+        second = os.fork()
+        if second != 0:
+            os._exit(0)
+        _emit("ready", role="double-fork-grandchild")
+        _sleep_forever()
     if args.role == "grandchild":
         _emit("ready", role="grandchild")
         _sleep_forever()

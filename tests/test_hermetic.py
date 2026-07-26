@@ -37,6 +37,14 @@ def test_production_imports_forbid_subprocess() -> None:
             local_allow = {"os", "stat", "ctypes"}
         elif source_path.as_posix().endswith("torq_cli/adapters/process.py"):
             local_allow = {"os", "subprocess"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/linux_cgroup.py"):
+            # Linux ownership control plane: systemd creates the cgroup-v2
+            # service before provider exec and systemctl observes/kills it.
+            local_allow = {"os", "subprocess", "sys"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/linux_cgroup_exec.py"):
+            # Trusted contained supervisor; provider subprocesses exist only
+            # inside the already-created systemd cgroup.
+            local_allow = {"os", "subprocess", "sys"}
         elif source_path.as_posix().endswith("torq_cli/adapters/live_provider.py"):
             # T-33's explicit, operator-authorized live transport is isolated to
             # this adapter; core, connector contracts, and imports stay hermetic.

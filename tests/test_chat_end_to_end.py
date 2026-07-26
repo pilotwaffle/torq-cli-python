@@ -20,6 +20,10 @@ from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain
 
 
 _PROVIDER = Path("tests/fixtures/fake_owned_provider.py").resolve()
+_STRONG_OWNER_TESTABLE = os.name == "nt" or (
+    sys.platform.startswith("linux")
+    and os.environ.get("TORQ_TEST_LINUX_SYSTEMD_CGROUP") == "1"
+)
 
 
 def _journal(tmp_path: Path) -> ChatEvidenceJournal:
@@ -69,7 +73,7 @@ def _wait_for(journal: ChatEvidenceJournal, event: str) -> None:
     raise AssertionError(f"chat event not observed: {event}")
 
 
-@pytest.mark.skipif(os.name != "nt", reason="strong Windows containment only")
+@pytest.mark.skipif(not _STRONG_OWNER_TESTABLE, reason="requires a kernel-owned process runner")
 def test_real_owned_completion_rebuilds_verified_transcript(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     runtime = ChatRuntimeCoordinator(journal, _command("complete", tmp_path))
@@ -86,7 +90,7 @@ def test_real_owned_completion_rebuilds_verified_transcript(tmp_path: Path) -> N
     assert '"kind": "complete"' in projection["messages"][-1]["content"]
 
 
-@pytest.mark.skipif(os.name != "nt", reason="strong Windows containment only")
+@pytest.mark.skipif(not _STRONG_OWNER_TESTABLE, reason="requires a kernel-owned process runner")
 def test_real_owned_stop_commits_cancelled_only_after_empty_job(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     runtime = ChatRuntimeCoordinator(journal, _command("parent", tmp_path))
