@@ -11,6 +11,10 @@ from torq_cli.connectors.native_credentials import (
     ConfiguredNativeVault,
     native_store_for_current_platform,
 )
+from torq_cli.connectors.headless_credentials import (
+    ConfiguredHeadlessVault,
+    HeadlessEncryptedFileStore,
+)
 
 
 MAX_CREDENTIAL_SOURCE_BYTES = 65_536
@@ -144,7 +148,11 @@ def credential_vault_from_config(config: Mapping[str, object]) -> CredentialVaul
         if not isinstance(path, str):
             raise CredentialSourceError("credential_source_invalid")
         return ExplicitEnvVault(Path(path))
-    if source.get("kind") == "platform_keychain" and set(source) == {"kind"}:
+    kind = source.get("kind")
+    if kind in {"platform_keychain", "headless_encrypted_file"}:
+        expected_keys = {"kind"} if kind == "platform_keychain" else {"kind", "path"}
+        if set(source) != expected_keys:
+            raise CredentialSourceError("credential_source_invalid")
         connectors = config.get("connectors")
         if not isinstance(connectors, Mapping):
             raise CredentialSourceError("credential_source_invalid")
@@ -158,7 +166,14 @@ def credential_vault_from_config(config: Mapping[str, object]) -> CredentialVaul
                 if provider_id in references and references[provider_id] != credential_ref:
                     raise CredentialSourceError("credential_source_invalid")
                 references[provider_id] = credential_ref
-        return ConfiguredNativeVault(native_store_for_current_platform(), references)
+        if kind == "platform_keychain":
+            return ConfiguredNativeVault(native_store_for_current_platform(), references)
+        raw_path = source.get("path")
+        if not isinstance(raw_path, str):
+            raise CredentialSourceError("credential_source_invalid")
+        return ConfiguredHeadlessVault(
+            HeadlessEncryptedFileStore(Path(raw_path)), references
+        )
     raise CredentialSourceError("credential_source_invalid")
 
 

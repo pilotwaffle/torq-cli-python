@@ -4,8 +4,9 @@ Status: the original T-04 requirements below remain authoritative for the
 encrypted-file contract. T-35 now implements native Windows Credential Manager,
 macOS Keychain, and Linux Secret Service access through `keyring` 25.7, opaque
 credential references, attended no-echo input, explicit access verification,
-and local revocation. The headless encrypted-file envelope remains unimplemented
-and fails closed. Native attended effectiveness is now evidenced on Windows,
+and local revocation. The attended headless encrypted-file envelope is implemented
+in `connectors/headless_credentials.py`; clean-machine headless effectiveness remains
+an operator-evidence gate. Native attended effectiveness is now evidenced on Windows,
 clean hosted macOS, and clean hosted Linux; provider validity remains separate.
 
 ## Foundation boundary
@@ -24,7 +25,7 @@ There is currently no backend, plaintext or encrypted secret store, secret
 input mechanism, crypto implementation, provider integration, migration path,
 or credential API.
 
-## Required future backend boundary
+## Required backend boundary
 
 Future backend targets are Windows Credential Manager, macOS Keychain, and
 Linux Secret Service. A future attended-only headless Linux encrypted fallback
@@ -33,16 +34,15 @@ backend substitution, fallback, downgrade, escrow, or provider-side
 substitution when a selected backend is unavailable.
 
 For this document, a “prompt” means any agent-visible, provider-visible, or
-tool-visible input. A future fallback passphrase may be accepted only from
+tool-visible input. A fallback passphrase may be accepted only from
 local no-echo attended terminal input. It must never be supplied through
 arguments, configuration, environment variables, pipes, CI, child processes,
 agents, providers, logs, receipts, or telemetry. Unattended secret delivery is
 unavailable and remains forbidden.
 
-## Future v1 encrypted envelope
+## V1 encrypted envelope
 
-The following is a closed future contract; it creates no current runtime
-capability.
+The following is the closed implemented contract.
 
 - There is one credential per `<credential_ref>.tqcv` file.
 - The raw file is exactly 1..98304 bytes before parsing.
@@ -99,7 +99,7 @@ capability.
 - The requested reference, backend, and provider must exactly match the
   authenticated metadata.
 - Wrong input, tampering, malformed ciphertext, corruption, unsupported
-  version, and metadata mismatch collapse to one future non-disclosing
+  version, and metadata mismatch collapse to one non-disclosing
   opaque-unlock outcome. T-04 adds no runtime finding.
 
 ## Lifecycle, recovery, and privacy
@@ -112,11 +112,11 @@ capability.
 - An interruption during rotation leaves the prior final record authoritative.
 - Local revocation is deletion/absence only. Provider revocation is a
   separate operator action and is not implied by local deletion.
-- A future vault uses exclusive interprocess locking with a five-second
+- The vault uses exclusive interprocess locking with a five-second
   bounded acquisition and fail-closed timeout.
 - A same-directory encrypted temporary file has restrictive permissions
   before writing.
-- The future implementation flushes the file and directory where supported
+- The implementation flushes the file and directory where supported
   before atomic replacement.
 - There is no plaintext temporary file, backup, downgrade, automatic
   promotion, or automatic migration.
@@ -124,9 +124,9 @@ capability.
 - Any future migration requires a separate Gate 1.
 - Evidence of corruption, interruption, or wrong input is preserved as
   untrusted evidence and is never overwritten, promoted, or disclosed.
-- Future POSIX permissions are `0700` for the store directory and `0600` for
+- POSIX permissions are `0700` for the store directory and `0600` for
   records. Windows must verify current-user ACLs before use.
-- A future local status probe may report only coarse backend availability,
+- A local status probe may report only coarse backend availability,
   lock state, and reference presence.
 - A status probe must not call a provider, decrypt, resolve a secret, assert
   entitlement, expose agent/tool data, or imply validity.
@@ -143,7 +143,7 @@ provider validity, grants, remote revocation, billing, and diagnostics
 remaining unknown. Clean-machine, native Windows/macOS/Linux, headless,
 ACL, roaming, and synchronization behavior require later evidence.
 
-## Future CI boundary
+## CI boundary
 
 T-07 must use deterministic credential-free conformance fixtures for:
 
@@ -162,8 +162,9 @@ must contain no real credentials or passphrases, production unlock channel,
 OS-store access, provider calls, or agent/provider-visible secrets. Fixtures
 must not be reused as production secrets or establish backend effectiveness.
 
-Crypto implementation, dependency choice, backend implementation, secret
-input, provider interaction, and runtime APIs require a separate Gate 1.
+The implementation uses libsodium's XChaCha20-Poly1305-IETF binding through
+PyNaCl and `cryptography`'s Argon2id KDF. Provider validity and clean-machine
+headless effectiveness remain separate evidence gates.
 
 This requirements document is not itself clean-machine verification, provider
 setup, rotation proof, or release evidence. The current PRD status links the

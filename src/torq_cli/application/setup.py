@@ -55,7 +55,11 @@ class SetupService:
         credential_source: dict[str, str] | None = None
         raw_credential_file = answers.get("credential_file")
         raw_credential_refs = answers.get("credential_refs")
-        if raw_credential_file is not None and raw_credential_refs is not None:
+        raw_credential_backend = answers.get("credential_backend", "platform_keychain")
+        raw_credential_store_root = answers.get("credential_store_root")
+        if raw_credential_file is not None and (
+            raw_credential_refs is not None or raw_credential_store_root is not None
+        ):
             raise SetupError("credential_source_ambiguous")
         if raw_credential_file is not None:
             source = Path(str(raw_credential_file))
@@ -94,7 +98,23 @@ class SetupService:
             missing = sorted(direct_providers - set(credential_refs))
             if missing:
                 raise SetupError("provider_credential_ref_missing:" + ",".join(missing))
-            credential_source = {"kind": "platform_keychain"}
+            if raw_credential_backend == "platform_keychain":
+                if raw_credential_store_root is not None:
+                    raise SetupError("credential_source_ambiguous")
+                credential_source = {"kind": "platform_keychain"}
+            elif raw_credential_backend == "headless_encrypted_file":
+                if raw_credential_store_root is None:
+                    raise SetupError("credential_store_root_required")
+                store_root = Path(str(raw_credential_store_root))
+                if not store_root.is_absolute():
+                    raise SetupError("credential_store_root_absolute_required")
+                credential_source = {
+                    "kind": "headless_encrypted_file", "path": str(store_root),
+                }
+            else:
+                raise SetupError("credential_backend_invalid")
+        elif raw_credential_backend != "platform_keychain" or raw_credential_store_root is not None:
+            raise SetupError("credential_refs_required")
         registry = load_registry()
         profile_id = str(answers.get("profile"))
         profile_version = str(answers.get("profile_version"))

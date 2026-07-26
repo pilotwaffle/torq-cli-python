@@ -25,7 +25,12 @@ from torq_cli.connectors.status import inspect_harness
 from torq_cli.connectors.credential_sources import CredentialSourceError, ExplicitEnvVault
 from torq_cli.connectors.native_credentials import (
     NativeCredentialError,
+    NativeCredentialStore,
     native_store_for_current_platform,
+)
+from torq_cli.connectors.headless_credentials import (
+    HeadlessCredentialError,
+    HeadlessEncryptedFileStore,
 )
 from torq_cli.adapters.chat_provider import ChatProviderCommandFactory, current_environment
 from torq_cli.domain.credential_backend import BackendUnavailable
@@ -108,6 +113,11 @@ def _parser() -> argparse.ArgumentParser:
         native = auth_sub.add_parser(action)
         native.add_argument("--provider", required=True)
         native.add_argument("--credential-ref", required=True)
+        native.add_argument(
+            "--backend", choices=("platform_keychain", "headless_encrypted_file"),
+            default="platform_keychain",
+        )
+        native.add_argument("--store-root")
     harness = sub.add_parser("harness")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     inspect = harness_sub.add_parser("inspect")
@@ -440,7 +450,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report = _matrix_auth_status(args.credential_file)
                 print(json.dumps(report, sort_keys=True))
                 return int(report["exit_code"])
-            store = native_store_for_current_platform()
+            store: HeadlessEncryptedFileStore | NativeCredentialStore
+            if args.backend == "headless_encrypted_file":
+                if not isinstance(args.store_root, str):
+                    raise HeadlessCredentialError("credential_store_root_required")
+                store = HeadlessEncryptedFileStore(Path(args.store_root).resolve())
+            else:
+                if args.store_root is not None:
+                    raise NativeCredentialError("credential_backend_selection_invalid")
+                store = native_store_for_current_platform()
             if args.auth_command == "store":
                 secret = _read_attended_secret()
                 try:
@@ -463,7 +481,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "backend": store.backend,
                 }
                 code = 0 if revoked else 3
-        except (BackendUnavailable, CredentialSourceError, NativeCredentialError) as exc:
+        except (
+            BackendUnavailable, CredentialSourceError, HeadlessCredentialError,
+            NativeCredentialError,
+        ) as exc:
             print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
             return 3
         print(json.dumps(report, sort_keys=True))

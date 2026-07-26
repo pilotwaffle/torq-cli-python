@@ -72,6 +72,10 @@ def test_production_imports_forbid_subprocess() -> None:
             # DISPLAY/WAYLAND_DISPLAY are explicit session-type facts only;
             # this adapter never enumerates credential-bearing environment keys.
             local_allow = {"os"}
+        elif source_path.as_posix().endswith("torq_cli/connectors/headless_credentials.py"):
+            # The explicit operator-selected encrypted store needs local
+            # terminal, filesystem, permission, and durability primitives.
+            local_allow = {"os"}
         else:
             local_allow = set()
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
