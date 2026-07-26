@@ -319,9 +319,10 @@ occurred, which is what makes a refusal auditable rather than merely reported.
 
 `cost_basis` becomes `sealed_token_counts` where actuals exist. Retain
 `configured_worst_case` only on blocked receipts and the metered preflight,
-where a worst-case figure genuinely is the basis. Keep `cost_usd` as an alias
-of `billed_usd` for one release so `summarize_usage` and existing verifiers do
-not break, then retire it.
+where a worst-case figure genuinely is the basis. `cost_usd` is the amount
+reserved or consumed against the governed run budget; it is not evidence that
+money left an account. `billed_usd` is nullable and is present only when the
+actual settlement is known.
 
 ### C7 — `summarize_usage` settlement split
 
@@ -331,6 +332,7 @@ only:
 ```python
 "settlement": {
     "billed_usd": 0.04,
+    "billed_status": "complete",
     "metered_equivalent_usd": 7.9834,
     "plan_covered_roles": ["g1d", "g1r", "builder", "refine_ui"],
     "metered_roles": ["g2a"],
@@ -338,6 +340,10 @@ only:
     "rate_table_version": "list-prices.2026-07.v3",
 }
 ```
+
+If any metered receipt has an unknown actual charge, the aggregate uses
+`billed_usd: null` and `billed_status: "incomplete"`. It never converts an
+unknown charge into a signed zero or a misleading partial subtotal.
 
 The mixed case is the normal case: `budget` constrains only `g2a`, while
 `metered_equivalent_usd` covers every priced lane.

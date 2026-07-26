@@ -92,6 +92,10 @@ def test_external_source_permissions_are_required(
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com.evil.test/apps/anthropic",
         "https://user@token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
         "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic?redirect=1",
+        "https://token-plan.-.maas.aliyuncs.com/apps/anthropic",
+        "https://token-plan.-us.maas.aliyuncs.com/apps/anthropic",
+        "https://token-plan.us-.maas.aliyuncs.com/apps/anthropic",
+        "https://token-plan.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.maas.aliyuncs.com/apps/anthropic",
     ],
 )
 def test_token_plan_override_is_restricted_to_canonical_alibaba_route(
@@ -152,6 +156,52 @@ def test_provider_child_environment_contains_only_selected_secret(tmp_path: Path
         "OPENAI_MODEL": "gpt-5.5",
     }
     assert "qwen-secret" not in codex.values()
+
+
+def test_external_source_detects_path_identity_change_and_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _credential_file(tmp_path)
+    real_samestat = __import__("os").path.samestat
+    real_close = __import__("os").close
+    comparisons = 0
+    closed: list[int] = []
+
+    def changing_samestat(left, right):
+        nonlocal comparisons
+        comparisons += 1
+        return real_samestat(left, right) if comparisons == 1 else False
+
+    def tracking_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr("torq_cli.connectors.credential_sources.os.path.samestat", changing_samestat)
+    monkeypatch.setattr("torq_cli.connectors.credential_sources.os.close", tracking_close)
+
+    with pytest.raises(CredentialSourceError, match="credential_source_changed"):
+        ExplicitEnvVault(source)
+    assert len(closed) == 1
+
+
+def test_external_source_detects_permission_change_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _credential_file(tmp_path)
+    checks = 0
+
+    def changing_permissions(_path: Path) -> bool:
+        nonlocal checks
+        checks += 1
+        return checks == 1
+
+    monkeypatch.setattr(
+        "torq_cli.connectors.credential_sources.signing_file_permissions_are_restricted",
+        changing_permissions,
+    )
+
+    with pytest.raises(CredentialSourceError, match="credential_source_changed"):
+        ExplicitEnvVault(source)
 
 
 def test_auth_status_accepts_explicit_external_store_without_printing_values(

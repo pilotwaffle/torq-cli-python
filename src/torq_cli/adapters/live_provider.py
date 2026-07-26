@@ -288,30 +288,20 @@ class LiveStageDispatcher:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    stopped = stop_observation()
-                    if stopped is None or not stopped.confirmed:
-                        failure = OrchestrationBlocked(
-                            f"live_provider_termination_unconfirmed:{provider}"
-                        )
-                    else:
-                        failure = OrchestrationBlocked(
-                            f"live_provider_command_failed:{provider}"
-                        )
+                    stop_observation()
+                    failure = OrchestrationBlocked(
+                        f"live_provider_command_failed:{provider}"
+                    )
                     break
                 event = owner.next_event(timeout=min(0.05, remaining))
                 if event is not None:
                     if event.channel == "system" or total + len(event.data) > (
                         _MAX_PROVIDER_OUTPUT_BYTES
                     ):
-                        stopped = stop_observation()
-                        if stopped is None or not stopped.confirmed:
-                            failure = OrchestrationBlocked(
-                                f"live_provider_termination_unconfirmed:{provider}"
-                            )
-                        else:
-                            failure = OrchestrationBlocked(
-                                f"live_provider_response_too_large:{provider}"
-                            )
+                        stop_observation()
+                        failure = OrchestrationBlocked(
+                            f"live_provider_response_too_large:{provider}"
+                        )
                         break
                     total += len(event.data)
                     if event.channel == "stdout":

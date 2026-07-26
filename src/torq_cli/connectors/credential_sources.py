@@ -42,7 +42,8 @@ _PROVIDER_BASE_URL_KEYS: Mapping[str, tuple[str, ...]] = {
 # entitled to another region names it in their credential source and it wins.
 _TOKEN_PLAN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
 _TOKEN_PLAN_URL = re.compile(
-    r"https://token-plan\.[a-z0-9-]+\.maas\.aliyuncs\.com(?::443)?/apps/anthropic\Z"
+    r"https://token-plan\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"\.maas\.aliyuncs\.com(?::443)?/apps/anthropic\Z"
 )
 _BINARY = getattr(os, "O_BINARY", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)

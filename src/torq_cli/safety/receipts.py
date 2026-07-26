@@ -513,12 +513,13 @@ def _windows_acl_is_owner_only(path: Path) -> bool:
     advapi32.EqualSid.restype = wintypes.BOOL
 
     descriptor = ctypes.c_void_p()
+    owner_sid = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     result = advapi32.GetNamedSecurityInfoW(
         str(path),
         1,
-        0x00000004,
-        None,
+        0x00000005,
+        ctypes.byref(owner_sid),
         None,
         ctypes.byref(dacl),
         None,
@@ -540,6 +541,8 @@ def _windows_acl_is_owner_only(path: Path) -> bool:
         ):
             raise OSError(_windows_last_error(), "private_key_acl_control_failed")
         if not control.value & 0x1000 or not dacl.value:
+            return False
+        if not owner_sid.value or not advapi32.EqualSid(owner_sid, expected_sid):
             return False
         info = AclSizeInformation()
         if not advapi32.GetAclInformation(

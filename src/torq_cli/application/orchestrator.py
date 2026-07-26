@@ -758,8 +758,8 @@ class GovernedOrchestrator:
         quote = self.rate_table.quote(binding.provider_id, binding.model_id, usage)
         billed_usd: str | None
         if self.entitlement_ledger is None:
-            billed_usd = str(budget.ceiling_usd)
-            cost_usd = billed_usd
+            billed_usd = None
+            cost_usd = str(budget.ceiling_usd)
             cost_basis = "configured_worst_case"
         elif budget.settlement == "plan_covered":
             billed_usd = "0"

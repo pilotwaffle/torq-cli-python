@@ -427,6 +427,8 @@ def test_unpriced_metered_call_books_configured_worst_case_ceiling(tmp_path: Pat
     )
 
     assert result.usage["budget"]["consumed_usd"] == "0.25"
+    assert result.usage["settlement"]["billed_usd"] is None
+    assert result.usage["settlement"]["billed_status"] == "incomplete"
     receipts = [
         json.loads(line)["payload"]
         for line in (chain.root / "receipts.jsonl").read_text(encoding="utf-8").splitlines()
