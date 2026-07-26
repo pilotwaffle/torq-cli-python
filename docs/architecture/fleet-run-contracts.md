@@ -1,6 +1,7 @@
 # Fleet run evidence contracts
 
-Status: **implemented on `feat/fleet-run-contracts`; merge pending.**
+Status: **implemented and extended by Rev 5.5A; see
+[`../prd-fleet-ui-rev-5-5a.md`](../prd-fleet-ui-rev-5-5a.md).**
 
 This phase makes the Fleet read model a deterministic reduction of authenticated
 evidence. The UI does not infer attempts from receipt counts or reconstruct lane
@@ -28,24 +29,28 @@ and repair cycle.
 
 The verifier rejects duplicate IDs, ordinal gaps, transitions without a created
 attempt, dispatch contradictions, transitions after terminal state, and open
-attempts in a sealed run. The pure Fleet reducer maps an open attempt to
-`abandoned` only when the caller has established `incomplete` verification.
+attempts in a sealed run. The pure Fleet reducer maps an attempt to `abandoned`
+only after certified `run_abandoned` evidence; operational liveness annotations
+never move evidence state.
 
 ## Actions and closure
 
 An approval or escalation emits `action_opened`, followed by
-`run_decision: execution_complete_action_open`. The rolling manifest remains
-unsealed while the action is open.
+`run_decision: awaiting_approval`. The rolling manifest remains unsealed while
+the action is open.
 
 Resolution is written by the operator gateway as `action_resolved`. The same
-writer then emits a derived `run_decision: workflow_closed` that names the
-action ID and exact resolution sequence. Only that linked decision seals the
-workflow. Replay reduces open actions as opened IDs minus resolved IDs.
+writer then emits a derived terminal `run_decision` whose closed value is
+computed from the action's authenticated outcome map and which names the action
+ID and exact resolution sequence. Only that linked decision seals the workflow.
+Replay reduces open actions as opened IDs minus resolved IDs.
 
-## Fleet snapshot v2
+## Fleet snapshot v3
 
-`torq-fleet-snapshot-v2` exposes ordered lane metadata, current lane state,
+`torq-fleet-snapshot-v3`, inside `torq-fleet-envelope-v3`, exposes ordered lane metadata, current lane state,
 attempt history, exact dispatch wording, writer provenance, run execution and
 workflow states, open/resolved actions, reduction errors, and normalized live or
 sealed verification state. Repeated audits remain separate attempts while lane
-counts reflect only the latest attempt state.
+counts reflect only the latest attempt state. The envelope separately carries
+operational annotations, session state, mutation eligibility, and pending
+correlation IDs.

@@ -115,16 +115,22 @@ class RunSupervisor:
             orphaned_roles=roles,
         )
 
-    def abandon(self, attempt_ids: list[str], last_sequence: int) -> dict[str, Any]:
+    def abandon(
+        self,
+        attempt_ids: list[str],
+        last_sequence: int,
+        manifest_generation: int,
+    ) -> dict[str, Any]:
         capability = self.broker.issue("recovery")
         receipt = self.broker.terminalize(
             capability.token,
             "run_abandoned",
             {
                 "attempt_ids": attempt_ids,
-                "last_covered_sequence": last_sequence,
                 "operator_assertion": "no_live_worker",
             },
+            expected_sequence=last_sequence,
+            expected_manifest_generation=manifest_generation,
         )
         self.broker.seal()
         self.state.update(

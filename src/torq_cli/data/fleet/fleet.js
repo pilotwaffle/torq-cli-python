@@ -120,7 +120,7 @@ function renderRail(lanes) {
   const rows = lanes.length ? lanes : FALLBACK_ROLES.map((role) => ({ role, state: "dormant" }));
   rows.slice(0, 6).forEach((lane) => {
     const state = safeState(lane.state);
-    const item = node("li", "", lane.role);
+    const item = node("li");
     item.dataset.state = state;
     item.setAttribute("aria-label", `${lane.role}: ${human(state)}`);
     rail.append(item);
@@ -166,6 +166,8 @@ function toggleLane(button, detail, role) {
   button.setAttribute("aria-expanded", String(!open));
   button.setAttribute("aria-label", `${open ? "Show" : "Hide"} ${role} evidence detail`);
   detail.classList.toggle("open", !open);
+  const history = detail.querySelector(".history");
+  if (history) history.tabIndex = open ? -1 : 0;
   if (open) expandedRoles.delete(role); else expandedRoles.add(role);
 }
 
@@ -230,6 +232,7 @@ function renderLane(lane, index, rovingIndex) {
   historySection.append(node("h3", "", "Attempt history"));
   const history = node("ol", "history");
   history.tabIndex = -1;
+  history.setAttribute("aria-label", `${lane.role} attempt history`);
   history.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { event.preventDefault(); toggle.focus(); }
   });
@@ -290,9 +293,14 @@ function notifyActions(actions, runId) {
 function reconcileLocalMutations(envelope) {
   const pending = new Set(envelope.pending || []);
   const covered = Number(envelope.snapshot?.verification?.covered_sequence || 0);
+  let reconciled = false;
   localMutations.forEach((mutation, correlation) => {
-    if (mutation.accepted && !pending.has(correlation) && covered >= mutation.baseSequence) localMutations.delete(correlation);
+    if (mutation.accepted && !pending.has(correlation) && covered > mutation.baseSequence) {
+      localMutations.delete(correlation);
+      reconciled = true;
+    }
   });
+  if (reconciled) setControlStatus("Verified evidence reconciled.");
   if (recoveryBinding) {
     const generation = envelope.snapshot?.verification?.manifest_generation;
     const runId = envelope.snapshot?.run?.run_id;
@@ -420,6 +428,18 @@ async function confirmRecovery(button) {
 function renderRecovery(envelope) {
   const root = byId("recovery-control");
   root.replaceChildren();
+  const recoveryMutation = [...localMutations.entries()].find(([, value]) => value.target === "recovery");
+  const serverMutationPending = Array.isArray(envelope?.pending) && envelope.pending.length > 0;
+  if (recoveryMutation || serverMutationPending) {
+    const card = node("div", "recovery-card");
+    card.setAttribute("role", "status");
+    card.append(
+      node("strong", "", "Recovery submitted"),
+      node("p", "", "Waiting for verified mutation evidence. Another recovery cannot be started.")
+    );
+    root.append(card);
+    return;
+  }
   const rule = envelope?.eligibility?.recover_run || { eligible: false, reason: "recovery_not_available" };
   if (!rule.eligible) {
     if (rule.reason && rule.reason !== "recover_run_precondition_not_met") root.append(node("p", "empty-copy", `Recovery unavailable: ${human(rule.reason)}.`));
@@ -438,6 +458,7 @@ function renderRecovery(envelope) {
     const warningId = "recovery-effect";
     const warning = node("p", "", "This records the run as abandoned and closes it. No provider dispatch is performed.");
     warning.id = warningId;
+    card.setAttribute("aria-describedby", warningId);
     const buttons = node("div", "action-buttons");
     const confirm = node("button", "danger-button", "Confirm abandonment");
     confirm.type = "button";
@@ -476,6 +497,7 @@ function renderAnnotations(annotations) {
   annotations.forEach((annotation) => {
     const item = node("li", "", `${human(annotation.kind)} · ${human(annotation.scope)}`);
     item.dataset.kind = annotation.kind;
+    item.setAttribute("role", annotation.kind === "broker_unavailable" ? "alert" : "status");
     list.append(item);
   });
 }

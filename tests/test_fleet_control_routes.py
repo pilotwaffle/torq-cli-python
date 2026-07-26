@@ -124,6 +124,104 @@ def test_sse_event_identity_ignores_sliding_session_expiry() -> None:
     assert _fleet_event_id(envelope) != first
 
 
+def test_action_route_decodes_one_canonical_opaque_id_segment(tmp_path: Path) -> None:
+    class Projector:
+        run_root = tmp_path / "run-colon-action"
+        operational_state: Mapping[str, Any] = {}
+
+        def snapshot(self) -> dict[str, Any]:
+            return {
+                "schema": "torq-fleet-snapshot-v3",
+                "verification": {
+                    "state": "live_verified",
+                    "finding": None,
+                    "covered_sequence": 1,
+                    "manifest_generation": 1,
+                },
+                "data_status": "available",
+                "run": {
+                    "run_id": "run-colon-action",
+                    "workflow_state": "action_open",
+                },
+                "summary": {"open_actions": 1},
+                "lanes": [],
+                "actions": [{
+                    "action_id": "approval:1",
+                    "state": "open",
+                    "allowed_resolutions": ["approved"],
+                    "outcome_map": {"approved": "completed"},
+                }],
+                "settlement": None,
+            }
+
+    class Resolver:
+        root = Projector.run_root
+
+        def __init__(self) -> None:
+            self.action_id: str | None = None
+
+        def resolve_action(
+            self,
+            *,
+            action_id: str,
+            resolution: str,
+            resolver_identity: str,
+        ) -> Mapping[str, Any]:
+            assert resolution == "approved"
+            assert resolver_identity == "operator:local-session"
+            self.action_id = action_id
+            return {"run_decision_sequence": 2}
+
+    projector = Projector()
+    projector.run_root.mkdir()
+    resolver = Resolver()
+    sessions = FleetSessionManager()
+    cookie = f"torq_fleet_session={sessions.exchange(sessions.bootstrap_nonce)}"
+    server = create_fleet_server(
+        projector,  # type: ignore[arg-type]
+        port=0,
+        action_resolver=resolver,
+        sessions=sessions,
+    )
+    thread = _serve(server)
+    try:
+        status, _, body = _request(
+            server,
+            "POST",
+            "/api/v1/fleet/actions/approval%3A1/resolve",
+            cookie,
+            {"correlation_id": "resolve-colon", "resolution": "approved"},
+        )
+    finally:
+        _close(server, thread)
+
+    assert status == 202
+    assert body["status"] == "accepted"
+    assert resolver.action_id == "approval:1"
+
+
+def test_malformed_percent_encoded_action_path_returns_governed_404(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-malformed-action-path")
+    sessions = FleetSessionManager()
+    cookie = f"torq_fleet_session={sessions.exchange(sessions.bootstrap_nonce)}"
+    server = create_fleet_server(FleetProjector(chain.root), port=0, sessions=sessions)
+    thread = _serve(server)
+    try:
+        status, _, body = _request(
+            server,
+            "POST",
+            "/api/v1/fleet/actions/%FF/resolve",
+            cookie,
+        )
+    finally:
+        _close(server, thread)
+
+    assert status == 404
+    assert body == {"status": "not_found"}
+
+
 def test_action_resolution_route_is_session_gated_atomic_and_sse_visible(
     tmp_path: Path,
 ) -> None:
@@ -223,12 +321,37 @@ def test_recovery_requires_fresh_two_step_confirmation_bound_to_coverage(
     state = SupervisorState(tmp_path / "supervisor.json", client.run_id)
     supervisor = RunSupervisor(broker, state)
     supervisor.mark_orphaned("g1d")
+
+    class InterleavingRecovery:
+        def __init__(self) -> None:
+            self.armed = True
+
+        @property
+        def root(self) -> Path:
+            return supervisor.root
+
+        def abandon(
+            self,
+            attempt_ids: list[str],
+            last_sequence: int,
+            manifest_generation: int,
+        ) -> Mapping[str, Any]:
+            if self.armed:
+                self.armed = False
+                client.append("run_attested", {"checkpoint": "inside-recovery-race"})
+            return supervisor.abandon(
+                attempt_ids,
+                last_sequence,
+                manifest_generation,
+            )
+
+    interleaving_recovery = InterleavingRecovery()
     sessions = FleetSessionManager()
     cookie = f"torq_fleet_session={sessions.exchange(sessions.bootstrap_nonce)}"
     server = create_fleet_server(
         FleetProjector(chain.root),
         port=0,
-        recovery_controller=supervisor,
+        recovery_controller=interleaving_recovery,
         operational_state_provider=state.snapshot,
         sessions=sessions,
     )
@@ -258,6 +381,37 @@ def test_recovery_requires_fresh_two_step_confirmation_bound_to_coverage(
         )
         assert status == 409
         assert stale["finding"] == "recovery_confirmation_stale"
+        rotated = headers["Set-Cookie"].split(";", 1)[0]
+
+        status, headers, confirmation = _request(
+            server,
+            "POST",
+            "/api/v1/fleet/recover/confirm",
+            rotated,
+            {"correlation_id": "recover-1"},
+        )
+        assert status == 200
+        rotated = headers["Set-Cookie"].split(";", 1)[0]
+        token = confirmation["confirmation_token"]
+
+        before_internal_race = chain.receipts_path.read_bytes()
+        status, headers, stale = _request(
+            server,
+            "POST",
+            "/api/v1/fleet/recover",
+            rotated,
+            {
+                "correlation_id": "recover-1",
+                "confirmation_token": token,
+            },
+        )
+        assert status == 409
+        assert stale["finding"] == "recovery_confirmation_stale"
+        assert chain.receipts_path.read_bytes() != before_internal_race
+        assert all(
+            row["transition"] != "run_abandoned"
+            for row in client.covered_receipts()
+        )
         rotated = headers["Set-Cookie"].split(";", 1)[0]
 
         status, headers, confirmation = _request(

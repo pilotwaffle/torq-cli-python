@@ -176,7 +176,7 @@ def test_fleet_ui_consumes_v3_controls_accessibly_and_keeps_secrets_ephemeral() 
 
     assert 'id="live-announcer"' in html
     assert 'role="list"' in html
-    assert 'role="status"' in html
+    assert 'role="region" aria-live="off" tabindex="0"' in html
     assert 'id="recovery-control"' in html
     assert 'id="theme-control"' in html
     for field in ("snapshot", "annotations", "session", "eligibility", "pending"):
@@ -185,12 +185,20 @@ def test_fleet_ui_consumes_v3_controls_accessibly_and_keeps_secrets_ephemeral() 
     assert 'event.key === "ArrowDown"' in javascript
     assert 'event.key === "Home"' in javascript
     assert 'event.key === "Escape"' in javascript
+    assert 'history.tabIndex = open ? -1 : 0' in javascript
     assert 'aria-busy' in javascript
     assert "/api/v1/fleet/actions/" in javascript
     assert '"/api/v1/fleet/recover/confirm"' in javascript
     assert '"/api/v1/fleet/recover"' in javascript
     assert "recoverySecret = null" in javascript
     assert "confirmation_token: token" in javascript
+    assert 'card.setAttribute("aria-describedby", warningId)' in javascript
+    assert 'value.target === "recovery"' in javascript
+    assert "serverMutationPending" in javascript
+    assert "covered > mutation.baseSequence" in javascript
+    assert 'setControlStatus("Verified evidence reconciled.")' in javascript
+    assert 'annotation.kind === "broker_unavailable" ? "alert" : "status"' in javascript
+    assert 'card.setAttribute("role", "status")' in javascript
     assert "localStorage.setItem(SEEN_ACTIONS_KEY" in javascript
     assert "torq.fleet.notified-actions.v2" in javascript
     assert "`${runId}:${String(action.action_id" in javascript

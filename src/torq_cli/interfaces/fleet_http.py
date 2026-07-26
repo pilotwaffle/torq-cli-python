@@ -20,7 +20,7 @@ from importlib.resources import files
 from threading import BoundedSemaphore, RLock
 from pathlib import Path
 from typing import Any, Callable, Protocol, cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.fleet_controls import FleetControlService
@@ -112,7 +112,10 @@ class RecoveryController(Protocol):
     def root(self) -> Path: ...
 
     def abandon(
-        self, attempt_ids: list[str], last_sequence: int
+        self,
+        attempt_ids: list[str],
+        last_sequence: int,
+        manifest_generation: int,
     ) -> Mapping[str, Any]: ...
 
 
@@ -479,17 +482,22 @@ def create_fleet_server(
             if parsed.query or parsed.fragment:
                 self._json(404, {"status": "not_found"})
                 return
+            try:
+                path = unquote(parsed.path, encoding="utf-8", errors="strict")
+            except (UnicodeDecodeError, ValueError):
+                self._json(404, {"status": "not_found"})
+                return
             action_match = re.fullmatch(
                 r"/api/v1/fleet/actions/([A-Za-z0-9][A-Za-z0-9:._-]{0,127})/resolve",
-                parsed.path,
+                path,
             )
-            if parsed.path in {"/api/v1/context", "/api/v1/fleet/context"}:
+            if path in {"/api/v1/context", "/api/v1/fleet/context"}:
                 operation = "context"
                 service_present = context_injector is not None
             elif action_match is not None:
                 operation = "resolve_action"
                 service_present = resolved_action_resolver is not None
-            elif parsed.path in {
+            elif path in {
                 "/api/v1/fleet/recover/confirm",
                 "/api/v1/fleet/recover",
             }:
@@ -809,7 +817,10 @@ def create_fleet_server(
                     ):
                         raise ValueError("recovery_snapshot_invalid")
                     covered = verification.get("covered_sequence")
-                    if not isinstance(covered, int):
+                    manifest_generation = verification.get("manifest_generation")
+                    if not isinstance(covered, int) or not isinstance(
+                        manifest_generation, int
+                    ):
                         raise ValueError("recovery_snapshot_invalid")
                     attempt_ids = [
                         str(attempt["attempt_id"])
@@ -821,7 +832,11 @@ def create_fleet_server(
                         and isinstance(attempt.get("attempt_id"), str)
                     ]
                     controls.begin(correlation_id, "recover_run")
-                    result = recovery_controller.abandon(attempt_ids, covered)
+                    result = recovery_controller.abandon(
+                        attempt_ids,
+                        covered,
+                        manifest_generation,
+                    )
                     expected = result.get("sequence")
                     if not isinstance(expected, int):
                         raise ValueError("recovery_result_invalid")

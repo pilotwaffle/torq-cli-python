@@ -631,7 +631,7 @@ def _read_manifest_anchor(
             else stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
         )
         if not type_safe:
-            raise ValueError("manifest_anchor_unsafe")
+            raise PermissionError("manifest_anchor_unsafe")
         if not signing_file_permissions_are_restricted(candidate):
             raise PermissionError("manifest_anchor_unsafe")
     encoded = path.read_bytes()
@@ -711,6 +711,8 @@ class ReceiptWriter(Protocol):
         *,
         writer_role: str = "orchestrator",
         evidence_basis: str | None = None,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]: ...
 
     def seal(self) -> Path: ...
@@ -1348,11 +1350,23 @@ class ReceiptChain:
         *,
         writer_role: str = "orchestrator",
         evidence_basis: str | None = None,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]:
         """Atomically close command admission, finalize pending input, and decide."""
         if transition not in {"run_decision", "run_abandoned"}:
             raise ValueError("terminal_transition_invalid")
         with self._lock:
+            sequence_changed = (
+                expected_sequence is not None
+                and expected_sequence != self._sequence
+            )
+            generation_changed = (
+                expected_manifest_generation is not None
+                and expected_manifest_generation != self._manifest_generation
+            )
+            if sequence_changed or generation_changed:
+                raise ValueError("recovery_confirmation_stale")
             receipts = self.covered_receipts()
             finalized = {
                 str(receipt.get("payload", {}).get("command_id"))
@@ -1394,7 +1408,7 @@ class ReceiptChain:
                         evidence_basis="derived",
                     )
             final_payload = dict(payload)
-            if transition == "run_abandoned":
+            if transition == "run_abandoned" and "last_covered_sequence" not in final_payload:
                 final_payload["last_covered_sequence"] = self.sequence
             return self.append(
                 transition,

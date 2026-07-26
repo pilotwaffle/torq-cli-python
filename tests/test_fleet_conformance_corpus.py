@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 import torq_cli.testing.fleet_conformance as fleet_conformance
 from torq_cli.domain.evidence_transitions import (
     TRANSITION_RULES,
     transition_authority_finding,
+)
+from torq_cli.domain.run_evidence import (
+    validate_receipt_payload,
+    validate_v2_receipt_contract,
 )
 from torq_cli.testing.fleet_conformance import (
     corpus_digest,
@@ -46,7 +52,23 @@ def test_generated_corpus_is_complete_and_every_fixture_conforms() -> None:
             assert "decision_value" in stages
 
     for fixture in fixtures:
+        if fixture["mutation_stage"] is None:
+            chain = fixture["receipt_chain"]
+            target = chain[-1]
+            assert target["writer_role"] == fixture["writer_role"]
+            assert target["transition"] == fixture["transition"]
+            assert target["evidence_basis"] == fixture["evidence_basis"]
+            assert validate_receipt_payload(
+                target["transition"],
+                target["payload"],
+                writer_role=target["writer_role"],
+            ) is None
+            assert validate_v2_receipt_contract(chain, sealed=False) is None
+            continue
         if fixture["mutation_stage"] == "precondition":
+            assert validate_v2_receipt_contract(
+                fixture["receipt_chain"], sealed=False
+            ) == fixture["expected_finding"]
             continue
         assert (
             transition_authority_finding(
@@ -65,18 +87,21 @@ def test_generated_corpus_is_byte_reproducible() -> None:
     assert first == second
     assert corpus_digest(first) == corpus_digest(second)
     assert corpus_digest(first) == (
-        "sha256:d63827fddefa69fa9793bf5bd8ef046ff4293773eee905c23b5fbe7ea2415726"
+        "sha256:439604fb93cb57ff98b8c5da6cf479395654d833a558e05beeec8f2726a4d27c"
     )
 
 
-def test_precondition_mutation_changes_the_pinned_corpus(
+def test_unknown_precondition_fails_corpus_generation_closed(
     monkeypatch,
 ) -> None:
-    baseline = corpus_digest()
     mutated = (
         replace(TRANSITION_RULES[0], precondition="mutated_precondition"),
         *TRANSITION_RULES[1:],
     )
     monkeypatch.setattr(fleet_conformance, "TRANSITION_RULES", mutated)
 
-    assert corpus_digest() != baseline
+    with pytest.raises(
+        ValueError,
+        match="precondition_fixture_missing:mutated_precondition",
+    ):
+        corpus_digest()

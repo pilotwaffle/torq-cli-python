@@ -161,6 +161,9 @@ class EvidenceBroker:
         token: str,
         transition: str,
         payload: Mapping[str, Any],
+        *,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]:
         caller = os.getpid()
         with self._lock:
@@ -185,6 +188,8 @@ class EvidenceBroker:
                 payload,
                 writer_role=capability.writer_role,
                 evidence_basis=rule.evidence_basis,
+                expected_sequence=expected_sequence,
+                expected_manifest_generation=expected_manifest_generation,
             )
 
     def resolve_action(
@@ -297,6 +302,8 @@ class BrokeredReceiptChain:
         *,
         writer_role: str = "orchestrator",
         evidence_basis: str | None = None,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]:
         if writer_role != self.__writer_role:
             raise PermissionError("broker_writer_role_unbound")
@@ -307,7 +314,13 @@ class BrokeredReceiptChain:
         if evidence_basis is not None and evidence_basis != rule.evidence_basis:
             raise ValueError("receipt_writer_unauthorized")
         capability = self.__broker.issue(writer_role)
-        return self.__broker.terminalize(capability.token, transition, payload)
+        return self.__broker.terminalize(
+            capability.token,
+            transition,
+            payload,
+            expected_sequence=expected_sequence,
+            expected_manifest_generation=expected_manifest_generation,
+        )
 
     def seal(self) -> Path:
         if self.__writer_role != "orchestrator":

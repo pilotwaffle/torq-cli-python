@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
@@ -391,6 +392,34 @@ def test_anchor_required_certificate_fails_closed_when_anchor_is_missing(
     assert result.finding == "manifest_anchor_missing"
 
 
+def test_manifest_anchor_substitution_with_invalid_root_signature_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-substituted")
+    chain.append("run_attested", {"ordinal": 1})
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    substituted = json.loads(anchor.read_text(encoding="utf-8"))
+    substituted["root_signature"] = "00" * 64
+    anchor.write_bytes(_canonical(substituted))
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_anchor_invalid"
+
+
+def test_manifest_anchor_hardlink_is_rejected_as_unsafe(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-hardlink")
+    chain.append("run_attested", {"ordinal": 1})
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    os.link(anchor, anchor.with_name("attacker-link.json"))
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_anchor_unsafe"
+
+
 def test_anchorless_certificate_v2_remains_readable_but_is_read_only(
     tmp_path: Path,
 ) -> None:
@@ -490,7 +519,15 @@ def test_double_death_stays_running_until_recovery_seals_abandonment(
     ]
     assert envelope["eligibility"]["recover_run"]["eligible"] is True
 
-    supervisor.abandon(["attempt-g1d-1"], client.sequence)
+    manifest_generation = FleetProjector(client.root).snapshot()["verification"][
+        "manifest_generation"
+    ]
+    assert isinstance(manifest_generation, int)
+    supervisor.abandon(
+        ["attempt-g1d-1"],
+        client.sequence,
+        manifest_generation,
+    )
     assert verify_receipt_store(client.root).status == "verified"
     abandoned = FleetProjector(client.root).snapshot()
     assert abandoned["lanes"][0]["state"] == "abandoned"

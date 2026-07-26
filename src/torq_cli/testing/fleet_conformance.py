@@ -10,6 +10,10 @@ from torq_cli.domain.evidence_transitions import (
     TRANSITION_RULES,
     transition_authority_finding,
 )
+from torq_cli.testing.fleet_preconditions import (
+    negative_precondition_case,
+    positive_precondition_case,
+)
 
 
 _WRITERS = ("orchestrator", "supervisor", "operator_gateway", "recovery")
@@ -36,6 +40,7 @@ def generate_authority_corpus() -> dict[str, Any]:
             (rule.writer_role, rule.transition, rule.decision_value or "-")
         )
         payload = _payload(rule.transition, rule.decision_value)
+        positive_chain = positive_precondition_case(rule)
         fixtures.append(
             {
                 "fixture_id": f"allow:{rule_id}",
@@ -46,6 +51,7 @@ def generate_authority_corpus() -> dict[str, Any]:
                 "transition": rule.transition,
                 "evidence_basis": rule.evidence_basis,
                 "payload": payload,
+                "receipt_chain": positive_chain,
                 "expected_finding": None,
             }
         )
@@ -76,6 +82,7 @@ def generate_authority_corpus() -> dict[str, Any]:
         wrong_basis = next(
             basis for basis in _BASES if basis != rule.evidence_basis
         )
+        receipt_chain, expected_finding = negative_precondition_case(rule)
         fixtures.append(
             {
                 "fixture_id": f"deny:evidence_basis:{rule_id}:{wrong_basis}",
@@ -113,7 +120,8 @@ def generate_authority_corpus() -> dict[str, Any]:
                 "transition": rule.transition,
                 "evidence_basis": rule.evidence_basis,
                 "payload": payload,
-                "expected_finding": None,
+                "receipt_chain": receipt_chain,
+                "expected_finding": expected_finding,
             }
         )
     return {

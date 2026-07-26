@@ -154,7 +154,7 @@ button { min-width: 2.75rem; min-height: 2.75rem; }
 .rail-heading { display: flex; justify-content: space-between; gap: 1rem; color: var(--text-3); font: var(--text-xs) "Cascadia Mono", monospace; letter-spacing: .08em; }
 .lane-pips { list-style: none; position: relative; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .5rem; margin: 1rem 0 0; padding: 0; }
 .lane-pips::before { content: ""; position: absolute; top: .55rem; left: 0; right: 0; height: 1px; background: var(--line); }
-.lane-pips li { position: relative; min-width: 0; padding-top: 1.55rem; color: var(--state-fg); font: var(--text-xs) "Cascadia Mono", monospace; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; }
+.lane-pips li { position: relative; min-width: 0; height: 1.1rem; color: var(--state-fg); }
 .lane-pips li::before { content: var(--state-glyph); position: absolute; top: 0; left: 0; width: 1.1rem; height: 1.1rem; display: grid; place-items: center; border: 1px solid var(--state-border); background: var(--state-bg); color: var(--state-fg); font: 700 .65rem/1 "Cascadia Mono", monospace; box-shadow: 0 0 0 3px var(--surface-0); }
 
 .system-banner { display: none; margin-bottom: 1rem; padding: .85rem 1rem; border-left: 3px solid var(--accent); background: var(--surface-2); color: var(--text-2); font-size: var(--text-sm); }

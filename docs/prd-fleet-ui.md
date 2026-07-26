@@ -1,10 +1,11 @@
 # PRD - TORQ Fleet UI
 
-Status: **Requirements Rev 5.5; reconciled to protected main at `8367514` on 2026-07-25.**
+Status: **Requirements Rev 5.5; implementation status is superseded by
+[`prd-fleet-ui-rev-5-5a.md`](prd-fleet-ui-rev-5-5a.md).**
 
-The Release 0 gate in Section 11 has passed. Release 1 completed protected-main
-CI on Windows, macOS, Linux, and headless Linux after merge. Release 2
-accounting and Release 3 control remain gated by their later build-order steps.
+The Release 0 gate in Section 11 has passed. Releases 1-3 and the Rev 5.5A
+backend/UI corrections are implemented. The companion status delta is the
+authoritative source for landed commit and verification evidence.
 
 Rev 5 closes gaps found reviewing Rev 4 against the code: certificate role
 binding, the missing writer for post-action closure, key storage boundaries,
@@ -35,17 +36,18 @@ that would invalidate shipped schema-v2 evidence and rejects a same-filesystem
 manifest counter as a security boundary. The complete disposition is in
 Section 20.
 
-Protected main implements build-order steps 0-8, closes canonical-encoding
+The implementation completes build-order steps 0-10, closes canonical-encoding
 decision 6 in favor of the pinned standard-library encoder, and includes the
-Release 0 adversarial fixtures plus the Fleet Read UI. Release 2 accounting and
-Release 3 control remain gated by steps 9 and 10 respectively.
+Rev 5.5A snapshot, control routes, conformance corpus, rollback anchor, and
+accessible Fleet control UI.
 
 Release 1 completed build-order step 8 as a
 wheel-bundled, loopback-only Fleet Read board. It adds the six-lane governance
 rail, orchestrator and action ledgers, in-place evidence detail, persistent
 monitor, deduplicated local notifications, secure static routes, responsive and
 reduced-motion treatments, and real-browser verification. Release 2 accounting
-and Release 3 control remain gated.
+and the later Rev 5.5A control surface extends it without moving reduction into
+the browser.
 
 Depends on:
 
@@ -151,10 +153,10 @@ attempts.
 observation, or an outcome for any attempt.
 
 Recovery fails closed while the latest run decision is `awaiting_approval` or
-`execution_complete_action_open`, or while any action remains open. The
-enumerated attempt list is non-empty. If every attempt terminated but the
-orchestrator died before its decision, the run is reconciled or superseded by a
-new linked run; recovery does not manufacture an empty abandonment event.
+while any action remains open. The enumerated attempt list exactly matches the
+open attempts. It may be empty only for a planned/cataloged run where no attempt
+was ever created and every approval, action, terminal, coverage, and pending
+command guard passes.
 
 The receipt carries `evidence_basis: submitted`, not `derived`. The claim that
 no worker is alive is an operator assertion. It is not observed by the writer
@@ -321,27 +323,27 @@ certified by the evidence-root identity.
 is admissible only if every column holds; any violation is `tampered`, not
 merely unreadable.
 
-| Writer | Transition | `payload.status` | Evidence basis | Required prior state | Referenced sequence |
+| Writer | Transition | `payload.decision` | Evidence basis | Required prior state | Referenced sequence |
 |---|---|---|---|---|---|
-| orchestrator | `run_planned` | - | `derived` | no prior `run_planned` | none |
+| orchestrator | `run_planned` | - | `observed` | no prior `run_planned` | none |
 | orchestrator | `stage_attempt_created` | - | `observed` | lane in catalog; no open attempt for that lane | none |
 | orchestrator | `stage_dispatch_started` | - | `observed` | its attempt created and unterminated | that attempt creation |
 | orchestrator | `stage_blocked` | - | `observed` | its attempt created, unterminated, undispatched | that attempt creation |
-| orchestrator | `stage_completed`, `stage_failed` | - | `observed` | its attempt created and unterminated | that attempt creation |
+| orchestrator | `stage_rejected`, `stage_completed`, `stage_failed` | - | `observed` | its attempt created; dispatch/verdict guard as applicable | that attempt creation |
 | orchestrator | `repair_routed` | - | `derived` | target lane dormant; qualifying defect sealed | the stage result that justifies it |
 | orchestrator | `action_opened` | - | `derived` | action ID not previously opened | its caused-by sequence |
 | orchestrator | `run_decision` | `awaiting_approval` | `derived` | zero open attempts; at least one open action; no terminal decision | latest `action_opened` |
-| orchestrator | `run_decision` | `blocked` | `derived` | qualifying `stage_blocked`; zero open attempts/actions; no terminal decision | that stage result |
-| orchestrator | `run_decision` | `execution_complete_action_open` | `derived` | execution complete; at least one open action; no terminal decision | latest `action_opened` |
-| orchestrator | `run_decision` | `workflow_closed` | `derived` | execution complete; zero open attempts/actions; no terminal decision | none |
-| supervisor | `stage_interrupted` | - | `derived` | attempt created and unterminated | the attempt creation it closes |
-| supervisor | `run_decision` | `workflow_failed` | `derived` | its own `stage_interrupted` sealed; no terminal decision | that `stage_interrupted` |
-| operator gateway | `context_injected` | - | `submitted` | run not closed | its command ID |
+| orchestrator | `run_decision` | `completed`, `blocked`, or `failed` | `derived` | authenticated required-lane outcomes satisfy the selected decision; no open attempt/action | the qualifying stage results |
+| supervisor | `stage_interrupted` | - | `observed` | attempt created and unterminated | the attempt creation it closes |
+| supervisor | `run_decision` | `failed` | `derived` | its own `stage_interrupted` sealed; no terminal decision | that `stage_interrupted` |
+| operator gateway | `command_accepted`, `command_rejected` | - | `submitted` | command ID is new | none |
+| operator gateway | `context_injected` | - | `submitted` | accepted command; run open | its command ID |
+| orchestrator | `context_injected`, `command_unapplied`, `run_replanned` | - | `derived` | the named command/attempt/terminalization guard | the accepted command |
 | operator gateway | `action_resolved` | - | `submitted` | referenced action opened and unresolved | the `action_opened` |
-| operator gateway | `run_decision` | `workflow_closed` | `derived` | `execution_complete_action_open`; zero open actions after this resolution | the `action_resolved` that closed the last one |
-| recovery | `run_abandoned` | - | `submitted` | no terminal decision; not awaiting operator action; at least one created, unterminated attempt; enumerated set equals exactly the unterminated attempts | the last covered sequence |
+| operator gateway | `run_decision` | `completed`, `blocked`, or `failed` | `derived` | last action resolved; decision matches its authenticated outcome map | the `action_resolved` that closed the last one |
+| recovery | `run_abandoned` | - | `submitted` | no terminal decision or operator wait/action; exact open-attempt enumeration, or guarded planned run with no attempt history | the last covered sequence |
 
-The authority key is `(writer_role, transition, payload.status)`, with status
+The authority key is `(writer_role, transition, payload.decision)`, with decision
 treated as null for non-decision transitions. A schema build fails on a missing,
 duplicate, or ambiguous key. The closed matrix governs schema 2.x and later;
 schema 1.x remains readable through the explicit legacy compatibility path and
@@ -469,16 +471,16 @@ never covers the supervisor's or recovery writer's transitions — but it does n
 close it. Decision 7 is where that residual risk is either accepted or paid down
 by running the broker under a separate OS identity.
 
-**TC-7c (accepted local rollback residual).** The per-run manifest has no
-monotonic anchor outside the operator-controlled filesystem. A same-user
-attacker who retained an earlier valid manifest can restore that manifest and
-its covered receipt prefix; the verifier cannot distinguish the restored state
-from legitimate verification lag. A generation counter stored beside the run
-would be controlled by the same attacker and would not close this threat. TORQ
-therefore reports only the evidence it can currently authenticate and treats
-same-user per-run rollback detection as out of scope unless a future design
-anchors monotonic state in an OS-backed identity or external transparency log.
-This residual does not weaken AR-4c's separate dispatch-registry requirement.
+**TC-7c (anchored rollback detection and residual).** Certificate schema 3
+declares an external signed-head policy. Each manifest carries a monotonic
+generation and predecessor hash; a root-signed head outside the run directory
+binds the latest generation and manifest hash. A stale valid manifest, deleted
+head, substituted head, or certificate downgrade fails closed. A one-generation
+manifest/head lag caused by a crash is `manifest_anchor_update_pending` and is
+reconciled only after full verification. This does not defend compromise of the
+same-user root private identity or rollback of the entire filesystem volume,
+including both run and anchor. Closing that residual requires hardware-backed
+monotonic state or a remote transparency service.
 
 This makes the broker the single most security-critical component in the
 product. It runs as its own process with its own lifetime, it is the only holder
@@ -658,11 +660,9 @@ generation check. A re-read-and-compare scheme would additionally starve on an
 actively appending run and could never observe `live_catching_up` at all, since
 it accepts only reads where nothing was appended.
 
-The read order landed in 56b8bff: `fleet.py:445-446` now reads the manifest
-first. The projection rule did not. `fleet.py:455` still requires
-`manifest.receipt_count == len(receipts)` exactly, so an append between the two
-reads still reports `manifest_coverage_mismatch` on a healthy run. Replacing that
-equality with the covered-prefix slice above is the remaining work.
+The read order and covered-prefix projection are implemented. A receipt appended
+after the manifest read produces `live_catching_up`; the uncovered tail is
+excluded from reduction rather than reported as tampering.
 
 **WC-1 (writer ordering invariant).** The broker commits a receipt to durable
 storage before replacing the manifest that covers it. The store is therefore
@@ -778,11 +778,14 @@ from receipt integrity. Fleet never tails provider stdout.
 ### 9.1 Stable Release 1 interface
 
 The server-side reducer is the only evidence reducer. The browser receives a
-complete `torq-fleet-snapshot-v2` document and never reconstructs lifecycle
-state from receipts. Its top-level fields are `schema`, `verification`,
-`data_status`, `run`, `summary`, `lanes`, `actions`, and `settlement`.
+complete `torq-fleet-envelope-v3` document and never reconstructs lifecycle
+state from receipts. Its top-level fields are `schema`, `snapshot`,
+`annotations`, `session`, `eligibility`, and `pending`. The nested snapshot is
+`torq-fleet-snapshot-v3` and carries verification, run, summary, lanes, actions,
+and settlement.
 
-`verification` carries raw and normalized verification state plus a finding.
+`verification` carries the verification state, finding, covered sequence, and
+manifest generation.
 `run` carries identity, decision, execution/workflow state, coverage, time,
 waiting action IDs, and explicitly non-evidentiary operational annotations.
 `summary` carries one count for each ordered lane state, open-action count,
@@ -790,21 +793,23 @@ operator-attention boolean, and reduction errors. Lane rows include their
 attempt history and certified writer provenance. Actions retain open/resolved
 linkage. Settlement values obey AR-2.
 
-The Release 1 route inventory is closed:
+The Fleet route inventory is closed:
 
 | Route | Method | Authentication | Purpose |
 |---|---|---|---|
 | `/healthz` | GET | none | fixed `{status: ok}` liveness only |
 | `/`, `/fleet.css`, `/fleet.js` | GET | none | packaged static application assets; no run data |
 | `/bootstrap?nonce=...` | GET | single-use bootstrap nonce | set an HttpOnly, SameSite session cookie and redirect to `/` |
-| `/api/v1/fleet` | GET | Fleet session | complete v2 snapshot |
-| `/api/v1/context` | POST | write-capable Fleet session plus exact same origin | governed textual context injection when configured |
+| `/api/v1/fleet` | GET | Fleet session | complete v3 envelope |
+| `/api/v1/fleet/events` | GET | Fleet session | bounded SSE stream of complete v3 envelopes |
+| `/api/v1/context`, `/api/v1/fleet/context` | POST | write-capable Fleet session plus exact same origin | governed context injection when configured |
+| `/api/v1/fleet/actions/{id}/resolve` | POST | write-capable Fleet session plus exact same origin | resolve an eligible open action |
+| `/api/v1/fleet/recover/confirm` | POST | write-capable Fleet session plus exact same origin | issue a short-lived, state-bound recovery confirmation |
+| `/api/v1/fleet/recover` | POST | write-capable Fleet session plus exact same origin and confirmation | abandon an eligible orphaned run |
 
-No other Release 1 route exists. The client polls the complete snapshot every
-three seconds with `no-store`; it retains the last verified display while
-reconnecting and never merges partial state. A future event stream or Release 3
-mutation route requires an explicit versioned contract and does not silently
-change this surface.
+No other Fleet route exists. The client prefers SSE, falls back to complete
+snapshot polling, retains the last verified display while reconnecting, and
+never merges partial state.
 
 The board, action panel, and mini monitor project the same snapshot. State is
 never conveyed by colour alone. Expanders expose `aria-expanded`, status changes
@@ -963,7 +968,7 @@ checks on 2026-07-25. Rows marked not landed are the Release 2/3 workload.
 | Decimal settlement aggregation (AR-2) | implemented with `Decimal` accumulation and canonical decimal-string outputs |
 | Recovery while waiting on operator | refused for awaiting-approval state or any open action |
 | Run-decision value authority | implemented as per-writer permitted status sets in the shared transition matrix |
-| Per-run manifest rollback detection | accepted TC-7c residual; no same-filesystem counter is represented as a security boundary |
+| Per-run manifest rollback detection | implemented with certificate schema 3, generation/predecessor linkage, and a root-signed external head; root-identity compromise and whole-volume rollback remain residual |
 | Registry anti-rollback head anchor (AR-4c) | implemented with signed head/count, explicit re-anchor record, confirmation, and quarantine limit |
 | Orphan annotation (SR-3a) | implemented as non-evidentiary supervisor state |
 | Abandoned-attempt reduction (LC-1, VC-6, VC-7) | implemented only through certified `run_abandoned` evidence |
@@ -973,7 +978,7 @@ checks on 2026-07-25. Rows marked not landed are the Release 2/3 workload.
 | Operator action lifecycle | implemented with linked resolution and operator-gateway closure |
 | Local supervisor and interruption evidence | implemented with atomic non-evidentiary state and role-limited interruption/recovery writes |
 | Reservation expiry/reconciliation and cross-run aggregation | implemented with separate used/reserved/limit values, signed reconciliation history, and shared Qwen/DeepSeek windows |
-| Binary extraction/sanitization | not landed |
+| Binary extraction/sanitization | implemented with a strict MIME allowlist, UTF-8/JSON extraction, and size/tree bounds |
 
 ### Release 0 gate
 
@@ -1029,8 +1034,8 @@ command lifecycle, sanitizer, attempt boundaries, and replan receipts.
 
 ## 12. Build order
 
-Protected main at `8367514` verifies steps 0-8, including Fleet Read UI. Step 9
-is the next implementation phase; step 10 remains gated as Release 3 work.
+Steps 0-10 and the Rev 5.5A follow-through are implemented. Commit and test
+evidence is maintained in the companion status delta.
 
 0. One pinned canonical JSON encoder shared by hashing, signing, and storage.
    Complete: the standard-library encoder covers receipts, certificates, and
@@ -1378,13 +1383,13 @@ in the historical Sections 16-19.
 
 | Draft item | Rev 5.5 disposition |
 |---|---|
-| 1.1 decision authority | Adopted with the shipped field name `payload.status`. Authority is keyed by writer, transition, and status; the allowed values are closed per writer. Existing v2 vocabulary is retained. |
+| 1.1 decision authority | Adopted with `payload.decision`. Authority is keyed by writer, transition, and decision; the allowed values are closed per writer. Certificate schemas 1 and 2 retain their explicit legacy read-only vocabulary. |
 | 1.2 blocked lanes | Landed in #26. `blocked` is distinct from `needs you`; a lane-scoped open action has precedence and promotes the lane to operator attention. |
-| 1.3 abandonment | The destructive empty-enumeration proposal is rejected. Recovery requires a non-empty exact enumeration and fails while any operator action is open or the run is awaiting approval. |
+| 1.3 abandonment | Adopted under strict guards. Empty enumeration is valid only for a planned/cataloged run where no attempt was ever created; it remains forbidden after any attempt history, while awaiting approval, with an open action, terminal decision, incomplete coverage, or pending command. |
 | 1.4 orphan annotation | Adopted. Waiting for an operator is not orphaned, and irreversible recovery is unavailable in that state. |
-| 1.5 manifest rollback | The proposed same-filesystem generation anchor is rejected as a false boundary under TC-7b. TC-7c remains the explicit local residual. The Release 2 registry has a separate anchored head because deleting registry entries changes the entitlement denominator. |
+| 1.5 manifest rollback | Adopted with certificate schema 3, generation/predecessor linkage, and a root-signed head outside the run directory. Same-user root-identity compromise and whole-volume rollback remain explicit residuals. |
 | 1.6 schema-v1 closure | Adopted as compatibility policy: the closed authority matrix begins at schema 2.x; schema 1.x is legacy read-only evidence. |
-| 1.7 receipt `run_id` | No migration. Run identity is bound by the certified per-run keys, run certificate, manifest, and directory identity. Adding a mandatory receipt field would invalidate shipped v2 evidence without strengthening the stated same-user boundary. |
+| 1.7 receipt `run_id` | Adopted for the current certificate class. Certificate schemas 1 and 2 remain verifiable through the explicit legacy read-only path, so shipped evidence is not rewritten or reclassified as tampered. |
 | 1.8 computable preconditions | Adopted as a matrix rule: every precondition is chain-derived and named. Future Release 3 transitions must extend the same specification before becoming admissible. |
 | 1.9 reader boundary | Adopted. The broker is the only receipt-store writer; Fleet is a keyless, read-only evidence consumer. |
 | 1.10 evidence bases | Adopted in TC-2. Operational lease/liveness context is labelled and never presented as provider observation. |
@@ -1398,12 +1403,12 @@ remain verifiable through a read-only byte-compatibility path.
 | Draft item | Rev 5.5 disposition |
 |---|---|
 | 3.1 reducer ownership | Adopted. The reference reducer is server-side and the browser never reduces receipts. |
-| 3.2 snapshot v3 | Rejected for Release 1. `torq-fleet-snapshot-v2` is now pinned in Section 9.1. A v3 requires an additive Release 2/3 need and an explicit migration. |
-| 3.3 annotations | Operational annotations remain explicitly nested under `run.operational_annotations`; they are outside evidence-derived lane state without requiring another transport envelope. |
-| 3.4 mutation eligibility | Deferred to Release 3. Release 1 has only the already-governed context-injection route. |
-| 3.5 fixture corpus | Adopted as a gate principle: each reachable state in the current release needs a fixture; unavailable later-release transitions are negative fixtures. |
+| 3.2 snapshot v3 | Adopted as `torq-fleet-envelope-v3` containing `torq-fleet-snapshot-v3`. |
+| 3.3 annotations | Adopted as a top-level envelope member, explicitly outside evidence reduction. |
+| 3.4 mutation eligibility | Adopted. The server computes per-operation eligibility/reasons, session state, and pending correlation IDs. |
+| 3.5 fixture corpus | Adopted with a declared completeness rule, pinned digest, positive preconditions, negative lifecycle fixtures, and named mutation coverage. |
 | 3.6 pips/monitor/accessibility | Adopted and reconciled to the wheel-bundled board. Pips are catalog-driven, the monitor is a projection rather than a reducer, and keyboard/live-region/reduced-motion behavior is normative. |
-| 3.7 routes/refresh | Reconciled to the shipped closed route inventory and complete-snapshot three-second polling. SSE and additional mutation routes require a future versioned contract. |
+| 3.7 routes/refresh | Adopted with bounded SSE, polling fallback, action resolution, context injection, and two-step recovery routes. |
 
 The delivery shell is settled: wheel-bundled static HTML, CSS, and JavaScript
 served by the loopback Python process. The shipped assets are the Release 1
@@ -1432,12 +1437,10 @@ implemented.
 
 1. Release 0 evidence foundation: complete.
 2. Release 1 Fleet Read: complete.
-3. Release 2 accounting (build-order step 9): immutable rate identity, root
-   dispatch registry, anchored rollback detection, cross-run trust-set
-   aggregation, reservations, reconciliation, and coverage-gated preflight.
-4. Release 3 control (build-order step 10): command lifecycle, supported
-   artifacts, attempt-bound application, and replanning.
+3. Release 2 accounting (build-order step 9): complete.
+4. Release 3 control (build-order step 10): complete.
+5. Rev 5.5A evidence corrections, v3 transport, control routes, rollback anchor,
+   conformance corpus, and Fleet control UI: complete.
 
-Rev 5.5 therefore removes the draft's false blockers without erasing its valid
-findings. It gives Release 2 a closed accounting contract and keeps Release 3
-control work gated behind its own transition and route definitions.
+Rev 5.5A applies the valid corrections without rewriting legacy evidence and
+records the remaining trust residual precisely.
