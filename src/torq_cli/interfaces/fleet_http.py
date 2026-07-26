@@ -318,12 +318,23 @@ def create_fleet_server(
         if not isinstance(raw_operational, Mapping):
             return []
         observed_at = raw_operational.get("heartbeat_at")
+        if (
+            isinstance(observed_at, str)
+            and raw_operational.get("worker_pid") is None
+            and raw_operational.get("lifecycle") == "workflow_reconciled"
+        ):
+            return [
+                {
+                    "kind": "workflow_reconciled",
+                    "scope": "run",
+                    "observed_at": observed_at,
+                    "source": "supervisor",
+                }
+            ]
         raw_orphans = raw_operational.get("orphaned_roles", ())
         if (
             not isinstance(observed_at, str)
-            or not isinstance(
-            raw_orphans, (list, tuple)
-            )
+            or not isinstance(raw_orphans, (list, tuple))
             or raw_operational.get("worker_pid") is not None
             or raw_operational.get("lifecycle") != "recovery_required"
         ):
@@ -359,10 +370,13 @@ def create_fleet_server(
     def fleet_envelope(session: _Session) -> dict[str, Any]:
         snapshot = projector.snapshot()
         run = snapshot.get("run")
+        annotations = operational_annotations()
         if isinstance(run, Mapping) and run.get("workflow_state") in {
             "closed",
             "abandoned",
-        }:
+        } or any(
+            item.get("kind") == "workflow_reconciled" for item in annotations
+        ):
             session_manager.downgrade(session)
         return controls.envelope(
             snapshot,

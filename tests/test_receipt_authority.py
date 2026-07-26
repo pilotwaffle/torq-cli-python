@@ -430,6 +430,27 @@ def test_stage_rejected_is_a_dispatched_review_terminal_not_a_preflight_block(
     )
 
 
+def test_current_schema_rejects_undeclared_orchestrator_audit_event(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "unknown-current-event")
+    before = chain.receipts_path.read_bytes() if chain.receipts_path.exists() else b""
+
+    with pytest.raises(ValueError, match="receipt_writer_unauthorized"):
+        chain.append("operator_note", {"summary": "forged current event"})
+
+    after = chain.receipts_path.read_bytes() if chain.receipts_path.exists() else b""
+    assert after == before
+
+
+def test_declared_current_audit_event_remains_available(tmp_path: Path) -> None:
+    chain = _chain(tmp_path / "evidence", "declared-current-event")
+    receipt = chain.append("run_attested", {"mode": "dry_run"})
+
+    assert receipt["transition"] == "run_attested"
+    assert receipt["evidence_basis"] == "observed"
+
+
 def test_stage_rejected_requires_prior_dispatch_and_is_not_added_to_cert_v1(
     tmp_path: Path,
 ) -> None:

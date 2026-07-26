@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 import unicodedata
 from dataclasses import dataclass
 
-EXTRACTION_CONTRACT_VERSION = "1.0.0"
+EXTRACTION_CONTRACT_VERSION = "1.1.0"
 MAX_ARTIFACT_BYTES = 1_048_576
 
 _SUPPORTED_MEDIA_TYPES = frozenset({
     "application/json",
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
     "text/markdown",
     "text/plain",
 })
 _EXTENSIONS = {
     "application/json": frozenset({".json"}),
+    "application/pdf": frozenset({".pdf"}),
+    "image/jpeg": frozenset({".jpg", ".jpeg"}),
+    "image/png": frozenset({".png"}),
     "text/markdown": frozenset({".md", ".markdown"}),
     "text/plain": frozenset({".txt"}),
 }
@@ -76,6 +84,20 @@ def extract_supported_artifact(
     extension = "." + normalized_name.rsplit(".", 1)[-1].casefold()
     if extension not in _EXTENSIONS[normalized_type]:
         raise ArtifactExtractionError("artifact_extension_mismatch")
+    if normalized_type in {"application/pdf", "image/jpeg", "image/png"}:
+        text, extractor = _extract_bounded_binary(
+            content,
+            media_type=normalized_type,
+            source_name=normalized_name,
+        )
+        return ExtractedArtifact(
+            text=text,
+            media_type=normalized_type,
+            source_name=normalized_name,
+            source_bytes=len(content),
+            extracted_bytes=len(text.encode("utf-8")),
+            extractor=extractor,
+        )
     if content.startswith(_BINARY_SIGNATURES):
         raise ArtifactExtractionError("artifact_binary_signature_denied")
     if b"\x00" in content:
@@ -118,6 +140,49 @@ def extract_supported_artifact(
         source_bytes=len(content),
         extracted_bytes=len(text.encode("utf-8")),
         extractor=extractor,
+    )
+
+
+def _extract_bounded_binary(
+    content: bytes,
+    *,
+    media_type: str,
+    source_name: str,
+) -> tuple[str, str]:
+    """Validate a closed binary signature and preserve it in a canonical envelope."""
+    metadata: dict[str, object] = {}
+    if media_type == "image/png":
+        if len(content) < 24 or content[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR":
+            raise ArtifactExtractionError("artifact_signature_mismatch")
+        width = int.from_bytes(content[16:20], "big")
+        height = int.from_bytes(content[20:24], "big")
+        if not 0 < width <= 100_000 or not 0 < height <= 100_000:
+            raise ArtifactExtractionError("artifact_image_dimensions_invalid")
+        metadata = {"width": width, "height": height}
+        extractor = "validated-png-envelope"
+    elif media_type == "image/jpeg":
+        if (
+            len(content) < 4
+            or not content.startswith(b"\xff\xd8\xff")
+            or not content.endswith(b"\xff\xd9")
+        ):
+            raise ArtifactExtractionError("artifact_signature_mismatch")
+        extractor = "validated-jpeg-envelope"
+    else:
+        if not content.startswith(b"%PDF-") or b"%%EOF" not in content[-1024:]:
+            raise ArtifactExtractionError("artifact_signature_mismatch")
+        extractor = "validated-pdf-envelope"
+
+    envelope = {
+        "content_base64": base64.b64encode(content).decode("ascii"),
+        "media_type": media_type,
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "source_name": source_name,
+        **metadata,
+    }
+    return (
+        json.dumps(envelope, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        extractor,
     )
 
 

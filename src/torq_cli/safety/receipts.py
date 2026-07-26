@@ -42,6 +42,7 @@ _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION = "2.0.0"
 _CERTIFICATE_SCHEMA_VERSION = "3.0.0"
 _MANIFEST_ANCHOR_SCHEMA_VERSION = "1.0.0"
 _MANIFEST_ROLLBACK_POLICY = "external-signed-head-v1"
+_CANONICAL_ENCODING_MARKER = "UTF-8 \u2713"
 _RECEIPT_AUTHORITIES = frozenset({"worker", "supervisor_derived"})
 _SUPERVISOR_TRANSITIONS = frozenset({"stage_interrupted", "run_decision"})
 _WRITER_ROLES = frozenset(
@@ -970,6 +971,7 @@ class ReceiptChain:
         )
         body = {
             "certificate_schema_version": _CERTIFICATE_SCHEMA_VERSION,
+            "canonical_encoding_marker": _CANONICAL_ENCODING_MARKER,
             "run_id": self.run_id,
             "manifest_rollback_policy": _MANIFEST_ROLLBACK_POLICY,
             "manifest_key": {
@@ -1458,6 +1460,7 @@ class ReceiptChain:
         next_generation = self._manifest_generation + 1
         manifest = {
             "schema_version": self.schema_version,
+            "canonical_encoding_marker": _CANONICAL_ENCODING_MARKER,
             "run_id": self.run_id,
             "manifest_generation": next_generation,
             "previous_manifest_hash": previous_manifest_hash,
@@ -1671,6 +1674,15 @@ def verify_receipt_store(
                 or signed.get("schema_version") != _RECEIPT_SCHEMA_VERSION
                 or signed.get("certificate_hash")
                 != certificate_file_hash
+                or (
+                    certificate_schema_version == _CERTIFICATE_SCHEMA_VERSION
+                    and (
+                        certificate.get("canonical_encoding_marker")
+                        != _CANONICAL_ENCODING_MARKER
+                        or signed.get("canonical_encoding_marker")
+                        != _CANONICAL_ENCODING_MARKER
+                    )
+                )
             ):
                 return StoreVerification("tampered", "run_certificate_invalid")
             if (

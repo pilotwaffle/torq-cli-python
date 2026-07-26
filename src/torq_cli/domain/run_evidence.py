@@ -554,7 +554,7 @@ def validate_receipt_payload(
             or not legacy
             and set(extraction)
             != {"contract_version", "extractor", "source_bytes", "extracted_bytes"}
-            or extraction.get("contract_version") != "1.0.0"
+            or extraction.get("contract_version") not in {"1.0.0", "1.1.0"}
             or not (
                 isinstance(extraction.get("extractor"), str)
                 if legacy

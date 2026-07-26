@@ -1,14 +1,34 @@
-# TORQ UI boundary
+# TORQ Fleet UI
 
-This directory reserves the future desktop/web UI boundary for v0.2.
+TORQ Fleet is a wheel-bundled browser application served by the loopback-only
+Python Fleet server. It renders the `torq-fleet-snapshot-v3` envelope and never
+reads provider output or evidence files directly.
 
-The UI is not part of the v0.1 build. Version 0.1 remains a headless-first
-Python CLI. UI code consumes `torq-fleet-snapshot-v1` through
-`GET /api/v1/fleet` or the public `FleetProjector` application service; it must
-not import CLI command handlers or read provider stdout.
+Launch it with the CLI's Fleet serve command. The single-use `/bootstrap`
+exchange establishes an HttpOnly, SameSite session and redirects to `/` without
+leaving the nonce in browser history.
 
-See `docs/architecture/fleet-backend-contract.md`.
+## Route contract
 
-The optional input dock uses the attended `GovernedContextInjector` contract in
-`docs/architecture/context-injection-contract.md`. The standalone Fleet server
-does not enable mutation endpoints.
+- `GET /` and `GET /assets/fleet.{css,js}` serve static assets containing no run data.
+- `GET /api/v1/fleet` returns one complete verified v3 envelope.
+- `GET /api/v1/fleet/events` streams complete envelopes with polling fallback.
+- `POST /api/v1/fleet/context` records attended text or a supported attachment.
+- `POST /api/v1/fleet/actions/{id}/resolve` resolves an eligible action.
+- `POST /api/v1/fleet/recover/confirm` and `/recover` implement two-step recovery.
+
+All evidence reads require the Fleet session. Mutations additionally require a
+write-capable session and exact same origin. The legacy `/api/v1/context` alias
+is retained for compatible clients; new UI code uses `/api/v1/fleet/context`.
+
+## Governed command rail
+
+The fixed bottom rail combines the six-lane monitor with attended input. Inline
+text and up to four bounded `.txt`, `.md`, `.json`, `.png`, `.jpg`/`.jpeg`, or
+`.pdf` attachments are submitted through the governed context route. Binary
+types are signature checked, encrypted as canonical artifact envelopes, and
+receipt-bound. Submitting context does not itself dispatch a provider.
+
+The authoritative backend contract is
+`docs/architecture/fleet-backend-contract.md`; artifact extraction boundaries
+are in `docs/architecture/context-injection-contract.md`.
