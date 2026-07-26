@@ -194,30 +194,3 @@ def test_session_projects_effective_expiry_without_exposing_token() -> None:
     assert session is not None
     assert manager.expires_at(session) == "1970-01-01T00:16:50Z"
     assert token not in manager.expires_at(session)
-
-
-def test_workflow_reconciled_annotation_is_terminal_operational_data() -> None:
-    envelope = compose_fleet_envelope(
-        _snapshot(),
-        session_write_capable=False,
-        expires_at=None,
-        annotations=[
-            {
-                "kind": "workflow_reconciled",
-                "scope": "run",
-                "observed_at": "2026-07-25T12:00:00Z",
-                "source": "supervisor",
-            }
-        ],
-    )
-
-    assert envelope["annotations"] == [
-        {
-            "kind": "workflow_reconciled",
-            "scope": "run",
-            "observed_at": "2026-07-25T12:00:00Z",
-            "source": "supervisor",
-        }
-    ]
-    assert "workflow_reconciled" not in envelope["snapshot"]
-    assert envelope["session"]["write_capable"] is False

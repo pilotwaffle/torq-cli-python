@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -18,7 +17,6 @@ from torq_cli.connectors import Connector, MemoryVault, MockSurface, all_connect
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
-from torq_cli.safety.evidence_broker import RemoteEvidenceBroker
 from torq_cli.safety.receipts import (
     FileRunKeyStore,
     MemoryRunKeyStore,
@@ -118,36 +116,25 @@ def test_active_runtime_uses_one_broker_with_fixed_role_facades(tmp_path: Path) 
         "prior-chain",
     )
     runtime = RunController(tmp_path / "runtime").create_active_runtime(identity)
-    try:
-        client = runtime.execution_chain._BrokeredReceiptChain__broker
-        assert isinstance(client, RemoteEvidenceBroker)
-        assert runtime.broker_process.process_id != os.getpid()
-        assert runtime.broker_process.is_alive
-        assert not hasattr(client, "key")
-        assert not hasattr(client, "run_keys")
-        assert not hasattr(client, "_EvidenceBroker__chain")
 
-        accepted = runtime.context_injector.inject("Runtime-owned command")
-        row = json.loads(runtime.gateway_chain.receipts_path.read_text().splitlines()[0])
-        assert row["transition"] == "command_accepted"
-        assert row["writer_role"] == "operator_gateway"
-        assert accepted["status"] == "accepted"
-        with pytest.raises(PermissionError, match="broker_seal_unauthorized"):
-            runtime.gateway_chain.seal()
-        with pytest.raises(PermissionError, match="broker_artifact_read_unauthorized"):
-            runtime.gateway_chain.read_artifact(
-                runtime.gateway_chain.root / str(accepted["artifact"])
-            )
-        with pytest.raises(PermissionError, match="broker_writer_role_unbound"):
-            runtime.execution_chain.append(
-                "command_rejected",
-                {},
-                writer_role="operator_gateway",
-                evidence_basis="submitted",
-            )
-    finally:
-        runtime.close()
-    assert not runtime.broker_process.is_alive
+    accepted = runtime.context_injector.inject("Runtime-owned command")
+    row = json.loads(runtime.gateway_chain.receipts_path.read_text().splitlines()[0])
+    assert row["transition"] == "command_accepted"
+    assert row["writer_role"] == "operator_gateway"
+    assert accepted["status"] == "accepted"
+    with pytest.raises(PermissionError, match="broker_seal_unauthorized"):
+        runtime.gateway_chain.seal()
+    with pytest.raises(PermissionError, match="broker_artifact_read_unauthorized"):
+        runtime.gateway_chain.read_artifact(
+            runtime.gateway_chain.root / str(accepted["artifact"])
+        )
+    with pytest.raises(PermissionError, match="broker_writer_role_unbound"):
+        runtime.execution_chain.append(
+            "command_rejected",
+            {},
+            writer_role="operator_gateway",
+            evidence_basis="submitted",
+        )
 
 
 def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approval(

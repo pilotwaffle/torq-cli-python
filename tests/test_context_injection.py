@@ -557,17 +557,11 @@ def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path
             urllib.request.urlopen(stale)
         assert stale_error.value.code == 401
 
-        png = (
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-            + (32).to_bytes(4, "big")
-            + (24).to_bytes(4, "big")
-            + b"bounded-payload"
-        )
         file_body = json.dumps({
             "input_kind": "file",
-            "content_base64": base64.b64encode(png).decode(),
-            "media_type": "image/png",
-            "source_name": "constraint.png",
+            "content_base64": base64.b64encode(b'{"constraint":"file"}').decode(),
+            "media_type": "application/json",
+            "source_name": "constraint.json",
         }).encode()
         file_request = urllib.request.Request(
             url,

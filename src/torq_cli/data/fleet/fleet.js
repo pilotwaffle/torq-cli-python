@@ -8,18 +8,6 @@ const FALLBACK_ROLES = ["g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui
 const SEEN_ACTIONS_KEY = "torq.fleet.notified-actions.v2";
 const THEME_KEY = "torq.fleet.theme.v1";
 const SAFE_VERIFICATION = new Set(["live_verified", "sealed_verified", "live_catching_up"]);
-const MAX_ATTACHMENTS = 4;
-const MAX_ATTACHMENT_BYTES = 700 * 1024;
-const ATTACHMENT_TYPES = new Map([
-  [".txt", "text/plain"],
-  [".md", "text/markdown"],
-  [".markdown", "text/markdown"],
-  [".json", "application/json"],
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".pdf", "application/pdf"],
-]);
 
 const byId = (id) => document.getElementById(id);
 const node = (tag, className, text) => {
@@ -29,7 +17,6 @@ const node = (tag, className, text) => {
   return element;
 };
 const human = (value) => String(value ?? "unknown").replaceAll("_", " ");
-const presentationState = (value) => value === "sealed" ? "completed" : human(value);
 const upper = (value) => human(value).toUpperCase();
 const safeState = (value) => STATES.includes(String(value)) ? String(value) : "queued";
 const valueOrDash = (value) => value === null || value === undefined || value === "" ? "—" : String(value);
@@ -47,7 +34,6 @@ let refreshInFlight = false;
 let recoverySecret = null;
 let recoveryBinding = null;
 const localMutations = new Map();
-let stagedAttachments = [];
 
 function setText(id, value) { byId(id).textContent = valueOrDash(value); }
 function correlationId(prefix) {
@@ -136,7 +122,7 @@ function renderRail(lanes) {
     const state = safeState(lane.state);
     const item = node("li");
     item.dataset.state = state;
-    item.setAttribute("aria-label", `${lane.role}: ${presentationState(state)}`);
+    item.setAttribute("aria-label", `${lane.role}: ${human(state)}`);
     rail.append(item);
     const pip = node("i");
     pip.dataset.state = state;
@@ -151,7 +137,7 @@ function renderTallies(summary) {
     const count = Number(summary?.[state] ?? 0);
     const group = node("div");
     group.dataset.state = state;
-    group.append(node("dt", "", presentationState(state)), node("dd", "", count));
+    group.append(node("dt", "", human(state)), node("dd", "", count));
     list.append(group);
   });
 }
@@ -206,13 +192,13 @@ function renderLane(lane, index, rovingIndex) {
   article.dataset.state = state;
   article.dataset.role = lane.role;
   article.setAttribute("role", "listitem");
-  article.setAttribute("aria-label", `${lane.role}: ${presentationState(state)}`);
+  article.setAttribute("aria-label", `${lane.role}: ${human(state)}`);
   const main = node("div", "lane-main lane-columns");
   const role = node("div", "lane-role");
   const identity = [lane.provider, lane.model].filter(Boolean).join(" / ") || lane.kind || "unassigned";
   role.append(node("strong", "", lane.role), node("span", "", identity));
   role.lastChild?.setAttribute("aria-label", identity);
-  const stateChip = node("span", "state-chip", presentationState(state));
+  const stateChip = node("span", "state-chip", human(state));
   const attempt = node("span", "lane-number", lane.attempt_ordinal ? `#${lane.attempt_ordinal}` : "—");
   const sequence = node("span", "lane-number", lane.latest_sequence ? `SEQ ${lane.latest_sequence}` : "—");
   const summary = node("span", "lane-summary", laneSummary(lane));
@@ -336,163 +322,6 @@ async function postJson(path, payload) {
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.finding || `HTTP_${response.status}`);
   return result;
-}
-
-function attachmentMediaType(file) {
-  const lower = file.name.toLowerCase();
-  const extension = [...ATTACHMENT_TYPES.keys()].find((item) => lower.endsWith(item));
-  if (!extension) throw new Error("attachment_type_unsupported");
-  const expected = ATTACHMENT_TYPES.get(extension);
-  if (file.type && file.type.toLowerCase() !== expected) throw new Error("attachment_type_mismatch");
-  return expected;
-}
-
-async function validateAttachment(file) {
-  if (!file.name || file.name.length > 255 || /[\x00-\x1f\x7f/:\\]/.test(file.name)) {
-    throw new Error("attachment_name_invalid");
-  }
-  if (!file.size || file.size > MAX_ATTACHMENT_BYTES) throw new Error("attachment_size_invalid");
-  const mediaType = attachmentMediaType(file);
-  const bytes = new Uint8Array(await file.slice(0, 24).arrayBuffer());
-  const signature = (...values) => values.every((value, index) => bytes[index] === value);
-  if (mediaType === "image/png" && !signature(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) {
-    throw new Error("attachment_signature_mismatch");
-  }
-  if (mediaType === "image/jpeg" && !signature(0xff, 0xd8, 0xff)) {
-    throw new Error("attachment_signature_mismatch");
-  }
-  if (mediaType === "application/pdf" && !signature(0x25, 0x50, 0x44, 0x46, 0x2d)) {
-    throw new Error("attachment_signature_mismatch");
-  }
-  return { file, mediaType };
-}
-
-function renderAttachments() {
-  const list = byId("attachment-list");
-  list.replaceChildren();
-  stagedAttachments.forEach((attachment, index) => {
-    const chip = node("span", "attachment-chip");
-    chip.append(node("span", "", `${attachment.file.name} · ${Math.ceil(attachment.file.size / 1024)} KB`));
-    const remove = node("button", "", "×");
-    remove.type = "button";
-    remove.setAttribute("aria-label", `Remove ${attachment.file.name}`);
-    remove.addEventListener("click", () => {
-      stagedAttachments.splice(index, 1);
-      renderAttachments();
-    });
-    chip.append(remove);
-    list.append(chip);
-  });
-}
-
-function fileBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("attachment_read_failed"));
-    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
-    reader.readAsDataURL(file);
-  });
-}
-
-function composerAvailable() {
-  return Boolean(
-    latestEnvelope?.session?.write_capable
-    && latestEnvelope?.eligibility?.context?.eligible
-  );
-}
-
-function updateComposerAvailability() {
-  const available = composerAvailable();
-  byId("context-input").disabled = !available;
-  byId("attach-button").disabled = !available;
-  byId("context-submit").disabled = !available;
-  if (!available && latestEnvelope) {
-    byId("composer-status").textContent = `Unavailable: ${human(latestEnvelope.eligibility?.context?.reason || latestEnvelope.session?.read_only_reason || "read only")}.`;
-  } else if (available && byId("composer-status").textContent.startsWith("Unavailable:")) {
-    byId("composer-status").textContent = "";
-  }
-}
-
-async function submitComposer(event) {
-  event.preventDefault();
-  const input = byId("context-input");
-  const text = input.value.trim();
-  if (!text && !stagedAttachments.length) {
-    byId("composer-status").textContent = "Add text or an attachment first.";
-    input.focus();
-    return;
-  }
-  if (!composerAvailable()) {
-    updateComposerAvailability();
-    return;
-  }
-  const submit = byId("context-submit");
-  submit.disabled = true;
-  submit.setAttribute("aria-busy", "true");
-  const queue = [...stagedAttachments];
-  let accepted = 0;
-  try {
-    if (text) {
-      byId("composer-status").textContent = "Recording text context…";
-      await postJson("/api/v1/fleet/context", {
-        correlation_id: correlationId("context"),
-        input_kind: "inline_text",
-        content: text,
-        media_type: "text/plain",
-      });
-      accepted += 1;
-      input.value = "";
-    }
-    for (const attachment of queue) {
-      byId("composer-status").textContent = `Recording ${attachment.file.name}…`;
-      await postJson("/api/v1/fleet/context", {
-        correlation_id: correlationId("artifact"),
-        input_kind: "file",
-        content_base64: await fileBase64(attachment.file),
-        media_type: attachment.mediaType,
-        source_name: attachment.file.name,
-      });
-      accepted += 1;
-      stagedAttachments = stagedAttachments.filter((item) => item !== attachment);
-      renderAttachments();
-    }
-    byId("composer-status").textContent = `${accepted} governed ${accepted === 1 ? "item" : "items"} accepted. Waiting for verified evidence.`;
-    await refresh();
-  } catch (error) {
-    byId("composer-status").textContent = `Blocked after ${accepted}: ${human(error.message)}.`;
-  } finally {
-    submit.disabled = !composerAvailable();
-    submit.removeAttribute("aria-busy");
-  }
-}
-
-function configureComposer() {
-  const input = byId("context-input");
-  const picker = byId("attachment-input");
-  byId("attach-button").addEventListener("click", () => picker.click());
-  picker.addEventListener("change", async () => {
-    const files = [...picker.files];
-    picker.value = "";
-    if (stagedAttachments.length + files.length > MAX_ATTACHMENTS) {
-      byId("composer-status").textContent = `Attach no more than ${MAX_ATTACHMENTS} files.`;
-      return;
-    }
-    try {
-      for (const file of files) stagedAttachments.push(await validateAttachment(file));
-      renderAttachments();
-      byId("composer-status").textContent = `${stagedAttachments.length} ${stagedAttachments.length === 1 ? "file" : "files"} ready.`;
-    } catch (error) {
-      byId("composer-status").textContent = `Attachment blocked: ${human(error.message)}.`;
-    }
-  });
-  input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-      event.preventDefault();
-      byId("context-composer").requestSubmit();
-    }
-  });
-  byId("context-composer").addEventListener("submit", submitComposer);
-  updateComposerAvailability();
 }
 
 async function resolveAction(action, resolution, button) {
@@ -657,7 +486,7 @@ function renderSettlement(settlement) {
   const labels = { metered_equivalent_usd: "Metered equivalent", direct_billed_usd: "Direct billed this run", billed_usd: "Direct billed this run", pricing_coverage: "Pricing coverage", priced_lanes: "Priced lanes", unpriced_lanes: "Unpriced lanes" };
   const entries = Object.entries(settlement || {}).filter(([key, value]) => key in labels && typeof value !== "object");
   if (!entries.length) {
-    const group = node("div"); group.append(node("dt", "", "Coverage"), node("dd", "", "No completed usage")); list.append(group); return;
+    const group = node("div"); group.append(node("dt", "", "Coverage"), node("dd", "", "No usage sealed")); list.append(group); return;
   }
   entries.forEach(([key, value]) => { const group = node("div"); group.append(node("dt", "", labels[key]), node("dd", "", formatSettlement(key, value))); list.append(group); });
 }
@@ -681,7 +510,6 @@ function renderUnavailable(envelope) {
   setText("monitor-run", "Evidence data suppressed"); setText("open-count", 0); setText("monitor-open", "0 OPEN");
   showBanner(`Evidence unavailable: ${human(verification.finding || "verification failed")}. Run values are suppressed.`, true);
   renderRail([]); renderLanes([]); renderActions([], null, {}, []); renderRecovery(null); renderTallies({}); renderSettlement(null); renderAnnotations(envelope.annotations || []);
-  updateComposerAvailability();
   byId("mini-monitor").setAttribute("aria-label", `TORQ Fleet monitor: ${human(label)}; evidence suppressed`);
 }
 
@@ -702,7 +530,6 @@ function renderEnvelope(envelope) {
   renderRail(lanes); renderTallies(summary); renderLanes(lanes);
   renderActions(actions, run.run_id, envelope.eligibility?.resolve_action || {}, envelope.pending);
   renderRecovery(envelope); renderSettlement(snapshot.settlement); renderAnnotations(envelope.annotations); updateElapsed();
-  updateComposerAvailability();
   const annotation = envelope.annotations?.[0];
   if (annotation) showBanner(`${human(annotation.kind)}: ${human(annotation.scope)}.`, annotation.kind === "broker_unavailable");
   else if (snapshot.data_status === "reduction_error") showBanner(`State reduction error: ${(summary.reduction_errors || []).map(human).join(", ")}.`, true);
@@ -794,7 +621,6 @@ function configureTheme() {
 renderRail([]);
 configureTheme();
 configureNotifications();
-configureComposer();
 connectEvents();
 elapsedTimer = window.setInterval(updateElapsed, 1000);
 window.addEventListener("pagehide", () => {

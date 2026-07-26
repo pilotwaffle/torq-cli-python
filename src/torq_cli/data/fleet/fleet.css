@@ -133,7 +133,7 @@ button { min-width: 2.75rem; min-height: 2.75rem; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .skip-link { position: fixed; z-index: 100; left: 1rem; top: -5rem; padding: .75rem 1rem; color: var(--surface-0); background: var(--focus); }
 .skip-link:focus { top: 1rem; }
-.shell { width: min(92rem, 100%); margin: 0 auto; padding: 0 1.75rem 13rem; }
+.shell { width: min(92rem, 100%); margin: 0 auto; padding: 0 1.75rem 7rem; }
 .mono { font-family: "Cascadia Mono", Consolas, monospace; }
 .compact-id { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -229,91 +229,13 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .settlement-list dt { color: var(--text-3); font: var(--text-xs) "Cascadia Mono", monospace; text-transform: uppercase; }
 .settlement-list dd { margin: .4rem 0 0; font: 700 .9rem "Cascadia Mono", monospace; }
 
-.command-rail .monitor-brand { width: 2.25rem; height: 2.25rem; }
+.mini-monitor { position: fixed; z-index: 20; left: 50%; bottom: 1rem; transform: translateX(-50%); width: min(57.5rem, calc(100% - 1.25rem)); min-height: 3.1rem; display: grid; grid-template-columns: 2.25rem auto minmax(7rem, 1fr) auto auto auto; align-items: center; gap: .75rem; padding: .35rem .75rem .35rem .35rem; border: 1px solid var(--line-strong); background: color-mix(in srgb, var(--surface-1) 94%, transparent); box-shadow: 0 .9rem 3rem var(--shadow); backdrop-filter: blur(.7rem); font-size: var(--text-xs); }
+.mini-monitor .monitor-brand { width: 2.25rem; height: 2.25rem; }
 .monitor-verify { color: var(--accent-soft); font: 700 var(--text-xs) Bahnschrift, sans-serif; letter-spacing: .06em; }
 .monitor-run { min-width: 0; overflow: hidden; color: var(--text-2); text-overflow: ellipsis; white-space: nowrap; }
 .monitor-pips { display: flex; gap: .25rem; }
 .monitor-pips i { --state-bg: var(--surface-3); --state-border: var(--line-strong); width: .55rem; height: .55rem; border: 1px solid var(--state-border); background: var(--state-bg); }
 .monitor-open { color: var(--state-needs_you-fg); font: 700 var(--text-xs) "Cascadia Mono", monospace; }
-
-.command-rail {
-  position: fixed;
-  z-index: 20;
-  right: 1rem;
-  bottom: 1rem;
-  left: 1rem;
-  width: min(76rem, calc(100% - 2rem));
-  margin-inline: auto;
-  overflow: hidden;
-  border: 1px solid var(--line-strong);
-  border-radius: 1rem;
-  background: color-mix(in srgb, var(--surface-1) 96%, transparent);
-  box-shadow: 0 1.2rem 4rem var(--shadow);
-  backdrop-filter: blur(.8rem);
-}
-.monitor-line {
-  min-height: 3.1rem;
-  display: grid;
-  grid-template-columns: 2.25rem auto minmax(7rem, 1fr) auto auto auto;
-  align-items: center;
-  gap: .75rem;
-  padding: .35rem .75rem .35rem .35rem;
-  border-bottom: 1px solid var(--line);
-  font-size: var(--text-xs);
-}
-.context-composer { padding: .65rem .75rem .7rem; }
-.composer-copy,
-.composer-meta {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  color: var(--text-3);
-  font: var(--text-xs)/1.4 "Cascadia Mono", monospace;
-}
-.composer-copy strong { color: var(--text-2); text-transform: uppercase; letter-spacing: .06em; }
-.composer-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .5rem; margin-top: .55rem; }
-#context-input {
-  min-height: 2.75rem;
-  max-height: 8rem;
-  resize: vertical;
-  border: 1px solid var(--line);
-  border-radius: .55rem;
-  padding: .72rem .8rem;
-  color: var(--text-1);
-  background: var(--surface-0);
-  font: var(--text-sm)/1.4 "Segoe UI", Aptos, system-ui, sans-serif;
-}
-#context-input::placeholder { color: var(--text-3); }
-.composer-button {
-  min-height: 2.75rem;
-  border: 1px solid var(--line-strong);
-  border-radius: .55rem;
-  padding: .55rem .85rem;
-  cursor: pointer;
-  font: 700 var(--text-xs) "Cascadia Mono", monospace;
-  text-transform: uppercase;
-}
-.attach-button { color: var(--text-2); background: var(--surface-2); }
-.send-button { border-color: var(--accent); color: #17130a; background: var(--accent-soft); }
-.composer-button:hover:not(:disabled) { filter: brightness(1.08); }
-.composer-meta { margin-top: .45rem; }
-#composer-status { min-width: 12rem; color: var(--accent-soft); text-align: right; }
-.attachment-list { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .45rem; }
-.attachment-list:empty { display: none; }
-.attachment-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: .35rem;
-  max-width: 17rem;
-  border: 1px solid var(--line);
-  border-radius: 99rem;
-  padding: .15rem .2rem .15rem .55rem;
-  color: var(--text-2);
-  background: var(--surface-2);
-  font: var(--text-xs) "Cascadia Mono", monospace;
-}
-.attachment-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.attachment-chip button { min-width: 1.9rem; min-height: 1.9rem; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
 
 [data-state="dormant"] { --state-fg: var(--state-dormant-fg); --state-bg: var(--state-dormant-bg); --state-border: var(--state-dormant-border); --state-glyph: var(--glyph-dormant); }
 [data-state="queued"] { --state-fg: var(--state-queued-fg); --state-bg: var(--state-queued-bg); --state-border: var(--state-queued-border); --state-glyph: var(--glyph-queued); }
@@ -352,17 +274,10 @@ button:disabled { opacity: .55; cursor: not-allowed; }
   .lane-detail { grid-template-columns: 1fr; }
   .settlement-panel { display: block; }
   .settlement-list { justify-content: flex-start; margin-top: 1rem; }
-  .command-rail { right: .4rem; bottom: .4rem; left: .4rem; width: calc(100% - .8rem); }
-  .monitor-line { grid-template-columns: 2.25rem auto minmax(3rem, 1fr) auto auto auto; gap: .35rem; padding-right: .4rem; font-size: .6875rem; }
+  .mini-monitor { grid-template-columns: 2.25rem auto minmax(3rem, 1fr) auto auto auto; gap: .35rem; padding-right: .4rem; font-size: .6875rem; }
   .monitor-pips { gap: .12rem; }
   .monitor-pips i { width: .38rem; height: .38rem; }
   .monitor-open { white-space: nowrap; }
-  .composer-copy span { display: none; }
-  .composer-input-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .attach-button { grid-column: 2; grid-row: 1; }
-  .send-button { grid-column: 1 / -1; }
-  .composer-meta { display: block; }
-  #composer-status { display: block; margin-top: .25rem; text-align: left; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

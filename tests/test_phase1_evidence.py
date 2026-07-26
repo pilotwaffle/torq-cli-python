@@ -116,13 +116,12 @@ def test_ci_headless_job_exercises_encrypted_fallback_contract() -> None:
     assert "tests/test_headless_fallback.py" in workflow
 
 
-def test_workspace_scaffold_pins_core_cli_and_packaged_fleet_ui_boundaries() -> None:
+def test_workspace_scaffold_reserves_core_cli_and_future_ui_boundaries() -> None:
     assert Path("src/torq_cli/core/__init__.py").is_file()
     assert Path("src/torq_cli/interfaces/cli.py").is_file()
     ui = Path("ui/README.md").read_text(encoding="utf-8")
-    assert "torq-fleet-snapshot-v3" in ui
-    assert "wheel-bundled browser application" in ui
-    assert "POST /api/v1/fleet/context" in ui
+    assert "v0.2" in ui
+    assert "not part of the v0.1 build" in ui
 
 
 def test_provider_matrix_document_names_every_provider_and_security_boundary() -> None:

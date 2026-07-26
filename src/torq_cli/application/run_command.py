@@ -14,11 +14,8 @@ from torq_cli.application.context import GovernedContextInjector
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import ProfileSpec, load_registry
-from torq_cli.safety.evidence_broker import (
-    BrokeredReceiptChain,
-    EvidenceBrokerProcess,
-)
-from torq_cli.safety.receipts import verify_receipt_store
+from torq_cli.safety.evidence_broker import BrokeredReceiptChain, EvidenceBroker
+from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
 class ResumeMismatch(ValueError):
@@ -52,10 +49,6 @@ class ActiveRunRuntime:
     gateway_chain: BrokeredReceiptChain
     context_injector: GovernedContextInjector
     projector: FleetProjector
-    broker_process: EvidenceBrokerProcess
-
-    def close(self) -> None:
-        self.broker_process.close()
 
 
 class RunController:
@@ -100,19 +93,19 @@ class RunController:
         runtime = self.create_active_runtime(identity, run_id=run_id)
         chain = runtime.execution_chain
         bind_run = getattr(self.orchestrator.entitlement_ledger, "bind_run", None)
+        if callable(bind_run):
+            bind_run(run_id)
+        chain.append(
+            "run_attested",
+            {
+                "mode": mode,
+                "identity": asdict(identity),
+                "attested_fields": sorted(expected),
+            },
+        )
+        if on_active is not None:
+            on_active(runtime)
         try:
-            if callable(bind_run):
-                bind_run(run_id)
-            chain.append(
-                "run_attested",
-                {
-                    "mode": mode,
-                    "identity": asdict(identity),
-                    "attested_fields": sorted(expected),
-                },
-            )
-            if on_active is not None:
-                on_active(runtime)
             result = self.orchestrator.execute(
                 goal=goal,
                 profile=selected_profile,
@@ -124,18 +117,13 @@ class RunController:
             # evidence_missing, which reads the same as a run that wrote
             # nothing at all.
             chain.seal()
-            runtime.close()
-            raise
-        except BaseException:
-            runtime.close()
             raise
         if result.status not in {"awaiting_approval", "human_escalation"}:
             chain.seal()
         verification = verify_receipt_store(chain.root)
         if verification.status != "verified":
-            runtime.close()
             raise RuntimeError(f"receipt_verification_failed:{verification.finding}")
-        response = {
+        return {
             "mode": mode,
             "attested": True,
             "run_id": run_id,
@@ -148,11 +136,6 @@ class RunController:
             "repair_cycles": result.repair_cycles,
             "timeline": result.timeline,
         }
-        if result.status not in {"awaiting_approval", "human_escalation"} or (
-            on_active is None
-        ):
-            runtime.close()
-        return response
 
     def create_active_runtime(
         self,
@@ -161,14 +144,17 @@ class RunController:
         run_id: str | None = None,
     ) -> ActiveRunRuntime:
         active_run_id = run_id or "run-" + uuid.uuid4().hex
-        broker_process = EvidenceBrokerProcess.start(
+        key_chain = ReceiptChain(
             self.run_root,
             active_run_id,
+            FileRunKeyStore(self.run_root),
             profile_version=identity.profile_version,
             policy_version=identity.policy_version,
+        )
+        broker = EvidenceBroker(
+            key_chain,
             allowed_roles=frozenset({"orchestrator", "operator_gateway"}),
         )
-        broker = broker_process.client
         execution = BrokeredReceiptChain(broker, writer_role="orchestrator")
         gateway = BrokeredReceiptChain(broker, writer_role="operator_gateway")
         return ActiveRunRuntime(
@@ -177,7 +163,6 @@ class RunController:
             gateway_chain=gateway,
             context_injector=GovernedContextInjector(self.orchestrator, gateway),
             projector=FleetProjector(execution.root),
-            broker_process=broker_process,
         )
 
     @staticmethod
