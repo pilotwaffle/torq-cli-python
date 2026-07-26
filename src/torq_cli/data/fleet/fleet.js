@@ -265,7 +265,7 @@ function renderSettlement(settlement) {
 
 function renderUnavailable(snapshot) {
   const verification = snapshot?.verification || {};
-  const label = upper(verification.status || "unavailable");
+  const label = upper(verification.state || "unavailable");
   setText("verify-label", label);
   setText("monitor-verify", label);
   setText("run-state", "UNAVAILABLE");
@@ -289,7 +289,7 @@ function render(snapshot) {
   const lanes = Array.isArray(snapshot.lanes) ? snapshot.lanes : [];
   const actions = Array.isArray(snapshot.actions) ? snapshot.actions : [];
   const verification = snapshot.verification || {};
-  const verifyLabel = upper(verification.normalized_state || verification.status);
+  const verifyLabel = upper(verification.state);
 
   setText("verify-label", verifyLabel);
   setText("run-state", upper(run.workflow_state));
@@ -312,7 +312,7 @@ function render(snapshot) {
 
   if (snapshot.data_status === "reduction_error") {
     announce(`State reduction error: ${(summary.reduction_errors || []).map(human).join(", ")}.`, true);
-  } else if (verification.status === "live_catching_up") {
+  } else if (verification.state === "live_catching_up") {
     announce("Verified manifest coverage is catching up. Uncovered receipts are intentionally hidden.");
   } else {
     clearAnnouncement();
@@ -330,7 +330,8 @@ async function refresh() {
       setPoll("DISCONNECTED", "stale");
       return;
     }
-    render(await response.json());
+    const envelope = await response.json();
+    render(envelope.snapshot);
     setPoll("LIVE / 3S", "online");
   } catch (_error) {
     announce("Fleet is unreachable. The last verified display is retained while reconnecting.", true);

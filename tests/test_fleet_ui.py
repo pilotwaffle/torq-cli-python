@@ -146,6 +146,6 @@ def test_fleet_bootstrap_lands_on_ui_without_exposing_session_in_url(
     assert "torq_fleet_session=" in cookie
     assert "HttpOnly" in cookie
     assert "SameSite=Strict" in cookie
-    assert "Path=/api/v1" in cookie
+    assert "Path=/" in cookie
     assert "nonce" not in str(location)
     assert "torq_fleet_session" not in str(location)

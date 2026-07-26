@@ -82,9 +82,9 @@ def test_rolling_manifest_authenticates_a_live_unsealed_snapshot(tmp_path: Path)
     manifest = json.loads((chain.root / "terminal-manifest.json").read_text(encoding="utf-8"))
     assert manifest["sealed"] is False
     snapshot = FleetProjector(chain.root).snapshot()
-    assert snapshot["verification"]["normalized_state"] == "live_verified"
+    assert snapshot["verification"]["state"] == "live_verified"
     assert snapshot["run"]["sealed"] is False
-    assert snapshot["run"]["status"] == "running"
+    assert snapshot["run"]["decision"] == "running"
     assert snapshot["summary"]["running"] == 1
     assert snapshot["summary"]["queued"] == 3
     assert snapshot["summary"]["dormant"] == 2
@@ -155,7 +155,7 @@ def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Pat
     snapshot = FleetProjector(chain.root).snapshot()
 
     assert snapshot["run"]["sealed"] is True
-    assert snapshot["run"]["status"] == "blocked"
+    assert snapshot["run"]["decision"] == "blocked"
     assert snapshot["run"]["waiting_on"] == []
     assert snapshot["summary"]["blocked"] == 1
     assert snapshot["summary"]["needs_you"] == 0
@@ -211,7 +211,7 @@ def test_tampered_chain_never_projects_plausible_fleet_data(tmp_path: Path) -> N
 
     snapshot = FleetProjector(chain.root).snapshot()
 
-    assert snapshot["verification"]["status"] == "tampered"
+    assert snapshot["verification"]["state"] == "tampered"
     assert snapshot["data_status"] == "unavailable"
     assert snapshot["run"] is None
     assert snapshot["lanes"] == []
@@ -235,7 +235,7 @@ def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.Cap
     output = json.loads(capsys.readouterr().out)
 
     assert code == 0
-    assert output["schema"] == "torq-fleet-snapshot-v2"
+    assert output["schema"] == "torq-fleet-snapshot-v3"
     assert output["run"]["run_id"] == "run-cli"
 
 
@@ -301,8 +301,12 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
         )
         with urllib.request.urlopen(first_request) as response:
             assert response.headers["Cache-Control"] == "no-store"
-            first = json.loads(response.read())
-        assert first["verification"]["status"] == "verified"
+            first_envelope = json.loads(response.read())
+            first = first_envelope["snapshot"]
+        assert first["verification"]["state"] == "live_verified"
+        assert set(first_envelope) == {
+            "snapshot", "annotations", "session", "eligibility", "pending"
+        }
 
         connection = http.client.HTTPConnection(host, port)
         connection.putrequest("GET", "/healthz", skip_host=True)
@@ -332,8 +336,8 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
             headers=cookie,
         )
         with urllib.request.urlopen(second_request) as response:
-            second = json.loads(response.read())
-        assert second["verification"]["status"] == "tampered"
+            second = json.loads(response.read())["snapshot"]
+        assert second["verification"]["state"] == "tampered"
         assert second["data_status"] == "unavailable"
 
         request = urllib.request.Request(

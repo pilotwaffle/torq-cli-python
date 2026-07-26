@@ -555,7 +555,7 @@ def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path
         assert file_result["context"]["command_type"] == "artifact"
 
         snapshot = FleetProjector(chain.root).snapshot()
-        assert snapshot["verification"]["status"] == "verified"
+        assert snapshot["verification"]["state"] == "live_verified"
         assert snapshot["run"]["context_commands_accepted"] == 2
         assert snapshot["run"]["context_injections"] == 0
         g2a = next(row for row in snapshot["lanes"] if row["role"] == "g2a")
@@ -602,7 +602,7 @@ def test_terminal_run_rejects_mutation_without_a_prior_fleet_poll(tmp_path: Path
         with pytest.raises(urllib.error.HTTPError) as blocked:
             urllib.request.urlopen(request)
         assert blocked.value.code == 409
-        assert json.loads(blocked.value.read())["finding"] == "fleet_run_not_mutable"
+        assert json.loads(blocked.value.read())["finding"] == "run_terminal"
         assert chain.sequence == before
     finally:
         server.shutdown()

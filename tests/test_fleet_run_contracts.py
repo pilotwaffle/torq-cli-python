@@ -151,7 +151,7 @@ def test_happy_path_projects_catalog_attempts_action_and_linked_closure(
     assert closure["status"] == "completed"
     assert verify_receipt_store(chain.root).status == "verified"
     closed = FleetProjector(chain.root).snapshot()
-    assert closed["verification"]["normalized_state"] == "sealed_verified"
+    assert closed["verification"]["state"] == "sealed_verified"
     assert closed["run"]["workflow_state"] == "closed"
     assert closed["run"]["decision_writer"]["writer_role"] == "operator_gateway"
     assert closed["summary"]["open_actions"] == 0

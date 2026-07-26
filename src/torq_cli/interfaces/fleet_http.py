@@ -10,6 +10,7 @@ import secrets
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from importlib.resources import files
@@ -19,6 +20,7 @@ from typing import Any, Callable, Protocol
 from urllib.parse import parse_qs, urlsplit
 
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.fleet_controls import FleetControlService
 from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.core.redaction import RedactionBlocked
 
@@ -78,10 +80,12 @@ class FleetSessionManager:
         self,
         *,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
         idle_seconds: float = 900,
         absolute_seconds: float = 14_400,
     ) -> None:
         self._clock = clock
+        self._wall_clock = wall_clock
         self._idle_seconds = idle_seconds
         self._absolute_seconds = absolute_seconds
         self.bootstrap_nonce = secrets.token_urlsafe(32)
@@ -130,6 +134,26 @@ class FleetSessionManager:
     def downgrade(self, session: _Session) -> None:
         with self._lock:
             session.read_only = True
+
+    def expires_at(self, session: _Session) -> str:
+        """Return the effective idle/absolute expiry as an RFC 3339 timestamp."""
+        with self._lock:
+            now = self._clock()
+            remaining = max(
+                0.0,
+                min(
+                    self._idle_seconds - (now - session.last_seen),
+                    self._absolute_seconds - (now - session.issued_at),
+                ),
+            )
+            return (
+                datetime.fromtimestamp(
+                    self._wall_clock() + remaining,
+                    timezone.utc,
+                )
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
 
     def rotate(self, session: _Session) -> str:
         with self._lock:
@@ -200,6 +224,8 @@ def create_fleet_server(
     port: int = 8765,
     context_injector: ContextInjector | None = None,
     sessions: FleetSessionManager | None = None,
+    control_service: FleetControlService | None = None,
+    operational_state_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> ThreadingHTTPServer:
     if not _loopback_host(host):
         raise ValueError("fleet_loopback_required")
@@ -212,6 +238,45 @@ def create_fleet_server(
         raise ValueError("fleet_control_run_mismatch")
     session_manager = sessions or FleetSessionManager()
     fleet_assets = _load_fleet_assets()
+
+    def operational_annotations() -> list[dict[str, str]]:
+        raw_operational = (
+            operational_state_provider()
+            if operational_state_provider is not None
+            else projector.operational_state
+        )
+        if not isinstance(raw_operational, Mapping):
+            return []
+        observed_at = raw_operational.get("heartbeat_at")
+        raw_orphans = raw_operational.get("orphaned_roles", ())
+        if not isinstance(observed_at, str) or not isinstance(
+            raw_orphans, (list, tuple)
+        ):
+            return []
+        annotations = [
+            {
+                "kind": "orphaned",
+                "scope": str(role),
+                "observed_at": observed_at,
+                "source": "supervisor",
+            }
+            for role in raw_orphans
+        ]
+        if raw_orphans:
+            annotations.append(
+                {
+                    "kind": "recovery_required",
+                    "scope": "run",
+                    "observed_at": observed_at,
+                    "source": "supervisor",
+                }
+            )
+        return annotations
+
+    controls = control_service or FleetControlService(
+        context_available=context_injector is not None,
+        annotation_provider=operational_annotations,
+    )
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "TORQFleet/1"
@@ -245,7 +310,7 @@ def create_fleet_server(
                     "Set-Cookie",
                     "torq_fleet_session="
                     + token
-                    + "; HttpOnly; SameSite=Strict; Path=/api/v1",
+                    + "; HttpOnly; SameSite=Strict; Path=/",
                 )
                 self._security_headers()
                 self.send_header("Content-Length", "0")
@@ -258,21 +323,20 @@ def create_fleet_server(
             if parsed.path == "/api/v1/fleet":
                 snapshot = projector.snapshot()
                 run = snapshot.get("run")
-                verification = snapshot.get("verification")
-                mutable = (
-                    context_injector is not None
-                    and isinstance(run, Mapping)
-                    and run.get("workflow_state") not in {"closed", "abandoned"}
-                    and isinstance(verification, Mapping)
-                    and verification.get("status") == "verified"
-                )
-                snapshot["controls"] = {"context_mutation": mutable}
                 if isinstance(run, Mapping) and run.get("workflow_state") in {
                     "closed",
                     "abandoned",
                 }:
                     session_manager.downgrade(session)
-                self._json(200, snapshot)
+                envelope = controls.envelope(
+                    snapshot,
+                    session_write_capable=not session.read_only,
+                    expires_at=session_manager.expires_at(session),
+                    read_only_reason=(
+                        "session_read_only" if session.read_only else None
+                    ),
+                )
+                self._json(200, envelope)
                 return
             self._json(404, {"status": "not_found"})
 
@@ -295,23 +359,6 @@ def create_fleet_server(
                     session_token=token,
                 )
                 return
-            snapshot = projector.snapshot()
-            verification = snapshot.get("verification")
-            run = snapshot.get("run")
-            if (
-                not isinstance(verification, Mapping)
-                or verification.get("status") != "verified"
-                or not isinstance(run, Mapping)
-                or run.get("workflow_state") in {"closed", "abandoned"}
-            ):
-                session.read_only = True
-                token = session_manager.rotate(session)
-                self._json(
-                    409,
-                    {"status": "blocked", "finding": "fleet_run_not_mutable"},
-                    session_token=token,
-                )
-                return
             address = self.server.server_address
             if not isinstance(address, tuple) or len(address) < 2:
                 self._json(500, {"status": "internal_error"})
@@ -328,6 +375,24 @@ def create_fleet_server(
                 self._json(
                     403,
                     {"status": "blocked", "finding": "fleet_origin_denied"},
+                    session_token=token,
+                )
+                return
+            snapshot = projector.snapshot()
+            envelope = controls.envelope(
+                snapshot,
+                session_write_capable=True,
+                expires_at=session_manager.expires_at(session),
+            )
+            context_eligibility = envelope["eligibility"]["context"]
+            if not context_eligibility["eligible"]:
+                token = session_manager.rotate(session)
+                self._json(
+                    409,
+                    {
+                        "status": "blocked",
+                        "finding": context_eligibility["reason"],
+                    },
                     session_token=token,
                 )
                 return
@@ -478,7 +543,7 @@ def create_fleet_server(
                     "Set-Cookie",
                     "torq_fleet_session="
                     + session_token
-                    + "; HttpOnly; SameSite=Strict; Path=/api/v1",
+                    + "; HttpOnly; SameSite=Strict; Path=/",
                 )
             self._security_headers()
             self.end_headers()

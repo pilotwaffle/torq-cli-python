@@ -12,6 +12,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.fleet_controls import FleetControlService
 from torq_cli.application.orchestrator import GovernedOrchestrator
 from torq_cli.application.supervisor import RunSupervisor, SupervisorState
 from torq_cli.domain.evidence_transitions import (
@@ -289,7 +290,7 @@ def test_manifest_covered_prefix_excludes_uncovered_receipt(tmp_path: Path) -> N
     snapshot = FleetProjector(chain.root).snapshot()
 
     assert verification.status == "live_catching_up"
-    assert snapshot["verification"]["status"] == "live_catching_up"
+    assert snapshot["verification"]["state"] == "live_catching_up"
     assert snapshot["run"]["receipt_count"] == 1
 
 
@@ -325,10 +326,32 @@ def test_double_death_stays_running_until_recovery_seals_abandonment(
         operational_state=state.snapshot(),
     ).snapshot()
     assert live["lanes"][0]["state"] == "running"
-    assert live["run"]["operational_annotations"] == {
-        "orphaned_roles": ["g1d"],
-        "recovery_required": True,
-    }
+    operational = state.snapshot()
+    observed_at = str(operational["heartbeat_at"])
+    controls = FleetControlService(
+        recovery_available=True,
+        annotation_provider=lambda: [
+            {
+                "kind": "orphaned",
+                "scope": "g1d",
+                "observed_at": observed_at,
+                "source": "supervisor",
+            },
+            {
+                "kind": "recovery_required",
+                "scope": "run",
+                "observed_at": observed_at,
+                "source": "supervisor",
+            },
+        ],
+    )
+    envelope = controls.envelope(
+        live, session_write_capable=True, expires_at="2099-01-01T00:00:00Z"
+    )
+    assert [item["kind"] for item in envelope["annotations"]] == [
+        "orphaned", "recovery_required"
+    ]
+    assert envelope["eligibility"]["recover_run"]["eligible"] is True
 
     supervisor.abandon(["attempt-g1d-1"], client.sequence)
     assert verify_receipt_store(client.root).status == "verified"
@@ -394,7 +417,10 @@ def test_http_bootstrap_is_single_use_and_all_run_reads_require_session(
         allowed = connection.getresponse()
         assert allowed.status == 200
         assert allowed.getheader("Referrer-Policy") == "no-referrer"
-        assert json.loads(allowed.read())["verification"]["status"] == "verified"
+        assert (
+            json.loads(allowed.read())["snapshot"]["verification"]["state"]
+            == "sealed_verified"
+        )
         connection.close()
     finally:
         server.shutdown()
