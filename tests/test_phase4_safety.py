@@ -394,10 +394,5 @@ def test_windows_restricted_acl_rejects_foreign_file_owner(
     receipts_module.restrict_receipt_trust_anchor(target)
     assert signing_file_permissions_are_restricted(target)
 
-    try:
-        receipts_module._set_windows_acl_for_sid(target, "S-1-1-0")
-        monkeypatch.setattr(receipts_module, "_windows_current_user_sid", lambda: "S-1-1-0")
-        assert not signing_file_permissions_are_restricted(target)
-    finally:
-        monkeypatch.undo()
-        receipts_module.restrict_receipt_trust_anchor(target)
+    monkeypatch.setattr(receipts_module, "_windows_current_user_sid", lambda: "S-1-1-0")
+    assert not signing_file_permissions_are_restricted(target)

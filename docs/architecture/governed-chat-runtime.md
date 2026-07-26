@@ -79,8 +79,11 @@ do not upgrade the adapter to production containment.
 The `linux-systemd-experimental-evidence` CI job starts the runner account's
 real user manager through PID 1, then requires a protected runtime directory,
 user bus, unified cgroup-v2 hierarchy, and successful sandbox preflight. Missing
-prerequisites, skips, and test-inventory changes refuse the job. It uses neither
-a container nor a process-group substitute.
+prerequisites, skips, test-inventory changes, or kernel-test failures are recorded
+as refused/failed evidence. The experimental step is deliberately non-blocking
+for the production release because Linux production dispatch already fails
+closed; the uploaded report, not a green check, is the result. It uses neither a
+container nor a process-group substitute.
 
 The job uploads `evidence.json`, `junit.xml`, and an evidence SHA-256 sidecar as
 the `linux-systemd-experimental-evidence` artifact. It records checked-out event

@@ -24,10 +24,7 @@ class _Server:
         return
 
 
-@pytest.mark.skipif(
-    cli.sys.platform != "win32" and not cli.sys.platform.startswith("linux"),
-    reason="kernel-owned chat is unavailable on this platform",
-)
+@pytest.mark.skipif(cli.sys.platform != "win32", reason="production chat is Windows-only")
 def test_fleet_chat_cli_requires_explicit_provider_and_wires_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

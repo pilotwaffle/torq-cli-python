@@ -339,6 +339,12 @@ def _set_windows_acl_for_sid(path: Path, sid: str) -> None:
         ctypes.POINTER(wintypes.BOOL),
     )
     advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorOwner.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    )
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
     advapi32.SetNamedSecurityInfoW.argtypes = (
         wintypes.LPWSTR,
         wintypes.DWORD,
@@ -350,7 +356,7 @@ def _set_windows_acl_for_sid(path: Path, sid: str) -> None:
     )
     advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
     descriptor = ctypes.c_void_p()
-    sddl = f"D:P(A;;FA;;;{sid})"
+    sddl = f"O:{sid}D:P(A;;FA;;;{sid})"
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl,
         1,
@@ -361,7 +367,15 @@ def _set_windows_acl_for_sid(path: Path, sid: str) -> None:
     try:
         present = wintypes.BOOL()
         defaulted = wintypes.BOOL()
+        owner_defaulted = wintypes.BOOL()
+        owner_sid = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
+        if not advapi32.GetSecurityDescriptorOwner(
+            descriptor,
+            ctypes.byref(owner_sid),
+            ctypes.byref(owner_defaulted),
+        ) or not owner_sid.value:
+            raise OSError(_windows_last_error(), "security_descriptor_owner_failed")
         if not advapi32.GetSecurityDescriptorDacl(
             descriptor,
             ctypes.byref(present),
@@ -372,8 +386,8 @@ def _set_windows_acl_for_sid(path: Path, sid: str) -> None:
         result = advapi32.SetNamedSecurityInfoW(
             str(path),
             1,
-            0x80000004,
-            None,
+            0x80000005,
+            owner_sid,
             None,
             dacl,
             None,
