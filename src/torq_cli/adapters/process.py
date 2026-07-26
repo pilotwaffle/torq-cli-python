@@ -14,6 +14,7 @@ from enum import Enum
 from io import BufferedReader
 from typing import Any
 
+from torq_cli.adapters.macos_containment import require_macos_strong_containment
 from torq_cli.adapters.linux_cgroup import LinuxSystemdCgroup
 from torq_cli.adapters.owned_stream import BoundedEventStream, ProcessChannel, ProcessEvent
 from torq_cli.adapters.windows_job import WindowsJob, cpython_process_handle
@@ -114,6 +115,8 @@ class OwnedProcess:
     ) -> None:
         if not command or any(not isinstance(part, str) or "\x00" in part for part in command):
             raise ValueError("owned_process_command_invalid")
+        if sys.platform == "darwin":
+            require_macos_strong_containment()
         if os.name != "nt" and not sys.platform.startswith("linux"):
             raise OSError("owned_process_strong_containment_unavailable")
         if len(subprocess.list2cmdline(command)) > 32_767:
