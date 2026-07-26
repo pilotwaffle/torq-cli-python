@@ -346,6 +346,59 @@ def test_open_operator_action_blocks_recovery_abandonment(tmp_path: Path) -> Non
         )
 
 
+def test_awaiting_approval_state_blocks_recovery_after_action_resolution(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-awaiting-resolved-action")
+    chain.append("run_attested", {"mode": "live"})
+    action = chain.append(
+        "action_opened",
+        {
+            "action_id": "approval-resolved",
+            "type": "approval_required",
+            "scope": "run",
+            "target": "operator",
+            "summary": "Review.",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
+            "caused_by_sequence": 1,
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "run_decision",
+        {
+            "decision": "awaiting_approval",
+            "action_id": "approval-resolved",
+            "action_opened_sequence": action["sequence"],
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "action_resolved",
+        {
+            "action_id": "approval-resolved",
+            "resolution": "approved",
+            "resolver_identity": "operator:local-session",
+            "opened_sequence": action["sequence"],
+        },
+        writer_role="operator_gateway",
+        evidence_basis="submitted",
+    )
+
+    with pytest.raises(ValueError, match="run_abandoned_operator_action_open"):
+        chain.append(
+            "run_abandoned",
+            {
+                "attempt_ids": ["invented-open-attempt"],
+                "last_covered_sequence": chain.sequence,
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+
+
 def test_invented_orchestrator_decision_status_is_rejected_before_append(
     tmp_path: Path,
 ) -> None:

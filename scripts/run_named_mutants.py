@@ -83,8 +83,8 @@ MUTATIONS = (
     Mutation(
         "M16",
         "src/torq_cli/domain/evidence_transitions.py",
-        "rule.permitted_statuses is not None\n        and payload.get(\"status\") not in rule.permitted_statuses",
-        "False\n        and payload.get(\"status\") not in rule.permitted_statuses",
+        "if transition == \"run_decision\" and any(\n            candidate.writer_role == writer_role",
+        "if False and any(\n            candidate.writer_role == writer_role",
         "tests/test_fleet_run_contracts.py::test_invented_orchestrator_decision_status_is_rejected_before_append",
     ),
     Mutation(
@@ -92,7 +92,7 @@ MUTATIONS = (
         "src/torq_cli/domain/run_evidence.py",
         "if waiting_on_operator or open_actions:",
         "if False or open_actions:",
-        "tests/test_fleet_run_contracts.py::test_awaiting_approval_cannot_be_abandoned_even_without_open_attempts",
+        "tests/test_fleet_run_contracts.py::test_awaiting_approval_state_blocks_recovery_after_action_resolution",
     ),
     Mutation(
         "M18",
@@ -140,7 +140,7 @@ MUTATIONS = (
     Mutation(
         "M24",
         "src/torq_cli/domain/run_evidence.py",
-        "        if not _command_values_ok(payload):\n            return \"command_accept_invalid\"",
+        "        if not legacy and not _command_values_ok(payload):\n            return \"command_accept_invalid\"",
         "        if False:\n            return \"command_accept_invalid\"",
         "tests/test_receipt_prose_bounds.py::test_command_accepted_rejects_prose_shaped_values",
     ),
@@ -154,8 +154,8 @@ MUTATIONS = (
     Mutation(
         "M26",
         "src/torq_cli/domain/run_evidence.py",
-        "            \"summary\",\n        )\n        if any(not _bounded_label(payload.get(field)) for field in required):\n            return \"action_opened_invalid\"",
-        "            \"summary\",\n        )\n        if False:\n            return \"action_opened_invalid\"",
+        "            \"summary\",\n        )\n        if any(\n            not (\n                isinstance(payload.get(field), str)\n                if legacy\n                else _bounded_label(payload.get(field))\n            )\n            for field in required\n        ):",
+        "            \"summary\",\n        )\n        if False:",
         "tests/test_receipt_prose_bounds.py::test_action_opened_rejects_unbounded_summary",
     ),
     Mutation(
@@ -175,9 +175,16 @@ MUTATIONS = (
     Mutation(
         "M29",
         "src/torq_cli/domain/run_evidence.py",
-        "    if _oversized_value(dict(payload)):\n        return \"receipt_value_oversized\"",
+        "    if not legacy and _oversized_value(dict(payload)):\n        return \"receipt_value_oversized\"",
         "    if False:\n        return \"receipt_value_oversized\"",
         "tests/test_receipt_prose_bounds.py::test_oversize_floor_applies_to_every_transition",
+    ),
+    Mutation(
+        "M30",
+        "src/torq_cli/domain/evidence_transitions.py",
+        'TransitionRule("orchestrator", "run_planned", "observed", "run_not_planned")',
+        'TransitionRule("orchestrator", "run_planned", "observed", "mutated_precondition")',
+        "tests/test_fleet_conformance_corpus.py::test_generated_corpus_is_byte_reproducible",
     ),
 )
 

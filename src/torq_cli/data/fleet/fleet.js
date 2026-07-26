@@ -20,6 +20,11 @@ const valueOrDash = (value) => value === null || value === undefined || value ==
 
 let latestSnapshot = null;
 let elapsedTimer = null;
+let pollTimer = null;
+let eventStream = null;
+let streamFallbackTimer = null;
+let streamRetryTimer = null;
+let refreshInFlight = false;
 
 function setText(id, value) {
   byId(id).textContent = valueOrDash(value);
@@ -320,6 +325,8 @@ function render(snapshot) {
 }
 
 async function refresh() {
+  if (refreshInFlight) return;
+  refreshInFlight = true;
   try {
     const response = await fetch("/api/v1/fleet", { credentials: "same-origin", cache: "no-store" });
     if (!response.ok) {
@@ -332,11 +339,67 @@ async function refresh() {
     }
     const envelope = await response.json();
     render(envelope.snapshot);
-    setPoll("LIVE / 3S", "online");
+    setPoll("POLLING / 3S", "online");
   } catch (_error) {
     announce("Fleet is unreachable. The last verified display is retained while reconnecting.", true);
     setPoll("RECONNECTING", "stale");
+  } finally {
+    refreshInFlight = false;
   }
+}
+
+function startPolling() {
+  if (pollTimer !== null) return;
+  refresh();
+  pollTimer = window.setInterval(refresh, POLL_MS);
+  if ("EventSource" in window && streamRetryTimer === null) {
+    streamRetryTimer = window.setTimeout(() => {
+      streamRetryTimer = null;
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+      pollTimer = null;
+      connectEvents();
+    }, 30000);
+  }
+}
+
+function connectEvents() {
+  if (!("EventSource" in window)) {
+    startPolling();
+    return;
+  }
+  eventStream = new EventSource("/api/v1/fleet/events");
+  const scheduleFallback = () => {
+    if (streamFallbackTimer !== null) return;
+    streamFallbackTimer = window.setTimeout(() => {
+      eventStream?.close();
+      eventStream = null;
+      streamFallbackTimer = null;
+      startPolling();
+    }, 5000);
+  };
+  scheduleFallback();
+  eventStream.onopen = () => {
+    if (streamFallbackTimer !== null) window.clearTimeout(streamFallbackTimer);
+    streamFallbackTimer = null;
+    if (streamRetryTimer !== null) window.clearTimeout(streamRetryTimer);
+    streamRetryTimer = null;
+  };
+  eventStream.addEventListener("fleet", (event) => {
+    try {
+      const envelope = JSON.parse(event.data);
+      render(envelope.snapshot);
+      if (streamFallbackTimer !== null) window.clearTimeout(streamFallbackTimer);
+      streamFallbackTimer = null;
+      if (pollTimer !== null) window.clearInterval(pollTimer);
+      pollTimer = null;
+      setPoll("LIVE / SSE", "online");
+    } catch (_error) {
+      announce("Fleet received an invalid event. The last verified display is retained.", true);
+    }
+  });
+  eventStream.onerror = () => {
+    scheduleFallback();
+  };
 }
 
 function configureNotifications() {
@@ -360,7 +423,12 @@ function configureNotifications() {
 
 renderRail([]);
 configureNotifications();
-refresh();
-setInterval(refresh, POLL_MS);
+connectEvents();
 elapsedTimer = setInterval(updateElapsed, 1000);
-window.addEventListener("pagehide", () => clearInterval(elapsedTimer), { once: true });
+window.addEventListener("pagehide", () => {
+  clearInterval(elapsedTimer);
+  if (pollTimer !== null) clearInterval(pollTimer);
+  if (streamFallbackTimer !== null) clearTimeout(streamFallbackTimer);
+  if (streamRetryTimer !== null) clearTimeout(streamRetryTimer);
+  eventStream?.close();
+}, { once: true });

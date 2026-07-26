@@ -416,6 +416,30 @@ def test_context_validation_writes_safe_rejections_before_artifact(tmp_path: Pat
     assert not (chain.root / "artifacts").exists()
 
 
+def test_context_command_id_replay_is_durable_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-context-replay")
+    first = GovernedOrchestrator().inject_context(
+        chain,
+        "Preserve this constraint",
+        command_id="context-correlation-1",
+    )
+    before = chain.sequence
+
+    replay = GovernedOrchestrator().inject_context(
+        chain,
+        "A retry body must not replace the accepted command",
+        command_id="context-correlation-1",
+    )
+
+    assert replay["idempotent_replay"] is True
+    assert replay["sequence"] == first["sequence"]
+    assert replay["artifact_hash"] == first["artifact_hash"]
+    assert chain.sequence == before
+    assert verify_receipt_store(chain.root).status == "verified"
+
+
 def test_duplicate_command_id_is_rejected_before_append(tmp_path: Path) -> None:
     chain = _chain(tmp_path, "run-duplicate-command")
     payload = {

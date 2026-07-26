@@ -64,6 +64,10 @@ class RunSupervisor:
         self.broker = broker
         self.state = state
 
+    @property
+    def root(self) -> Path:
+        return self.broker.run_root
+
     def interrupt_attempt(
         self,
         attempt: Mapping[str, Any],

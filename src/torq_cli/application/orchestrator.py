@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -149,9 +150,13 @@ class GovernedOrchestrator:
         media_type: str = "text/plain",
         source_name: str | None = None,
         confirm_direct: bool = False,
+        command_id: str | None = None,
     ) -> Mapping[str, Any]:
         """Durably acknowledge sanitized operator context and queue it."""
-        command_id = "cmd-" + secrets.token_hex(12)
+        command_id = command_id or "cmd-" + secrets.token_hex(12)
+        existing = self._existing_command(chain, command_id)
+        if existing is not None:
+            return existing
         target = target_role or "lead"
         encoded = b""
         safe_source_name: str | None = None
@@ -262,9 +267,13 @@ class GovernedOrchestrator:
         source_name: str,
         target_role: str | None = None,
         confirm_direct: bool = False,
+        command_id: str | None = None,
     ) -> Mapping[str, Any]:
         """Extract, sanitize, encrypt, and durably acknowledge a supported file."""
-        command_id = "cmd-" + secrets.token_hex(12)
+        command_id = command_id or "cmd-" + secrets.token_hex(12)
+        existing = self._existing_command(chain, command_id)
+        if existing is not None:
+            return existing
         target = target_role or "lead"
         safe_source_name: str | None = None
         try:
@@ -352,6 +361,32 @@ class GovernedOrchestrator:
             )
         except ValueError as exc:
             raise OrchestrationBlocked(str(exc)) from exc
+
+    @staticmethod
+    def _existing_command(
+        chain: ReceiptWriter, command_id: str
+    ) -> Mapping[str, Any] | None:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", command_id) is None:
+            raise OrchestrationBlocked("command_id_invalid")
+        if not (chain.root / "terminal-manifest.json").exists():
+            return None
+        for receipt in chain.covered_receipts():
+            payload = receipt.get("payload")
+            if not isinstance(payload, Mapping) or payload.get("command_id") != command_id:
+                continue
+            transition = receipt.get("transition")
+            if transition == "command_rejected":
+                raise OrchestrationBlocked(str(payload.get("finding", "command_rejected")))
+            if transition == "command_accepted":
+                return {
+                    **dict(payload),
+                    "status": "accepted",
+                    "accepted_sequence": receipt["sequence"],
+                    "sequence": receipt["sequence"],
+                    "receipt_hash": receipt["receipt_hash"],
+                    "idempotent_replay": True,
+                }
+        return None
 
     def execute(
         self,

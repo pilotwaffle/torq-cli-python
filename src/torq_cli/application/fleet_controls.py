@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import secrets
 from threading import RLock
+import time
 from typing import Any
 
 
@@ -14,6 +16,7 @@ _ANNOTATION_PRIORITY = {
     "recovery_required": 2,
 }
 _OPERATIONS = frozenset({"context", "resolve_action", "recover_run"})
+_MAX_RECOVERY_CONFIRMATIONS = 32
 
 
 def _reason(eligible: bool, finding: str) -> dict[str, object]:
@@ -162,6 +165,15 @@ class _PendingMutation:
     expected_sequence: int | None = None
 
 
+@dataclass
+class _RecoveryConfirmation:
+    correlation_id: str
+    run_id: str
+    covered_sequence: int
+    manifest_generation: int | None
+    expires_at: float
+
+
 class FleetControlService:
     """Own service availability and pending correlations for one run."""
 
@@ -172,6 +184,8 @@ class FleetControlService:
         action_available: bool = False,
         recovery_available: bool = False,
         annotation_provider: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        confirmation_seconds: float = 60,
     ) -> None:
         self._services = {
             "context": context_available,
@@ -179,7 +193,10 @@ class FleetControlService:
             "recover_run": recovery_available,
         }
         self._annotation_provider = annotation_provider or (lambda: ())
+        self._clock = clock
+        self._confirmation_seconds = confirmation_seconds
         self._pending: dict[str, _PendingMutation] = {}
+        self._recovery_confirmations: dict[str, _RecoveryConfirmation] = {}
         self._lock = RLock()
 
     def begin(self, correlation_id: str, operation: str) -> None:
@@ -207,6 +224,89 @@ class FleetControlService:
     def failed(self, correlation_id: str) -> None:
         with self._lock:
             self._pending.pop(correlation_id, None)
+
+    def issue_recovery_confirmation(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        correlation_id: str,
+        session_write_capable: bool,
+        expires_at: str | None,
+    ) -> str:
+        envelope = self.envelope(
+            snapshot,
+            session_write_capable=session_write_capable,
+            expires_at=expires_at,
+        )
+        eligibility = envelope["eligibility"]["recover_run"]
+        if not eligibility["eligible"]:
+            raise ValueError(str(eligibility["reason"]))
+        run = snapshot.get("run")
+        verification = snapshot.get("verification")
+        if not isinstance(run, Mapping) or not isinstance(verification, Mapping):
+            raise ValueError("recovery_snapshot_invalid")
+        run_id = run.get("run_id")
+        covered = verification.get("covered_sequence")
+        generation = verification.get("manifest_generation")
+        if (
+            not isinstance(run_id, str)
+            or not isinstance(covered, int)
+            or generation is not None
+            and not isinstance(generation, int)
+        ):
+            raise ValueError("recovery_snapshot_invalid")
+        token = secrets.token_urlsafe(48)
+        with self._lock:
+            now = self._clock()
+            self._recovery_confirmations = {
+                key: value
+                for key, value in self._recovery_confirmations.items()
+                if value.expires_at > now
+                and value.correlation_id != correlation_id
+            }
+            if len(self._recovery_confirmations) >= _MAX_RECOVERY_CONFIRMATIONS:
+                raise ValueError("recovery_confirmation_capacity")
+            self._recovery_confirmations[token] = _RecoveryConfirmation(
+                correlation_id=correlation_id,
+                run_id=run_id,
+                covered_sequence=covered,
+                manifest_generation=generation,
+                expires_at=now + self._confirmation_seconds,
+            )
+        return token
+
+    def consume_recovery_confirmation(
+        self,
+        token: str,
+        snapshot: Mapping[str, Any],
+        *,
+        correlation_id: str,
+    ) -> None:
+        with self._lock:
+            now = self._clock()
+            self._recovery_confirmations = {
+                key: value
+                for key, value in self._recovery_confirmations.items()
+                if value.expires_at > now or key == token
+            }
+            confirmation = self._recovery_confirmations.pop(token, None)
+        if confirmation is None:
+            raise ValueError("recovery_confirmation_invalid")
+        if now >= confirmation.expires_at:
+            raise ValueError("recovery_confirmation_expired")
+        run = snapshot.get("run")
+        verification = snapshot.get("verification")
+        if (
+            confirmation.correlation_id != correlation_id
+            or not isinstance(run, Mapping)
+            or run.get("run_id") != confirmation.run_id
+            or not isinstance(verification, Mapping)
+            or verification.get("covered_sequence")
+            != confirmation.covered_sequence
+            or verification.get("manifest_generation")
+            != confirmation.manifest_generation
+        ):
+            raise ValueError("recovery_confirmation_stale")
 
     def envelope(
         self,

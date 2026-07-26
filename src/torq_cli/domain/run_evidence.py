@@ -887,6 +887,13 @@ def validate_v2_receipt_contract(
                 return "terminalization_started_precondition_invalid"
             run_terminating = True
         if transition == "repair_routed":
+            g2a_attempts = [
+                attempt for attempt in attempts.values() if attempt["role"] == "g2a"
+            ]
+            if not g2a_attempts or max(
+                g2a_attempts, key=lambda attempt: int(attempt["ordinal"])
+            )["terminal"] != "stage_rejected":
+                return "repair_route_qualifying_defect_missing"
             attempt_id = str(payload["attempt_id"])
             if attempt_id in repairs:
                 return "repair_route_attempt_duplicate"
@@ -1078,6 +1085,8 @@ def validate_v2_receipt_contract(
                     return "attempt_dispatch_duplicate"
                 attempt["dispatched"] = True
             elif transition in TERMINAL_ATTEMPT_TRANSITIONS:
+                if transition == "stage_blocked" and attempt["dispatched"]:
+                    return "attempt_blocked_after_dispatch"
                 if transition == "stage_completed" and not attempt["dispatched"]:
                     return "attempt_completed_without_dispatch"
                 if transition == "stage_rejected" and not attempt["dispatched"]:
