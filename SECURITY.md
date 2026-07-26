@@ -52,6 +52,13 @@ the long-lived private identity can still rewrite and re-sign a complete local
 chain. Moving that identity into a non-exportable platform-keychain key and
 remote anchoring are future hardening work and are not implied.
 
+`torq trust readiness` makes this boundary machine-readable. The current local
+implementation exits 3 with `production_signing_identity_exportable` and
+`production_receipt_anchor_not_independent`; owner-only permissions do not
+upgrade either result. A future ready result requires active signer and remote
+inclusion/checkpoint probes through the contract documented in
+`docs/architecture/production-trust-hardening-decision.md`.
+
 Provider credentials must live behind the platform keychain or the documented
 attended encrypted-file fallback. Agent subprocesses receive a filtered
 environment and protected paths are denied before content enters a prompt.

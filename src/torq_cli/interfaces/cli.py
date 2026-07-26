@@ -40,6 +40,7 @@ from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
 from torq_cli.interfaces.fleet_http import create_fleet_server
 from torq_cli.safety.chat_evidence import ChatEvidenceJournal, verify_chat_evidence
 from torq_cli.safety.receipts import FileRunKeyStore, verify_receipt_store
+from torq_cli.safety.production_trust import evaluate_production_trust
 
 
 def exit_code_for(status: str, require_effective: bool, findings: Sequence[object]) -> int:
@@ -157,6 +158,9 @@ def _parser() -> argparse.ArgumentParser:
     fleet.add_argument("--chat-model")
     fleet.add_argument("--credential-file")
     fleet.add_argument("--claude-bin", default="claude")
+    trust = sub.add_parser("trust")
+    trust_sub = trust.add_subparsers(dest="trust_command", required=True)
+    trust_sub.add_parser("readiness")
     return parser
 
 
@@ -227,6 +231,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         envelope = import_boundary.output_rejected()
         return 5 if _print_envelope(envelope, compact=True) else 2
     args = _parser().parse_args(argv)
+    if args.command == "trust":
+        trust_report = evaluate_production_trust()
+        print(json.dumps(trust_report.to_dict(), sort_keys=True))
+        return 0 if trust_report.status == "ready" else 3
     if args.command == "setup":
         try:
             answers = json.loads(Path(args.answers).read_text(encoding="utf-8"))

@@ -132,6 +132,11 @@ downloaded wheel passed the isolated installation smoke test.
   can replace and reuse the private identity. Accepted for v0.1.0 with the
   documented limitation; non-exportable key storage and remote receipt
   anchoring are future hardening.
+  The machine-readable `torq trust readiness` gate now fails closed as
+  `production_signing_identity_exportable` and
+  `production_receipt_anchor_not_independent`. Platform adapters and the remote
+  service remain external delivery gates; see
+  `docs/architecture/production-trust-hardening-decision.md`.
 - **Medium — headless encrypted-file credentials are unavailable.** Selection
   fails closed. Accepted only because v0.1.0 does not claim this backend.
 - **Medium — default CLI has no production live transport factory.** The
