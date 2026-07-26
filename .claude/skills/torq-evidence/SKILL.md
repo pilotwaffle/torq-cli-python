@@ -1,5 +1,7 @@
 ---
 name: torq-evidence
+model: opus
+effort: high
 description: Working on the Torq-CLI signed-receipt evidence layer — the schema-v2 run/attempt/command contracts in domain/run_evidence.py, evidence_transitions.py, safety/receipts.py, safety/evidence_broker.py, and the orchestrator/supervisor writers. Load this before changing any receipt validation, transition authority, or the command/context/replan lifecycle so you don't repeat the mistakes in the Gotchas section.
 ---
 
