@@ -222,6 +222,94 @@ def _read_trusted_public_key(path: str | None) -> bytes | None:
     return trusted_public_key
 
 
+def _load_run_identity(path: str) -> RunIdentity:
+    try:
+        identity_value = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(identity_value, dict):
+            raise ValueError
+        return RunIdentity(**identity_value)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("run_identity_invalid") from exc
+
+
+def _load_run_attestation(expected_path: str, actual_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        expected = json.loads(Path(expected_path).read_text(encoding="utf-8"))
+        actual = json.loads(Path(actual_path).read_text(encoding="utf-8"))
+        if not isinstance(expected, dict) or not isinstance(actual, dict):
+            raise ValueError
+        return expected, actual
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("run_attestation_input_invalid") from exc
+
+
+def _handle_run(args: argparse.Namespace) -> int:
+    try:
+        identity = _load_run_identity(args.identity)
+        if not args.resume and not args.goal:
+            raise ValueError("goal_required")
+        if args.live and not args.resume and not (args.allow_live and args.policy_allow_live):
+            raise ValueError("double_opt_in_required")
+
+        expected = None
+        actual = None
+        if not args.resume:
+            expected, actual = _load_run_attestation(args.expected, args.actual)
+            for field, expected_value in expected.items():
+                observed = actual.get(field)
+                if observed is None:
+                    raise ValueError(f"attestation_unattestable:{field}")
+                if observed != expected_value:
+                    raise ValueError(f"attestation_mismatch:{field}")
+
+        live_runtime = None
+        if args.live and not args.resume:
+            if args.config is None:
+                raise ValueError("live_config_required")
+            live_runtime = build_live_runtime(
+                Path(args.config).resolve(),
+                Path(args.run_root).resolve(),
+                expected_config_version=identity.config_version,
+                expected_profile_version=identity.profile_version,
+                expected_policy_version=identity.policy_version,
+            )
+
+        controller = RunController(
+            Path(args.run_root),
+            None if live_runtime is None else live_runtime.orchestrator,
+        )
+        if args.resume:
+            remaining = controller.resume(
+                Path(args.resume), identity, stages=("g1d", "g1r", "builder", "g2a")
+            )
+            report = {"status": "resumed", "remaining": remaining}
+        else:
+            assert expected is not None and actual is not None
+            report = controller.start(
+                identity,
+                actual,
+                expected=expected,
+                live=args.live,
+                live_opt_in=args.allow_live,
+                policy_opt_in=args.policy_allow_live,
+                goal=args.goal,
+                profile=None if live_runtime is None else live_runtime.profile,
+            )
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    except (
+        ValueError,
+        BackendUnavailable,
+        HeadlessCredentialError,
+        NativeCredentialError,
+    ) as exc:
+        print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
+        return 3
+    except Exception:
+        print(json.dumps({"status": "internal_error"}, sort_keys=True))
+        return 5
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     supplied = list(argv) if argv is not None else sys.argv[1:]
     import_boundary = (
@@ -255,79 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": "internal_error"}, sort_keys=True))
             return 5
     if args.command == "run":
-        try:
-            try:
-                identity_value = json.loads(Path(args.identity).read_text(encoding="utf-8"))
-                if not isinstance(identity_value, dict):
-                    raise ValueError
-                identity = RunIdentity(**identity_value)
-            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
-                raise ValueError("run_identity_invalid") from exc
-            if not args.resume and not args.goal:
-                raise ValueError("goal_required")
-            if args.live and not args.resume and not (args.allow_live and args.policy_allow_live):
-                raise ValueError("double_opt_in_required")
-            expected = None
-            actual = None
-            if not args.resume:
-                try:
-                    expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
-                    actual = json.loads(Path(args.actual).read_text(encoding="utf-8"))
-                    if not isinstance(expected, dict) or not isinstance(actual, dict):
-                        raise ValueError
-                except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-                    raise ValueError("run_attestation_input_invalid") from exc
-                for field, expected_value in expected.items():
-                    observed = actual.get(field)
-                    if observed is None:
-                        raise ValueError(f"attestation_unattestable:{field}")
-                    if observed != expected_value:
-                        raise ValueError(f"attestation_mismatch:{field}")
-            live_runtime = None
-            if args.live and not args.resume:
-                if args.config is None:
-                    raise ValueError("live_config_required")
-                live_runtime = build_live_runtime(
-                    Path(args.config).resolve(),
-                    Path(args.run_root).resolve(),
-                    expected_config_version=identity.config_version,
-                    expected_profile_version=identity.profile_version,
-                    expected_policy_version=identity.policy_version,
-                )
-            controller = RunController(
-                Path(args.run_root),
-                None if live_runtime is None else live_runtime.orchestrator,
-            )
-            if args.resume:
-                remaining = controller.resume(
-                    Path(args.resume), identity, stages=("g1d", "g1r", "builder", "g2a")
-                )
-                report = {"status": "resumed", "remaining": remaining}
-            else:
-                assert expected is not None and actual is not None
-                report = controller.start(
-                    identity,
-                    actual,
-                    expected=expected,
-                    live=args.live,
-                    live_opt_in=args.allow_live,
-                    policy_opt_in=args.policy_allow_live,
-                    goal=args.goal,
-                    profile=None if live_runtime is None else live_runtime.profile,
-                )
-            print(json.dumps(report, sort_keys=True))
-            return 0
-        except (
-            ValueError,
-            BackendUnavailable,
-            HeadlessCredentialError,
-            NativeCredentialError,
-        ) as exc:
-            print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
-            return 3
-        except Exception:
-            print(json.dumps({"status": "internal_error"}, sort_keys=True))
-            return 5
+        return _handle_run(args)
     if args.command in {"evidence", "fleet"}:
         try:
             trusted_public_key = _read_trusted_public_key(args.trusted_public_key)
