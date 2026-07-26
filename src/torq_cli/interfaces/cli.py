@@ -7,13 +7,15 @@ import getpass
 import json
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import yaml
 
 from torq_cli import __version__
 from torq_cli.application import import_v5_config, import_v5_console
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.chat_projection import reduce_chat_projection
+from torq_cli.application.chat_runtime import ChatRuntimeCoordinator
 from torq_cli.application.run_command import RunController, RunIdentity
 from torq_cli.application.resolve import envelope_to_dict, resolve_path
 from torq_cli.application.setup import SetupError, SetupService
@@ -24,11 +26,13 @@ from torq_cli.connectors.native_credentials import (
     NativeCredentialError,
     native_store_for_current_platform,
 )
+from torq_cli.adapters.chat_provider import ChatProviderCommandFactory, current_environment
 from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
 from torq_cli.interfaces.fleet_http import create_fleet_server
-from torq_cli.safety.receipts import verify_receipt_store
+from torq_cli.safety.chat_evidence import ChatEvidenceJournal, verify_chat_evidence
+from torq_cli.safety.receipts import FileRunKeyStore, verify_receipt_store
 
 
 def exit_code_for(status: str, require_effective: bool, findings: Sequence[object]) -> int:
@@ -55,16 +59,18 @@ def _print_envelope(envelope: ResultEnvelope, *, compact: bool) -> bool:
             "command": envelope.command,
             "status": "internal_error",
             "snapshot": None,
-            "findings": [{
-                "id": "internal_error",
-                "message": "Internal failure occurred without exposing details.",
-                "severity": "critical",
-                "bucket": "A",
-                "status_class": "internal_error",
-                "stage": "complete",
-                "path": "/",
-                "context": {},
-            }],
+            "findings": [
+                {
+                    "id": "internal_error",
+                    "message": "Internal failure occurred without exposing details.",
+                    "severity": "critical",
+                    "bucket": "A",
+                    "status_class": "internal_error",
+                    "stage": "complete",
+                    "path": "/",
+                    "context": {},
+                }
+            ],
             "data": {},
         }
     if compact:
@@ -131,6 +137,13 @@ def _parser() -> argparse.ArgumentParser:
     fleet.add_argument("--serve", action="store_true")
     fleet.add_argument("--host", default="127.0.0.1")
     fleet.add_argument("--port", type=int, default=8765)
+    fleet.add_argument(
+        "--chat-provider",
+        choices=("claude", "deepseek", "kimi", "qwen", "zai"),
+    )
+    fleet.add_argument("--chat-model")
+    fleet.add_argument("--credential-file")
+    fleet.add_argument("--claude-bin", default="claude")
     return parser
 
 
@@ -195,9 +208,7 @@ def _read_trusted_public_key(path: str | None) -> bytes | None:
 def main(argv: Sequence[str] | None = None) -> int:
     supplied = list(argv) if argv is not None else sys.argv[1:]
     import_boundary = (
-        import_v5_console
-        if supplied[:2] == ["config", "import-v5-console"]
-        else import_v5_config
+        import_v5_console if supplied[:2] == ["config", "import-v5-console"] else import_v5_config
     )
     if any(argument == "--output" or argument.startswith("--output=") for argument in supplied):
         envelope = import_boundary.output_rejected()
@@ -209,7 +220,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.credential_file is not None:
                 answers = {**answers, "credential_file": args.credential_file}
             document = SetupService().configure(Path(args.config), answers)
-            report = {"status": "configured", "config": str(Path(args.config)), "config_version": document["config_version"]}
+            report = {
+                "status": "configured",
+                "config": str(Path(args.config)),
+                "config_version": document["config_version"],
+            }
             print(json.dumps(report, sort_keys=True))
             return 0
         except (SetupError, CredentialSourceError) as exc:
@@ -223,7 +238,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             identity = RunIdentity(**json.loads(Path(args.identity).read_text(encoding="utf-8")))
             controller = RunController(Path(args.run_root))
             if args.resume:
-                remaining = controller.resume(Path(args.resume), identity, stages=("g1d", "g1r", "builder", "g2a"))
+                remaining = controller.resume(
+                    Path(args.resume), identity, stages=("g1d", "g1r", "builder", "g2a")
+                )
                 report = {"status": "resumed", "remaining": remaining}
             else:
                 if not args.goal:
@@ -251,10 +268,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             trusted_public_key = _read_trusted_public_key(args.trusted_public_key)
         except (OSError, UnicodeError, ValueError):
-            print(json.dumps({
-                "status": "tampered",
-                "finding": "trusted_public_key_invalid",
-            }, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "status": "tampered",
+                        "finding": "trusted_public_key_invalid",
+                    },
+                    sort_keys=True,
+                )
+            )
             return 3
     if args.command == "fleet":
         projector = FleetProjector(
@@ -263,10 +285,73 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if args.serve:
             try:
+                chat_controller = None
+                chat_snapshot_provider = None
+                if args.chat_provider is not None:
+                    if args.chat_model is None:
+                        raise ValueError("chat_model_required")
+                    if sys.platform != "win32":
+                        raise ValueError("chat_strong_containment_unavailable")
+                    vault = None
+                    if args.chat_provider != "claude":
+                        if args.credential_file is None:
+                            raise ValueError("chat_credential_source_required")
+                        vault = ExplicitEnvVault(Path(args.credential_file).resolve())
+                    run_root = Path(args.run_root).resolve()
+                    keys = FileRunKeyStore(run_root.parent).get_or_create_run_keys(run_root.name)
+                    journal = ChatEvidenceJournal(run_root, keys.operator_gateway)
+                    command_factory = ChatProviderCommandFactory(
+                        provider=args.chat_provider,
+                        model=args.chat_model,
+                        cwd=run_root,
+                        base_environment=current_environment(),
+                        vault=vault,
+                        claude_binary=args.claude_bin,
+                    )
+                    chat_controller = ChatRuntimeCoordinator(journal, command_factory)
+                    chat_controller.recover_incomplete()
+                    chat_projection_cache: dict[str, Any] = {}
+
+                    def chat_snapshot_provider() -> Mapping[str, Any]:
+                        try:
+                            head_path = (
+                                run_root.parent
+                                / ".torq-chat-heads"
+                                / run_root.name
+                                / "head.v1.json"
+                            )
+                            journal_stat = journal.path.stat() if journal.path.exists() else None
+                            head_stat = head_path.stat() if head_path.exists() else None
+                            cache_key = (
+                                0 if journal_stat is None else journal_stat.st_mtime_ns,
+                                0 if journal_stat is None else journal_stat.st_size,
+                                0 if head_stat is None else head_stat.st_mtime_ns,
+                                0 if head_stat is None else head_stat.st_size,
+                            )
+                            if chat_projection_cache.get("key") == cache_key:
+                                cached = chat_projection_cache.get("value")
+                                if isinstance(cached, Mapping):
+                                    return cached
+                            rows = verify_chat_evidence(run_root)
+                            projected = reduce_chat_projection(
+                                rows,
+                                verification_state="verified",
+                            )
+                            chat_projection_cache.update({"key": cache_key, "value": projected})
+                            return projected
+                        except (OSError, UnicodeError, ValueError) as exc:
+                            return reduce_chat_projection(
+                                (),
+                                verification_state="tampered",
+                                verification_finding=str(exc),
+                            )
+
                 server = create_fleet_server(
                     projector,
                     host=args.host,
                     port=args.port,
+                    chat_controller=chat_controller,
+                    chat_snapshot_provider=chat_snapshot_provider,
                 )
             except (OSError, ValueError) as exc:
                 print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
@@ -274,19 +359,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             host, port = server.server_address[:2]
             host_text = host.decode("ascii") if isinstance(host, bytes) else str(host)
             bootstrap_nonce = str(getattr(server, "fleet_bootstrap_nonce"))
-            print(json.dumps({
-                "status": "serving",
-                "url": (
-                    f"http://{host_text}:{port}/bootstrap"
-                    f"?nonce={bootstrap_nonce}"
+            print(
+                json.dumps(
+                    {
+                        "status": "serving",
+                        "url": (f"http://{host_text}:{port}/bootstrap?nonce={bootstrap_nonce}"),
+                    },
+                    sort_keys=True,
                 ),
-            }, sort_keys=True), flush=True)
+                flush=True,
+            )
             try:
                 server.serve_forever()
             except KeyboardInterrupt:
                 pass
             finally:
-                server.server_close()
+                try:
+                    if chat_controller is not None:
+                        chat_controller.shutdown(timeout=5.0)
+                finally:
+                    server.server_close()
             return 0
         snapshot = projector.snapshot()
         print(json.dumps(snapshot, sort_keys=True))
@@ -299,9 +391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "unreadable": 4,
         }[str(snapshot["verification"]["state"])]
     if args.command == "evidence":
-        result = verify_receipt_store(
-            Path(args.run_root), trusted_public_key=trusted_public_key
-        )
+        result = verify_receipt_store(Path(args.run_root), trusted_public_key=trusted_public_key)
         print(json.dumps({"status": result.status, "finding": result.finding}, sort_keys=True))
         return result.exit_code
     if args.command == "auth":
@@ -342,7 +432,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             expected_raw = json.loads(Path(args.expected).read_text(encoding="utf-8"))
             actual_raw = json.loads(Path(args.actual).read_text(encoding="utf-8"))
-            expected = {str(agent): (str(binding[0]), str(binding[1])) for agent, binding in expected_raw.items()}
+            expected = {
+                str(agent): (str(binding[0]), str(binding[1]))
+                for agent, binding in expected_raw.items()
+            }
             report = inspect_harness(expected, actual_raw)
         except Exception:
             report = {"ok": False, "status": "internal_error", "agents": {}}
@@ -385,10 +478,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception:
         from torq_cli.domain.findings import FindingCatalog
         from torq_cli.domain.models import ResultEnvelope
-        envelope = ResultEnvelope("1.0.0", command, "internal_error", None, (FindingCatalog.make("internal_error", path="/"),), {})
+
+        envelope = ResultEnvelope(
+            "1.0.0",
+            command,
+            "internal_error",
+            None,
+            (FindingCatalog.make("internal_error", path="/"),),
+            {},
+        )
         _print_envelope(envelope, compact=False)
         return 5
     rendering_failed = _print_envelope(envelope, compact=False)
     if rendering_failed:
         return 5
-    return exit_code_for(envelope.status, getattr(args, "require_effective", False), envelope.findings)
+    return exit_code_for(
+        envelope.status, getattr(args, "require_effective", False), envelope.findings
+    )

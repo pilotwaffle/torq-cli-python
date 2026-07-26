@@ -108,6 +108,7 @@ class OwnedProcess:
         env: Mapping[str, str],
         event_capacity_bytes: int = 1_048_576,
         chunk_size: int = 4096,
+        input_data: bytes | None = None,
     ) -> None:
         if not command or any(not isinstance(part, str) or "\x00" in part for part in command):
             raise ValueError("owned_process_command_invalid")
@@ -119,6 +120,8 @@ class OwnedProcess:
             raise ValueError("owned_process_event_capacity_too_small")
         if chunk_size <= 0 or chunk_size > event_capacity_bytes:
             raise ValueError("owned_process_chunk_size_invalid")
+        if input_data is not None and len(input_data) > 42_000_000:
+            raise ValueError("owned_process_input_too_large")
 
         self._events = BoundedEventStream(event_capacity_bytes)
         self._chunk_size = chunk_size
@@ -140,7 +143,7 @@ class OwnedProcess:
                 command,
                 cwd=cwd,
                 env=dict(env),
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=self._CREATE_SUSPENDED,
@@ -156,6 +159,14 @@ class OwnedProcess:
                 pass
             raise
         self._process = process
+        self._stdin_writer: threading.Thread | None = None
+        if input_data is not None:
+            self._stdin_writer = threading.Thread(
+                target=self._write_input,
+                args=(input_data,),
+                daemon=True,
+            )
+            self._stdin_writer.start()
         try:
             self._drainers = self._start_drainers()
         except BaseException:
@@ -224,6 +235,30 @@ class OwnedProcess:
             thread.start()
         return threads
 
+    def _write_input(self, content: bytes) -> None:
+        stream = self._process.stdin
+        if stream is None:
+            return
+        remaining = memoryview(content)
+        try:
+            while remaining:
+                written = stream.write(remaining)
+                if written is None or written <= 0:
+                    raise OSError("owned_process_input_short_write")
+                remaining = remaining[written:]
+            stream.flush()
+        except (OSError, ValueError) as exc:
+            with self._lifecycle:
+                if not self._closed and self._process.poll() is None:
+                    if self._background_error is None:
+                        self._background_error = exc
+        finally:
+            remaining.release()
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
     def _drain(self, channel: ProcessChannel, stream: BufferedReader) -> None:
         try:
             while True:
@@ -271,6 +306,7 @@ class OwnedProcess:
             self._process.wait(timeout=timeout)
             state, active = self._containment()
             output_complete = self._join_drainers(time.monotonic() + 1.0)
+            self._join_input(time.monotonic() + 1.0)
             with self._lifecycle:
                 forced = self._force_requested
             return ExitObservation(
@@ -333,6 +369,7 @@ class OwnedProcess:
             time.sleep(0.01)
             state, active = self._containment()
         output_complete = self._join_drainers(min(deadline, time.monotonic() + 1.0))
+        self._join_input(min(deadline, time.monotonic() + 1.0))
         confirmed = self._process.poll() is not None and state is ContainmentState.KNOWN_EMPTY
         return ExitObservation(
             self._process.poll(),
@@ -362,6 +399,27 @@ class OwnedProcess:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         return all(not thread.is_alive() for thread in self._drainers)
 
+    def _join_input(self, deadline: float) -> bool:
+        if self._stdin_writer is None:
+            return True
+        self._stdin_writer.join(timeout=max(0.0, deadline - time.monotonic()))
+        complete = not self._stdin_writer.is_alive()
+        if not complete:
+            with self._lifecycle:
+                if self._background_error is None:
+                    self._background_error = RuntimeError("owned_process_input_writer_stuck")
+        return complete
+
+    def _close_input(self) -> BaseException | None:
+        stream = self._process.stdin
+        if stream is None:
+            return None
+        try:
+            stream.close()
+        except (OSError, ValueError) as exc:
+            return exc
+        return None
+
     def _uncertain_observation(self) -> ExitObservation:
         state, active = self._containment()
         return ExitObservation(
@@ -383,10 +441,13 @@ class OwnedProcess:
             self._job.close()
         except BaseException as exc:
             return exc
+        first_error = self._close_input()
         self._wait_root(5.0)
+        input_complete = self._join_input(time.monotonic() + 1.0)
+        if not input_complete and first_error is None:
+            first_error = self.background_error
         self._join_drainers(time.monotonic() + 1.0)
 
-        first_error: BaseException | None = None
         for resource in (self._process.stdout, self._process.stderr):
             if resource is None:
                 continue

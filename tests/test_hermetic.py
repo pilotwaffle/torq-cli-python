@@ -41,6 +41,12 @@ def test_production_imports_forbid_subprocess() -> None:
             # T-33's explicit, operator-authorized live transport is isolated to
             # this adapter; core, connector contracts, and imports stay hermetic.
             local_allow = {"subprocess", "urllib"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/chat_bridge.py"):
+            # The owned chat child is the isolated streaming HTTP boundary.
+            local_allow = {"os", "sys", "urllib"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/chat_provider.py"):
+            # Reads explicit runtime facts only to build a scrubbed child.
+            local_allow = {"os", "sys"}
         elif source_path.as_posix().endswith("torq_cli/interfaces/fleet_http.py"):
             # The local Fleet transport is isolated to this loopback-only,
             # bounded interface; the application projector remains hermetic.
@@ -52,6 +58,7 @@ def test_production_imports_forbid_subprocess() -> None:
                 "torq_cli/safety/receipts.py",
                 "torq_cli/safety/evidence_broker.py",
                     "torq_cli/safety/accounting_registry.py",
+                    "torq_cli/safety/chat_evidence.py",
                 )
             ):
                 # The evidence broker owns the authenticated local-only IPC
