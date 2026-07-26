@@ -40,7 +40,7 @@ def test_production_imports_forbid_subprocess() -> None:
         elif source_path.as_posix().endswith("torq_cli/adapters/live_provider.py"):
             # T-33's explicit, operator-authorized live transport is isolated to
             # this adapter; core, connector contracts, and imports stay hermetic.
-            local_allow = {"subprocess", "urllib"}
+            local_allow = {"os", "subprocess", "urllib"}
         elif source_path.as_posix().endswith("torq_cli/adapters/chat_bridge.py"):
             # The owned chat child is the isolated streaming HTTP boundary.
             local_allow = {"os", "sys", "urllib"}

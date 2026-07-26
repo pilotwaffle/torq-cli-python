@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import urllib.request
 from collections.abc import Mapping
 
 from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.connectors.credential_sources import (
-    ExplicitEnvVault,
+    CredentialVault,
     claude_compatible_environment,
     safe_child_environment,
 )
@@ -83,6 +85,16 @@ _CONTRACTS: Mapping[str, Mapping[str, object]] = {
 }
 
 
+def current_environment() -> Mapping[str, str]:
+    """Read ambient process state only at the isolated production adapter."""
+    return dict(os.environ)
+
+
+def provider_binary_available(base_environment: Mapping[str, str]) -> bool:
+    """Return whether the governed Claude-compatible transport is installed."""
+    return shutil.which("claude", path=base_environment.get("PATH")) is not None
+
+
 def _single_json_object(value: object, provider: str) -> str:
     """Canonicalize one provider object while rejecting ambiguous output."""
     if isinstance(value, Mapping):
@@ -109,7 +121,7 @@ class LiveStageDispatcher:
 
     def __init__(
         self,
-        vault: ExplicitEnvVault,
+        vault: CredentialVault,
         base_environment: Mapping[str, str],
         *,
         timeout_seconds: int = 90,
@@ -235,7 +247,7 @@ class LiveStageDispatcher:
         except (OSError, ValueError) as exc:
             raise OrchestrationBlocked("live_provider_command_failed:openai") from exc
         resolved = payload.get("model")
-        if not isinstance(resolved, str) or not resolved.startswith(model):
+        if resolved != model:
             raise OrchestrationBlocked("live_model_unattested:openai")
         text = "".join(
             str(content.get("text", ""))
@@ -262,4 +274,4 @@ class LiveStageDispatcher:
         )
 
 
-__all__ = ["LiveStageDispatcher"]
+__all__ = ["LiveStageDispatcher", "current_environment", "provider_binary_available"]

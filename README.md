@@ -15,20 +15,22 @@ torq auth revoke --provider deepseek --credential-ref credref_<32-lowercase-hex>
 torq harness inspect --expected PROFILE.json --actual LIVE.json
 torq setup --config .torq/config.yaml --answers examples/torq-v5-6-live.answers.json --credential-file E:\TORQ-CONSOLE\.env
 torq run --goal "..." --run-root RUNS --identity ID.json --expected PROFILE.json --actual LIVE.json
+torq run --goal "..." --run-root RUNS --identity ID.json --expected PROFILE.json --actual LIVE.json --config .torq/config.yaml --live --allow-live --policy-allow-live
 torq evidence verify --run-root RUN_DIRECTORY
 torq --version
 ```
 
 Dry-run is the default. Live execution requires both `--allow-live` and `--policy-allow-live`. Agents never commit, push, or merge. The primary worktree remains unchanged until an audited, tree-pinned proposal receives explicit approval.
 
-`torq run` now invokes the governed orchestration boundary. Dry-run records the
-four-stage plan without provider calls. A live application embedding an
-injected `ConnectorDispatcher` executes G1D -> G1R -> Builder -> G2A, routes
+`torq run` invokes the governed orchestration boundary. Dry-run records the
+four-stage plan without provider calls. An injected dispatcher remains available
+for embedding and tests. The installed live command loads the validated saved
+config, resolves its explicit credential source, and constructs the persistent
+entitlement ledger before executing G1D -> G1R -> Builder -> G2A. It routes
 HIGH defects through the bound repair lane, and performs a targeted G2A
-re-audit before returning `awaiting_approval`. The standalone CLI currently
-has no production transport factory, so `--live` fails closed as
-`live_dispatcher_required`; mock-transport conformance is not described as a
-live provider run. See `docs/architecture/governed-orchestration.md`.
+re-audit before returning `awaiting_approval`. Invalid config, credentials,
+regional routing, or missing transport binaries fail before a run directory is
+created. See `docs/architecture/governed-orchestration.md`.
 
 The T-06A import command reads only the authenticated normalized V5 fixture shape and emits a fixed registry-authoritative stdout projection. It does not read raw Console configuration, write files, resolve credentials, access providers, or claim T-06/Phase 1 completion.
 

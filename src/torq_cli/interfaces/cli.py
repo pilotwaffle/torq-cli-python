@@ -17,6 +17,7 @@ from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.chat_projection import reduce_chat_projection
 from torq_cli.application.chat_runtime import ChatRuntimeCoordinator
 from torq_cli.application.run_command import RunController, RunIdentity
+from torq_cli.application.live_runtime import build_live_runtime
 from torq_cli.application.resolve import envelope_to_dict, resolve_path
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.application.status_effective import effective_status
@@ -123,6 +124,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--identity", required=True)
     run.add_argument("--expected", required=True)
     run.add_argument("--actual", required=True)
+    run.add_argument("--config")
     run.add_argument("--live", action="store_true")
     run.add_argument("--allow-live", action="store_true")
     run.add_argument("--policy-allow-live", action="store_true")
@@ -236,7 +238,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "run":
         try:
             identity = RunIdentity(**json.loads(Path(args.identity).read_text(encoding="utf-8")))
-            controller = RunController(Path(args.run_root))
+            live_runtime = None
+            if args.live:
+                if args.config is None:
+                    raise ValueError("live_config_required")
+                live_runtime = build_live_runtime(
+                    Path(args.config).resolve(),
+                    Path(args.run_root).resolve(),
+                    expected_config_version=identity.config_version,
+                )
+            controller = RunController(
+                Path(args.run_root),
+                None if live_runtime is None else live_runtime.orchestrator,
+            )
             if args.resume:
                 remaining = controller.resume(
                     Path(args.resume), identity, stages=("g1d", "g1r", "builder", "g2a")
@@ -255,10 +269,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     live_opt_in=args.allow_live,
                     policy_opt_in=args.policy_allow_live,
                     goal=args.goal,
+                    profile=None if live_runtime is None else live_runtime.profile,
                 )
             print(json.dumps(report, sort_keys=True))
             return 0
-        except ValueError as exc:
+        except (ValueError, BackendUnavailable, NativeCredentialError) as exc:
             print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
             return 3
         except Exception:

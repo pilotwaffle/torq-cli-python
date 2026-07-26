@@ -177,6 +177,11 @@ class ConfiguredNativeVault:
             return None
         return self._store.resolve(provider_id, credential_ref)
 
+    def base_url(self, provider: str) -> str | None:
+        """Native stores contain secrets only; regional routing stays at its default."""
+        _provider_id(provider)
+        return None
+
     def __repr__(self) -> str:
         return "ConfiguredNativeVault()"
 

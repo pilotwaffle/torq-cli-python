@@ -1,6 +1,6 @@
 # Governed orchestration boundary
 
-Status: implemented and locally verified on 2026-07-23.
+Status: production CLI factory implemented; live-provider evidence remains operator-gated.
 
 `GovernedOrchestrator` is the application seam between immutable profile
 bindings, normalized provider connectors, and receipt storage. The core live
@@ -32,14 +32,19 @@ orchestrator, seals successful receipt chains, self-verifies the terminal
 manifest, and returns the receipt pointer, verdict, timeline, usage summary,
 proposal metadata, dispatched roles, and repair-cycle count.
 
-## Current production boundary
+## Production CLI boundary
 
-The repository has injected connector and surface protocols plus hermetic mock
-surfaces, but no concrete production transport factory. Consequently the
-standalone CLI cannot create a live dispatcher and rejects `--live` with
-`live_dispatcher_required` before creating a run directory. This phase proves
-the orchestration and safety contracts under injected transports; it does not
-claim an out-of-band provider call occurred.
+The installed `torq run --live` command requires a validated saved `--config`
+and both live opt-ins. Its factory resolves only the declared external file or
+platform keychain, preflights every direct-provider credential and the Claude
+binary, preserves exact registry provider/model bindings, and constructs the
+durable account-keyed entitlement ledger. DeepSeek resolves only through the
+Qwen/Bailian Token Plan credential and regional host; it never falls back to a
+direct metered DeepSeek key. Invalid preflight inputs create no run directory.
+
+Injected connector and surface protocols remain supported for hermetic tests
+and embedding. Passing those tests is not evidence that an out-of-band provider
+call occurred; live claims still require a receipt-backed operator run.
 
 ## Verification
 

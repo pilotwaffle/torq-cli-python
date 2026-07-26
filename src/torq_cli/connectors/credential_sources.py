@@ -62,6 +62,8 @@ class CredentialSourceError(ValueError):
 class CredentialVault(Protocol):
     def get(self, provider: str) -> str | None: ...
 
+    def base_url(self, provider: str) -> str | None: ...
+
 
 def _unquote(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
@@ -130,6 +132,34 @@ class ExplicitEnvVault:
             if value:
                 return value
         return None
+
+
+def credential_vault_from_config(config: Mapping[str, object]) -> CredentialVault:
+    """Resolve one explicit credential source without consulting ambient secrets."""
+    source = config.get("credential_source")
+    if not isinstance(source, Mapping):
+        raise CredentialSourceError("credential_source_missing")
+    if source.get("kind") == "external_env" and set(source) == {"kind", "path"}:
+        path = source.get("path")
+        if not isinstance(path, str):
+            raise CredentialSourceError("credential_source_invalid")
+        return ExplicitEnvVault(Path(path))
+    if source.get("kind") == "platform_keychain" and set(source) == {"kind"}:
+        connectors = config.get("connectors")
+        if not isinstance(connectors, Mapping):
+            raise CredentialSourceError("credential_source_invalid")
+        references: dict[str, str] = {}
+        for raw in connectors.values():
+            if not isinstance(raw, Mapping):
+                continue
+            provider_id = raw.get("provider_id")
+            credential_ref = raw.get("credential_ref")
+            if isinstance(provider_id, str) and isinstance(credential_ref, str):
+                if provider_id in references and references[provider_id] != credential_ref:
+                    raise CredentialSourceError("credential_source_invalid")
+                references[provider_id] = credential_ref
+        return ConfiguredNativeVault(native_store_for_current_platform(), references)
+    raise CredentialSourceError("credential_source_invalid")
 
 
 def claude_compatible_environment(
@@ -206,31 +236,7 @@ def provider_environment_from_config(
     base_environment: Mapping[str, str],
 ) -> dict[str, str]:
     """Resolve the saved source and build one production child environment."""
-    source = config.get("credential_source")
-    if not isinstance(source, Mapping):
-        raise CredentialSourceError("credential_source_missing")
-    if source.get("kind") == "external_env" and set(source) == {"kind", "path"}:
-        path = source.get("path")
-        if not isinstance(path, str):
-            raise CredentialSourceError("credential_source_invalid")
-        vault: CredentialVault = ExplicitEnvVault(Path(path))
-    elif source.get("kind") == "platform_keychain" and set(source) == {"kind"}:
-        connectors = config.get("connectors")
-        if not isinstance(connectors, Mapping):
-            raise CredentialSourceError("credential_source_invalid")
-        references: dict[str, str] = {}
-        for raw in connectors.values():
-            if not isinstance(raw, Mapping):
-                continue
-            provider_id = raw.get("provider_id")
-            credential_ref = raw.get("credential_ref")
-            if isinstance(provider_id, str) and isinstance(credential_ref, str):
-                if provider_id in references and references[provider_id] != credential_ref:
-                    raise CredentialSourceError("credential_source_invalid")
-                references[provider_id] = credential_ref
-        vault = ConfiguredNativeVault(native_store_for_current_platform(), references)
-    else:
-        raise CredentialSourceError("credential_source_invalid")
+    vault = credential_vault_from_config(config)
     if provider.casefold() == "codex":
         return openai_compatible_environment(provider, vault, base_environment)
     return claude_compatible_environment(provider, vault, base_environment)
@@ -242,6 +248,7 @@ __all__ = [
     "ExplicitEnvVault",
     "MAX_CREDENTIAL_SOURCE_BYTES",
     "claude_compatible_environment",
+    "credential_vault_from_config",
     "openai_compatible_environment",
     "provider_environment_from_config",
     "safe_child_environment",

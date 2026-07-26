@@ -108,6 +108,35 @@ def test_live_dispatcher_fails_closed_on_unattested_model(
         )
 
 
+def test_openai_dispatcher_requires_exact_resolved_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _Response:
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({
+                "model": "gpt-5.5-preview",
+                "output": [{"content": [{"text": '{"verdict":"approve","defects":[]}'}]}],
+                "usage": {},
+            }).encode("utf-8")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: _Response())
+    dispatcher = LiveStageDispatcher(_vault(tmp_path), {"PATH": "safe"})
+
+    with pytest.raises(OrchestrationBlocked, match="live_model_unattested:openai"):
+        dispatcher.dispatch(
+            role="g2a",
+            provider="openai",
+            model="gpt-5.5",
+            prompt="audit",
+        )
+
+
 def test_live_dispatcher_rejects_unknown_provider(tmp_path: Path) -> None:
     dispatcher = LiveStageDispatcher(_vault(tmp_path), {"PATH": "safe"})
     with pytest.raises(OrchestrationBlocked, match="live_provider_unsupported"):
