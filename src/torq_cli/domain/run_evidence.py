@@ -773,7 +773,6 @@ def validate_receipt_payload(
         attempt_ids = payload.get("attempt_ids")
         if (
             not isinstance(attempt_ids, list)
-            or not attempt_ids
             or any(not isinstance(value, str) or not value for value in attempt_ids)
             or len(set(attempt_ids)) != len(attempt_ids)
             or not _positive_int(payload.get("last_covered_sequence"))
@@ -1263,6 +1262,11 @@ def validate_v2_receipt_contract(
                 return "run_abandoned_operator_action_open"
             if terminal_decision or set(payload["attempt_ids"]) != open_attempt_ids:
                 return "run_abandoned_attempts_invalid"
+            if not payload["attempt_ids"] and (
+                not saw_catalog
+                or bool(attempts)
+            ):
+                return "run_abandoned_empty_enumeration_invalid"
             if int(payload["last_covered_sequence"]) != sequence_number - 1:
                 return "run_abandoned_coverage_invalid"
             for open_attempt_id in open_attempt_ids:

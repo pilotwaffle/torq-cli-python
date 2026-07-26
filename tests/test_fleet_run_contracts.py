@@ -14,6 +14,7 @@ from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.domain.run_evidence import validate_v2_receipt_contract
+from torq_cli.domain.run_plan import initial_plan_body, plan_hash
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
@@ -73,6 +74,30 @@ def _chain(tmp_path: Path, run_id: str = "run-contract") -> ReceiptChain:
         FileRunKeyStore(root),
         profile_version="1.0.0",
         policy_version="3.1.3",
+    )
+
+
+def _append_live_plan(chain: ReceiptChain) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    catalog = GovernedOrchestrator._lane_catalog(profile)
+    planned_roles = GovernedOrchestrator._PLANNED_ROLES
+    body = initial_plan_body(
+        profile_id=profile.profile_id,
+        strategy_id=profile.strategy_id,
+        planned_roles=planned_roles,
+        lane_catalog=catalog,
+    )
+    chain.append(
+        "run_planned",
+        {
+            "mode": "live",
+            "profile_id": profile.profile_id,
+            "strategy_id": profile.strategy_id,
+            "planned_roles": planned_roles,
+            "plan_contract": "torq-run-plan-v1",
+            "plan_hash": plan_hash(body),
+            "lane_catalog": catalog,
+        },
     )
 
 
@@ -399,6 +424,105 @@ def test_awaiting_approval_state_blocks_recovery_after_action_resolution(
         )
 
 
+def test_empty_abandonment_enumeration_accepts_a_planned_zero_attempt_run(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-empty-abandonment")
+    _append_live_plan(chain)
+    abandoned = chain.terminalize(
+        "run_abandoned",
+        {
+            "attempt_ids": [],
+            "operator_assertion": "no_live_worker",
+        },
+        writer_role="recovery",
+        evidence_basis="submitted",
+    )
+    chain.seal()
+
+    assert abandoned["payload"]["attempt_ids"] == []
+    assert verify_receipt_store(chain.root).status == "verified"
+
+
+def test_empty_abandonment_enumeration_rejects_any_historical_attempt(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-empty-abandonment-historical-attempt")
+    _append_live_plan(chain)
+    attempt = {
+        "role": "g1d",
+        "attempt_id": "attempt-terminal-before-recovery",
+        "attempt_ordinal": 1,
+        "repair_cycle": 0,
+    }
+    chain.append("stage_attempt_created", {**attempt, "provider_dispatch": False})
+    chain.append("stage_blocked", {**attempt, "provider_dispatch": False})
+    before = chain.receipts_path.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="run_abandoned_empty_enumeration_invalid",
+    ):
+        chain.terminalize(
+            "run_abandoned",
+            {
+                "attempt_ids": [],
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+
+    assert chain.receipts_path.read_bytes() == before
+
+
+def test_empty_abandonment_requires_pending_commands_to_be_finalized(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-empty-abandonment-command")
+    _append_live_plan(chain)
+    GovernedOrchestrator().inject_context(
+        chain,
+        "This pending command must be finalized first",
+        command_id="pending-before-abandonment",
+    )
+    before = chain.receipts_path.read_bytes()
+
+    with pytest.raises(ValueError, match="command_pending_at_terminal"):
+        chain.append(
+            "run_abandoned",
+            {
+                "attempt_ids": [],
+                "last_covered_sequence": chain.sequence,
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+    assert chain.receipts_path.read_bytes() == before
+
+    abandoned = chain.terminalize(
+        "run_abandoned",
+        {
+            "attempt_ids": [],
+            "operator_assertion": "no_live_worker",
+        },
+        writer_role="recovery",
+        evidence_basis="submitted",
+    )
+    transitions = [
+        json.loads(line)["transition"]
+        for line in chain.receipts_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert transitions[-3:] == [
+        "terminalization_started",
+        "command_unapplied",
+        "run_abandoned",
+    ]
+    assert abandoned["payload"]["attempt_ids"] == []
+
+
 def test_invented_orchestrator_decision_status_is_rejected_before_append(
     tmp_path: Path,
 ) -> None:
@@ -458,7 +582,9 @@ def test_legacy_signed_non_finite_receipt_remains_verifiable(tmp_path: Path) -> 
     manifest["signature"] = Ed25519PrivateKey.from_private_bytes(
         chain.run_keys.manifest
     ).sign(legacy_canonical(manifest)).hex()
-    manifest_path.write_bytes(legacy_canonical(manifest))
+    manifest_bytes = legacy_canonical(manifest)
+    manifest_path.write_bytes(manifest_bytes)
+    chain._write_manifest_anchor(manifest, manifest_bytes)
 
     assert verify_receipt_store(chain.root).status == "verified"
 

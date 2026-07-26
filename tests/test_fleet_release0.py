@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.fleet_controls import FleetControlService
@@ -269,8 +270,10 @@ def test_crash_boundaries_never_read_as_tampered(
         chain.append("run_attested", {"ordinal": 2})
 
     result = verify_receipt_store(chain.root)
-    assert result.status in {"verified", "live_catching_up"}
+    assert result.status in {"verified", "live_catching_up", "incomplete"}
     assert result.status != "tampered"
+    if result.status == "incomplete":
+        assert result.finding == "manifest_anchor_update_pending"
 
 
 def test_manifest_covered_prefix_excludes_uncovered_receipt(tmp_path: Path) -> None:
@@ -292,6 +295,140 @@ def test_manifest_covered_prefix_excludes_uncovered_receipt(tmp_path: Path) -> N
     assert verification.status == "live_catching_up"
     assert snapshot["verification"]["state"] == "live_catching_up"
     assert snapshot["run"]["receipt_count"] == 1
+
+
+def test_replaying_an_older_valid_manifest_is_detected_with_matching_receipts(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "run-rollback")
+    chain.append("run_attested", {"ordinal": 1})
+    old_manifest = (chain.root / "terminal-manifest.json").read_bytes()
+    old_receipts = chain.receipts_path.read_bytes()
+    chain.append("run_attested", {"ordinal": 2})
+
+    (chain.root / "terminal-manifest.json").write_bytes(old_manifest)
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_rollback_detected"
+
+    chain.receipts_path.write_bytes(old_receipts)
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_rollback_detected"
+
+
+def test_reopened_chain_hydrates_sequence_and_continues_without_corruption(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    first = _chain(root, "run-reopened")
+    first.append("run_attested", {"ordinal": 1})
+
+    reopened = _chain(root, "run-reopened")
+    second = reopened.append("run_attested", {"ordinal": 2})
+
+    assert second["sequence"] == 2
+    assert reopened.sequence == 2
+    assert verify_receipt_store(reopened.root).status == "verified"
+
+
+def test_manifest_anchor_lag_is_reconciled_once_on_writer_restart(
+    tmp_path: Path,
+) -> None:
+    armed = [False]
+
+    def observer(step: str) -> None:
+        if armed[0] and step == "anchor_temporary_fsynced":
+            raise RuntimeError("simulated_anchor_crash")
+
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-recovery", observer=observer)
+    chain.append("run_attested", {"ordinal": 1})
+    armed[0] = True
+    with pytest.raises(RuntimeError, match="simulated_anchor_crash"):
+        chain.append("run_attested", {"ordinal": 2})
+
+    pending = verify_receipt_store(chain.root)
+    assert pending.status == "incomplete"
+    assert pending.finding == "manifest_anchor_update_pending"
+
+    reopened = _chain(root, "run-anchor-recovery")
+    assert reopened.sequence == 2
+    assert verify_receipt_store(reopened.root).status == "verified"
+
+
+def test_seal_advances_manifest_generation_without_an_extra_receipt(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "run-seal-generation")
+    chain.append("run_attested", {"ordinal": 1})
+    before_bytes = (chain.root / "terminal-manifest.json").read_bytes()
+    before = json.loads(before_bytes)
+
+    chain.seal()
+    after = json.loads(
+        (chain.root / "terminal-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert after["manifest_generation"] == before["manifest_generation"] + 1
+    assert after["receipt_count"] == before["receipt_count"]
+    assert after["previous_manifest_hash"] == (
+        "sha256:" + hashlib.sha256(before_bytes).hexdigest()
+    )
+
+
+def test_anchor_required_certificate_fails_closed_when_anchor_is_missing(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-missing")
+    chain.append("run_attested", {"ordinal": 1})
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    anchor.unlink()
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_anchor_missing"
+
+
+def test_anchorless_certificate_v2_remains_readable_but_is_read_only(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchorless-v2")
+    chain.append("run_attested", {"ordinal": 1})
+    certificate = json.loads(chain.certificate_path.read_text(encoding="utf-8"))
+    certificate.pop("root_signature")
+    certificate.pop("manifest_rollback_policy")
+    certificate["certificate_schema_version"] = "2.0.0"
+    signed_certificate = {
+        **certificate,
+        "root_signature": Ed25519PrivateKey.from_private_bytes(chain.key)
+        .sign(_canonical(certificate))
+        .hex(),
+    }
+    chain.certificate_path.write_bytes(_canonical(signed_certificate))
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    manifest["certificate_hash"] = ReceiptChain.hash_file(chain.certificate_path)
+    signed_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(_canonical(manifest))
+        .hex(),
+    }
+    manifest_path.write_bytes(_canonical(signed_manifest))
+    downgraded = verify_receipt_store(chain.root)
+    assert downgraded.status == "tampered"
+    assert downgraded.finding == "run_certificate_rollback_detected"
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    anchor.unlink()
+
+    assert verify_receipt_store(chain.root).status == "verified"
+    reopened = _chain(root, "run-anchorless-v2")
+    with pytest.raises(ValueError, match="receipt_store_legacy_read_only"):
+        reopened.append("run_attested", {"ordinal": 2})
 
 
 def test_double_death_stays_running_until_recovery_seals_abandonment(

@@ -191,6 +191,14 @@ def _convert_certificate_to_v1(chain: ReceiptChain) -> None:
         json.dumps(signed_manifest, sort_keys=True),
         encoding="utf-8",
     )
+    identity = hashlib.sha256(chain.run_id.encode("utf-8")).hexdigest()
+    anchor = (
+        chain.root.parent
+        / ".torq-run-identities"
+        / identity
+        / "manifest-head.v1.json"
+    )
+    anchor.unlink()
 
 
 def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
@@ -208,7 +216,8 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
     )
 
     assert receipt["schema_version"] == "2.0.0"
-    assert certificate["certificate_schema_version"] == "2.0.0"
+    assert certificate["certificate_schema_version"] == "3.0.0"
+    assert certificate["manifest_rollback_policy"] == "external-signed-head-v1"
     assert receipt["writer_role"] == "orchestrator"
     assert receipt["evidence_basis"] == "observed"
     assert "writer_signature" in receipt
