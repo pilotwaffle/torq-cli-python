@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,16 @@ def test_source_is_explicit_bounded_regular_and_duplicate_keys_fail_closed(tmp_p
     restrict_receipt_trust_anchor(duplicate)
     with pytest.raises(CredentialSourceError, match="credential_source_duplicate_key"):
         ExplicitEnvVault(duplicate)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink contract")
+def test_external_source_rejects_symlink(tmp_path: Path) -> None:
+    source = _credential_file(tmp_path)
+    link = tmp_path / "linked.env"
+    link.symlink_to(source)
+
+    with pytest.raises(CredentialSourceError, match="credential_source_(unreadable|regular_file_required)"):
+        ExplicitEnvVault(link)
 
 
 def test_external_source_permissions_are_required(

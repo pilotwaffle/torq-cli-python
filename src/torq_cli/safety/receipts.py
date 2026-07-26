@@ -317,7 +317,7 @@ def _windows_current_user_sid() -> str:
         kernel32.CloseHandle(token)
 
 
-def _set_windows_owner_only_acl(path: Path) -> None:
+def _set_windows_acl_for_sid(path: Path, sid: str) -> None:
     import ctypes
     from ctypes import wintypes
 
@@ -350,7 +350,7 @@ def _set_windows_owner_only_acl(path: Path) -> None:
     )
     advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
     descriptor = ctypes.c_void_p()
-    sddl = f"D:P(A;;FA;;;{_windows_current_user_sid()})"
+    sddl = f"D:P(A;;FA;;;{sid})"
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl,
         1,
@@ -382,6 +382,10 @@ def _set_windows_owner_only_acl(path: Path) -> None:
             raise OSError(result, "private_key_acl_failed")
     finally:
         kernel32.LocalFree(descriptor)
+
+
+def _set_windows_owner_only_acl(path: Path) -> None:
+    _set_windows_acl_for_sid(path, _windows_current_user_sid())
 
 
 def _windows_acl_sddl(path: Path) -> str:

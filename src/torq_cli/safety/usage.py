@@ -51,6 +51,11 @@ def summarize_usage(receipts: Sequence[dict[str, Any]], *, budget_usd: float) ->
         cost = _money(raw_cost)
         consumed += cost
         raw_billed = receipt.get("billed_usd", raw_cost)
+        if (
+            "billed_usd" not in receipt
+            and str(receipt.get("cost_basis", "")).startswith("configured_worst_case")
+        ):
+            raw_billed = None
         if raw_billed is not None:
             billed += _money(raw_billed)
         else:

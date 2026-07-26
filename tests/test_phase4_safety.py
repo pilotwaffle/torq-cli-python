@@ -371,6 +371,20 @@ def test_usage_summary_does_not_turn_unknown_billing_into_zero() -> None:
     assert summary["settlement"]["billed_status"] == "incomplete"
 
 
+def test_legacy_worst_case_cost_is_not_upgraded_to_known_billing() -> None:
+    summary = summarize_usage(
+        [{
+            "agent": "g2a", "provider": "openai", "cost_usd": "0.25",
+            "cost_basis": "configured_worst_case", "settlement": "metered",
+            "usage": "unreported",
+        }],
+        budget_usd=1.0,
+    )
+
+    assert summary["settlement"]["billed_usd"] is None
+    assert summary["settlement"]["billed_status"] == "incomplete"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows owner SID contract")
 def test_windows_restricted_acl_rejects_foreign_file_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -380,5 +394,10 @@ def test_windows_restricted_acl_rejects_foreign_file_owner(
     receipts_module.restrict_receipt_trust_anchor(target)
     assert signing_file_permissions_are_restricted(target)
 
-    monkeypatch.setattr(receipts_module, "_windows_current_user_sid", lambda: "S-1-1-0")
-    assert not signing_file_permissions_are_restricted(target)
+    try:
+        receipts_module._set_windows_acl_for_sid(target, "S-1-1-0")
+        monkeypatch.setattr(receipts_module, "_windows_current_user_sid", lambda: "S-1-1-0")
+        assert not signing_file_permissions_are_restricted(target)
+    finally:
+        monkeypatch.undo()
+        receipts_module.restrict_receipt_trust_anchor(target)

@@ -300,6 +300,25 @@ def test_live_dispatcher_locally_rejects_off_schema_provider_object(tmp_path: Pa
         )
 
 
+@pytest.mark.parametrize(
+    ("value", "schema"),
+    [
+        ({}, {"type": "object", "required": ["x"], "properties": {"x": {"type": "string"}}}),
+        ({"x": "ok", "y": "extra"}, {"type": "object", "required": ["x"], "properties": {"x": {"type": "string"}}, "additionalProperties": False}),
+        (1, {"type": "string"}),
+        ("wrong", {"type": "string", "const": "right"}),
+        ("wrong", {"type": "string", "enum": ["right"]}),
+        ("too-long", {"type": "string", "maxLength": 3}),
+        (["a", "b"], {"type": "array", "maxItems": 1, "items": {"type": "string"}}),
+        ([1], {"type": "array", "items": {"type": "string"}}),
+    ],
+)
+def test_contract_matcher_rejects_each_closed_schema_violation(
+    value: object, schema: dict[str, object]
+) -> None:
+    assert not live_provider_module._matches_contract(value, schema)
+
+
 def test_live_dispatcher_bounds_owned_process_output(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
     dispatcher = LiveStageDispatcher(
