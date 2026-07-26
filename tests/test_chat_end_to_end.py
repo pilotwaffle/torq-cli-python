@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from torq_cli.adapters.process import ExperimentalLinuxOwnedProcess, OwnedProcess
 from torq_cli.application.chat_projection import reduce_chat_projection
 from torq_cli.application.chat_runtime import (
     ChatProviderCommand,
@@ -24,6 +25,7 @@ _STRONG_OWNER_TESTABLE = os.name == "nt" or (
     sys.platform.startswith("linux")
     and os.environ.get("TORQ_TEST_LINUX_SYSTEMD_CGROUP") == "1"
 )
+_OWNER_FACTORY = ExperimentalLinuxOwnedProcess if sys.platform.startswith("linux") else OwnedProcess
 
 
 def _journal(tmp_path: Path) -> ChatEvidenceJournal:
@@ -76,7 +78,9 @@ def _wait_for(journal: ChatEvidenceJournal, event: str) -> None:
 @pytest.mark.skipif(not _STRONG_OWNER_TESTABLE, reason="requires a kernel-owned process runner")
 def test_real_owned_completion_rebuilds_verified_transcript(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
-    runtime = ChatRuntimeCoordinator(journal, _command("complete", tmp_path))
+    runtime = ChatRuntimeCoordinator(
+        journal, _command("complete", tmp_path), owner_factory=_OWNER_FACTORY
+    )
     runtime.submit(turn_id="turn-e2e-complete", text="hello")
     _wait_for(journal, "turn_completed")
 
@@ -93,7 +97,9 @@ def test_real_owned_completion_rebuilds_verified_transcript(tmp_path: Path) -> N
 @pytest.mark.skipif(not _STRONG_OWNER_TESTABLE, reason="requires a kernel-owned process runner")
 def test_real_owned_stop_commits_cancelled_only_after_empty_job(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
-    runtime = ChatRuntimeCoordinator(journal, _command("parent", tmp_path))
+    runtime = ChatRuntimeCoordinator(
+        journal, _command("parent", tmp_path), owner_factory=_OWNER_FACTORY
+    )
     runtime.submit(turn_id="turn-e2e-cancel", text="stop this")
     _wait_for(journal, "turn_started")
     terminal = runtime.cancel("turn-e2e-cancel", timeout=10)

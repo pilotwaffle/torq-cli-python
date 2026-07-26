@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 _BOOTSTRAP_LIMIT = 4_000_000
@@ -72,6 +72,16 @@ class LinuxSystemdCgroup:
 
     def launch_command(self, command: Sequence[str], *, cwd: str) -> tuple[str, ...]:
         """Build the transient-service command without embedding credentials."""
+        runtime_dir = _trusted_user_runtime(self._environment)
+        inaccessible_control_plane = " ".join(
+            (
+                "/proc",
+                "/run/dbus/system_bus_socket",
+                "/run/systemd/private",
+                str(runtime_dir / "bus"),
+                str(runtime_dir / "systemd"),
+            )
+        )
         return (
             self._systemd_run,
             "--user",
@@ -86,6 +96,8 @@ class LinuxSystemdCgroup:
             "--property=SendSIGKILL=yes",
             "--property=TimeoutStopSec=1s",
             "--property=ProtectControlGroups=yes",
+            f"--property=InaccessiblePaths={inaccessible_control_plane}",
+            "--property=RestrictAddressFamilies=AF_INET AF_INET6",
             "--",
             sys.executable,
             "-m",
@@ -286,6 +298,19 @@ def _trusted_system_tool(name: str) -> str:
     ):
         raise OSError("owned_process_systemd_unavailable")
     return str(resolved)
+
+
+def _trusted_user_runtime(environment: Mapping[str, str]) -> PurePosixPath:
+    get_uid = getattr(os, "getuid", None)
+    if get_uid is None:
+        raise OSError("owned_process_user_bus_unavailable")
+    runtime_dir = PurePosixPath(environment.get("XDG_RUNTIME_DIR", ""))
+    expected = PurePosixPath(f"/run/user/{int(get_uid())}")
+    if runtime_dir != expected or environment.get("DBUS_SESSION_BUS_ADDRESS") != (
+        f"unix:path={expected / 'bus'}"
+    ):
+        raise OSError("owned_process_user_bus_unavailable")
+    return runtime_dir
 
 
 def _filesystem_type(path: Path, stat_binary: str) -> str:

@@ -56,42 +56,37 @@ an exact loopback Origin and rotate the session token after every attempt.
 
 ## Platform boundary
 
-Production chat uses kernel-backed owners on Windows and supported Linux hosts.
-On Windows, the provider is created suspended, assigned to a kill-on-close Job
-Object, and then resumed. On Linux, a systemd user service with `Type=exec`
-places a trusted supervisor in a cgroup-v2 unit before provider exec;
-`KillMode=control-group` owns double-fork and `setsid()` descendants, and
-`cgroup.events: populated` is the terminal empty observation. Provider secrets
-are framed over the service's stdin rather than placed in `systemd-run` argv.
-The stdin connection also acts as a coordinator lifetime lease: if the
-coordinator crashes, the supervisor exits and systemd kills the remaining unit
-cgroup.
+Production chat uses a kernel-backed owner on Windows. The provider is created
+suspended, assigned to a kill-on-close Job Object, and then resumed. Linux
+production chat fails closed with `distinct_identity_system_broker_required`.
+macOS remains unsupported. Process groups are never advertised as ownership.
 
-Linux fails closed unless cgroup v2, a functioning systemd user manager,
-`systemd-run --pipe`, `ProtectControlGroups`, and observable unit cgroups are
-available. It never falls back to a POSIX process group or post-fork cgroup
-migration. Headless CI without a user D-Bus session therefore remains
-unsupported until it provisions those primitives explicitly.
+The Linux per-user systemd adapter is an experimental behavior harness, not a
+strong boundary: its manager, coordinator, and provider all execute as the same
+OS identity. It places a trusted supervisor in a cgroup-v2 unit before provider
+exec, uses `KillMode=control-group`, and observes `cgroup.events: populated`.
+Provider secrets are framed over stdin and the stdin connection acts as a
+coordinator lifetime lease.
 
-macOS remains unsupported. A process group cannot prevent `setsid()` escape,
-and no weaker containment path is advertised as ownership.
+The experimental service makes `/proc`, the operator's user-bus and private
+user-manager sockets, and the system manager sockets inaccessible in its mount
+namespace. It permits only `AF_INET` and `AF_INET6` socket creation, preserving
+direct HTTPS while intentionally disabling local AF_UNIX integrations such as
+provider-side keyring access and local proxies. TORQ must resolve credentials
+before launch. These restrictions reduce known same-identity escape paths but
+do not upgrade the adapter to production containment.
 
-The Linux release gate remains opt-in outside CI. The
-`linux-owned-process-evidence` CI job starts the runner account's real user
-manager through the host's PID-1 systemd manager, then requires its
-owner-protected runtime directory and D-Bus socket, unified cgroup-v2 control
-group, and a protected transient-service
-preflight before enabling the tests. Missing prerequisites refuse the job; a
-pytest success containing any skip also fails the gate. The workflow does not
-use a container or a process-group substitute for the host kernel boundary.
+The `linux-systemd-experimental-evidence` CI job starts the runner account's
+real user manager through PID 1, then requires a protected runtime directory,
+user bus, unified cgroup-v2 hierarchy, and successful sandbox preflight. Missing
+prerequisites, skips, and test-inventory changes refuse the job. It uses neither
+a container nor a process-group substitute.
 
-The job uploads `evidence.json` and `junit.xml` as the
-`linux-owned-process-evidence` workflow artifact. The JSON identifies itself as
-machine-generated host-kernel evidence and records the source commit, workflow
-run/attempt, hosted-runner image, kernel, observed manager cgroup, and exact test
-summary. These values are generated at execution time and are not copied into
-the repository as an attestation. The workflow definition alone is not evidence
-that the remote gate ran; the GitHub job and artifact are the provenance.
+The job uploads `evidence.json`, `junit.xml`, and an evidence SHA-256 sidecar as
+the `linux-systemd-experimental-evidence` artifact. It records checked-out event
+and PR-head SHAs, workflow identity, hosted image, kernel, manager cgroup, test
+summary, and JUnit SHA-256. Checksums are integrity aids, not signatures. The
+GitHub run and artifact provide provenance; the files alone do not.
 
 On a clean cgroup-v2 login host with an already-running user manager, run:
 
@@ -100,9 +95,11 @@ TORQ_TEST_LINUX_SYSTEMD_CGROUP=1 python -m pytest -q \
   tests/test_owned_process_linux_kernel.py tests/test_chat_end_to_end.py
 ```
 
-That gate exercises `setsid()` and double-fork adversaries, 100 sequential
+That experimental gate exercises `setsid()` and double-fork adversaries, 100 sequential
 stops, 20 concurrent stops, coordinator-crash lease cleanup, durable chat
-completion, and cancellation only after a known-empty cgroup observation.
+completion, user-manager delegation refusal, and cancellation only after a
+known-empty cgroup observation. A green result proves only those observed
+user-systemd behaviors on that host. It does not enable Linux production chat.
 
 ## Residual threat
 
@@ -118,4 +115,5 @@ other local accounts, not a process already executing as the operator.
 
 This release does not provide multiple simultaneous turns, browser-held API
 keys, optimistic cancellation, editing already signed messages, or a claim of
-strong containment on POSIX platforms.
+strong containment on macOS or POSIX platforms without the Linux systemd and
+cgroup-v2 boundary described above.

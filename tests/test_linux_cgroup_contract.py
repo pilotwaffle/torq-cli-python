@@ -20,7 +20,11 @@ def _bare_owner(tmp_path: Path) -> LinuxSystemdCgroup:
     owner._control_group = tmp_path
     owner._leader_pid = 42
     owner._started = True
-    owner._environment = {"PATH": os.environ.get("PATH", "")}
+    owner._environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    }
     owner._systemd_run = "/usr/bin/systemd-run"
     owner._systemctl = "/usr/bin/systemctl"
     owner._stat = "/usr/bin/stat"
@@ -29,11 +33,23 @@ def _bare_owner(tmp_path: Path) -> LinuxSystemdCgroup:
 
 def test_command_has_pre_exec_systemd_guards_and_no_provider_secrets(tmp_path: Path) -> None:
     owner = _bare_owner(tmp_path)
-    command = owner.launch_command(("provider", "--model", "safe"), cwd=str(tmp_path))
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(linux_cgroup.os, "getuid", lambda: 1000, raising=False)
+    try:
+        command = owner.launch_command(("provider", "--model", "safe"), cwd=str(tmp_path))
+    finally:
+        monkeypatch.undo()
     joined = " ".join(command)
     assert "--service-type=exec" in command
     assert "--property=KillMode=control-group" in command
     assert "--property=ProtectControlGroups=yes" in command
+    inaccessible = next(part for part in command if part.startswith("--property=InaccessiblePaths="))
+    assert "/run/user/1000/bus" in inaccessible
+    assert "/run/user/1000/systemd" in inaccessible
+    assert "/run/dbus/system_bus_socket" in inaccessible
+    assert "/run/systemd/private" in inaccessible
+    assert "/proc" in inaccessible
+    assert "--property=RestrictAddressFamilies=AF_INET AF_INET6" in command
     assert "torq_cli.adapters.linux_cgroup_exec" in command
     assert "API_SECRET" not in joined
     systemd_boundary = command.index("--")
@@ -51,7 +67,11 @@ def test_command_has_pre_exec_systemd_guards_and_no_provider_secrets(tmp_path: P
     )
     # User-bus coordinates come only from the ambient values captured by the
     # owner; provider-controlled values cannot redirect the control plane.
-    assert environment == {"PATH": "/usr/bin"}
+    assert environment == {
+        "PATH": "/usr/bin",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    }
 
 
 def test_path_and_working_directory_shadows_never_replace_pinned_control_binary(
@@ -59,7 +79,12 @@ def test_path_and_working_directory_shadows_never_replace_pinned_control_binary(
 ) -> None:
     owner = _bare_owner(tmp_path)
     (tmp_path / "systemd-run").write_text("attacker", encoding="utf-8")
-    command = owner.launch_command(("provider",), cwd=str(tmp_path))
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(linux_cgroup.os, "getuid", lambda: 1000, raising=False)
+    try:
+        command = owner.launch_command(("provider",), cwd=str(tmp_path))
+    finally:
+        monkeypatch.undo()
     launcher_environment = owner.launcher_environment({"PATH": str(tmp_path)})
     assert command[0] == "/usr/bin/systemd-run"
     assert command[0] != str(tmp_path / "systemd-run")

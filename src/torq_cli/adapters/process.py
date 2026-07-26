@@ -16,6 +16,7 @@ from typing import Any
 
 from torq_cli.adapters.macos_containment import require_macos_strong_containment
 from torq_cli.adapters.linux_cgroup import LinuxSystemdCgroup
+from torq_cli.adapters.linux_containment import linux_containment_capability
 from torq_cli.adapters.owned_stream import BoundedEventStream, ProcessChannel, ProcessEvent
 from torq_cli.adapters.windows_job import WindowsJob, cpython_process_handle
 
@@ -102,6 +103,7 @@ class OwnedProcess:
     """
 
     _CREATE_SUSPENDED = 0x00000004
+    _EXPERIMENTAL_LINUX = False
 
     def __init__(
         self,
@@ -119,6 +121,10 @@ class OwnedProcess:
             require_macos_strong_containment()
         if os.name != "nt" and not sys.platform.startswith("linux"):
             raise OSError("owned_process_strong_containment_unavailable")
+        if sys.platform.startswith("linux") and not self._EXPERIMENTAL_LINUX:
+            capability = linux_containment_capability()
+            if not capability.available:
+                raise OSError("owned_process_strong_containment_unavailable")
         if len(subprocess.list2cmdline(command)) > 32_767:
             raise ValueError("owned_process_command_too_large")
         if event_capacity_bytes < len(b"stream_overflow"):
@@ -540,3 +546,9 @@ class OwnedProcess:
         """Stop and close the owned boundary."""
         del exc_type, exc, traceback
         self.close()
+
+
+class ExperimentalLinuxOwnedProcess(OwnedProcess):
+    """Exercise user-systemd behavior without advertising production ownership."""
+
+    _EXPERIMENTAL_LINUX = True

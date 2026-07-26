@@ -33,6 +33,7 @@ from torq_cli.connectors.headless_credentials import (
     HeadlessEncryptedFileStore,
 )
 from torq_cli.adapters.chat_provider import ChatProviderCommandFactory, current_environment
+from torq_cli.adapters.linux_containment import linux_containment_capability
 from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
@@ -340,7 +341,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.chat_provider is not None:
                     if args.chat_model is None:
                         raise ValueError("chat_model_required")
-                    if sys.platform != "win32" and not sys.platform.startswith("linux"):
+                    if sys.platform.startswith("linux"):
+                        capability = linux_containment_capability()
+                        if not capability.available:
+                            raise ValueError(capability.reason)
+                    elif sys.platform != "win32":
                         raise ValueError("chat_strong_containment_unavailable")
                     vault = None
                     if args.chat_provider != "claude":

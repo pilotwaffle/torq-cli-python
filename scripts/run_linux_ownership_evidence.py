@@ -1,7 +1,7 @@
-"""Run the fail-closed Linux owned-process release gate.
+"""Run the fail-closed experimental Linux user-systemd behavior gate.
 
 This driver is intentionally Linux-host specific.  It records why a host was
-accepted or refused, runs the opt-in kernel tests only after a real systemd
+accepted or refused, runs opt-in experimental tests only after a real systemd
 user manager and unified cgroup hierarchy have been observed, and rejects a
 successful pytest exit if any selected test was skipped.
 """
@@ -9,6 +9,7 @@ successful pytest exit if any selected test was skipped.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -21,7 +22,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 
-_EXPECTED_TESTS = 7
+_EXPECTED_TESTS = 8
 _SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 _TEST_TARGETS = (
     "tests/test_owned_process_linux_kernel.py",
@@ -134,6 +135,15 @@ def _observe_prerequisites(bootstrap_status: int) -> dict[str, object]:
     systemd_run = _trusted_tool("systemd-run")
     true_tool = _trusted_tool("true")
     preflight_unit = f"torq-ci-preflight-{os.getpid()}.service"
+    inaccessible_control_plane = " ".join(
+        (
+            "/proc",
+            "/run/dbus/system_bus_socket",
+            "/run/systemd/private",
+            str(runtime_dir / "bus"),
+            str(runtime_dir / "systemd"),
+        )
+    )
     preflight = _run(
         (
             systemd_run,
@@ -148,6 +158,8 @@ def _observe_prerequisites(bootstrap_status: int) -> dict[str, object]:
             "--property=SendSIGKILL=yes",
             "--property=TimeoutStopSec=1s",
             "--property=ProtectControlGroups=yes",
+            f"--property=InaccessiblePaths={inaccessible_control_plane}",
+            "--property=RestrictAddressFamilies=AF_INET AF_INET6",
             "--",
             true_tool,
         )
@@ -190,6 +202,19 @@ def _write_report(path: Path, report: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_digest(path: Path) -> None:
+    digest_path = path.with_suffix(path.suffix + ".sha256")
+    digest_path.write_text(f"{_sha256(path)}  {path.name}\n", encoding="ascii")
+
+
 def _provenance() -> dict[str, object]:
     return {
         "generated_at": datetime.now(UTC).isoformat(),
@@ -200,9 +225,12 @@ def _provenance() -> dict[str, object]:
             "kernel": platform.release(),
             "runner_os": os.environ.get("RUNNER_OS", "unreported"),
         },
-        "kind": "machine_generated_host_kernel_evidence",
+        "kind": "machine_generated_linux_systemd_experimental_evidence",
         "source": {
-            "commit": os.environ.get("GITHUB_SHA", "unreported"),
+            "event_name": os.environ.get("GITHUB_EVENT_NAME", "unreported"),
+            "event_sha": os.environ.get("GITHUB_SHA", "unreported"),
+            "head_sha": os.environ.get("TORQ_EVIDENCE_HEAD_SHA", "unreported"),
+            "ref": os.environ.get("GITHUB_REF", "unreported"),
             "repository": os.environ.get("GITHUB_REPOSITORY", "unreported"),
             "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "unreported"),
             "run_id": os.environ.get("GITHUB_RUN_ID", "unreported"),
@@ -220,7 +248,7 @@ def main() -> int:
 
     report: dict[str, object] = {
         "provenance": _provenance(),
-        "schema": "torq-linux-owned-process-evidence-v1",
+        "schema": "torq-linux-systemd-experimental-evidence-v1",
         "status": "refused",
     }
     result = 3
@@ -248,6 +276,7 @@ def main() -> int:
             raise RuntimeError("linux_ownership_junit_missing")
         summary = _junit_summary(args.junit)
         report["tests"] = {"command": list(command), **summary}
+        report["artifacts"] = {"junit_sha256": _sha256(args.junit)}
         if completed.returncode != 0 or summary["failures"] or summary["errors"]:
             report["status"] = "tests_failed"
             result = completed.returncode or 1
@@ -262,6 +291,7 @@ def main() -> int:
         report["finding"] = str(exc)
     finally:
         _write_report(args.report, report)
+        _write_digest(args.report)
 
     print(json.dumps({"report": str(args.report), "status": report["status"]}, sort_keys=True))
     return result
