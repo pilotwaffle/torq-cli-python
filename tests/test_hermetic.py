@@ -65,17 +65,17 @@ def test_production_imports_forbid_subprocess() -> None:
                 "torq_cli/safety/workspace.py",
                 "torq_cli/safety/receipts.py",
                 "torq_cli/safety/evidence_broker.py",
-                    "torq_cli/safety/accounting_registry.py",
-                    "torq_cli/safety/chat_evidence.py",
-                )
-            ):
-                # The evidence broker owns the authenticated local-only IPC
-                # boundary (AF_PIPE on Windows, AF_UNIX on POSIX).
-                local_allow = (
-                    {"os", "socket"}
-                    if source_path.name == "evidence_broker.py"
-                    else {"os"}
-                )
+                "torq_cli/safety/accounting_registry.py",
+                "torq_cli/safety/chat_evidence.py",
+            )
+        ):
+            # The evidence broker owns the authenticated local-only IPC
+            # boundary (AF_PIPE on Windows, AF_UNIX on POSIX).
+            local_allow = (
+                {"os", "socket"}
+                if source_path.name == "evidence_broker.py"
+                else {"os"}
+            )
         elif source_path.as_posix().endswith("torq_cli/connectors/native_credentials.py"):
             # DISPLAY/WAYLAND_DISPLAY are explicit session-type facts only;
             # this adapter never enumerates credential-bearing environment keys.
@@ -83,6 +83,10 @@ def test_production_imports_forbid_subprocess() -> None:
         elif source_path.as_posix().endswith("torq_cli/connectors/headless_credentials.py"):
             # The explicit operator-selected encrypted store needs local
             # terminal, filesystem, permission, and durability primitives.
+            local_allow = {"os"}
+        elif source_path.as_posix().endswith("torq_cli/connectors/credential_sources.py"):
+            # The explicit compatibility source is opened once with no-follow
+            # semantics and validated through its descriptor before parsing.
             local_allow = {"os"}
         else:
             local_allow = set()

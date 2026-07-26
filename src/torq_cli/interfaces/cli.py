@@ -320,7 +320,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (
             ValueError,
             BackendUnavailable,
-            CredentialSourceError,
             HeadlessCredentialError,
             NativeCredentialError,
         ) as exc:

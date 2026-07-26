@@ -170,14 +170,52 @@ def _single_json_object(value: object, provider: str) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def _bounded_label(value: object) -> bool:
-    return isinstance(value, str) and len(value) <= 120
-
-
 def _usage_count(value: object, provider: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10**12:
         raise OrchestrationBlocked(f"live_provider_response_invalid:{provider}")
     return value
+
+
+def _matches_contract(value: object, schema: Mapping[str, object]) -> bool:
+    expected_type = schema.get("type")
+    if expected_type == "string":
+        if not isinstance(value, str):
+            return False
+        maximum = schema.get("maxLength")
+        if isinstance(maximum, int) and len(value) > maximum:
+            return False
+        if "const" in schema and value != schema["const"]:
+            return False
+        allowed = schema.get("enum")
+        return not isinstance(allowed, list) or value in allowed
+    if expected_type == "array":
+        if not isinstance(value, list):
+            return False
+        maximum = schema.get("maxItems")
+        if isinstance(maximum, int) and len(value) > maximum:
+            return False
+        item_schema = schema.get("items")
+        return isinstance(item_schema, Mapping) and all(
+            _matches_contract(item, item_schema) for item in value
+        )
+    if expected_type == "object":
+        if not isinstance(value, Mapping):
+            return False
+        properties = schema.get("properties")
+        required = schema.get("required")
+        if not isinstance(properties, Mapping) or not isinstance(required, list):
+            return False
+        if not set(required).issubset(value):
+            return False
+        if schema.get("additionalProperties") is False and not set(value).issubset(properties):
+            return False
+        return all(
+            key in properties
+            and isinstance(properties[key], Mapping)
+            and _matches_contract(item, properties[key])
+            for key, item in value.items()
+        )
+    return False
 
 
 def _validated_role_object(value: object, provider: str, role: str) -> str:
@@ -185,40 +223,8 @@ def _validated_role_object(value: object, provider: str, role: str) -> str:
 
     canonical = _single_json_object(value, provider)
     decoded = json.loads(canonical)
-    valid = False
-    if role in {"g1d", "builder", "refine_bug", "refine_ui"}:
-        expected_status = "design_complete" if role == "g1d" else (
-            "build_complete" if role == "builder" else "repair_complete"
-        )
-        valid = (
-            set(decoded) == {"status", "proposal"}
-            and decoded.get("status") == expected_status
-            and _bounded_label(decoded.get("proposal"))
-        )
-    elif role == "g1r":
-        valid = (
-            set(decoded) == {"verdict", "rationale"}
-            and decoded.get("verdict") in {"approve", "reject"}
-            and _bounded_label(decoded.get("rationale"))
-        )
-    elif role == "g2a":
-        defects = decoded.get("defects")
-        valid = (
-            set(decoded) == {"verdict", "defects"}
-            and decoded.get("verdict") in {"approve", "reject"}
-            and isinstance(defects, list)
-            and len(defects) <= 50
-            and all(
-                isinstance(defect, Mapping)
-                and set(defect) == {"defect_id", "severity", "class", "status"}
-                and _bounded_label(defect.get("defect_id"))
-                and defect.get("severity") in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
-                and defect.get("class") in {"bug", "ui", "security", "other"}
-                and defect.get("status") == "open"
-                for defect in defects
-            )
-        )
-    if not valid:
+    schema = _CONTRACTS.get(role)
+    if schema is None or not _matches_contract(decoded, schema):
         raise OrchestrationBlocked(f"live_provider_response_invalid:{provider}")
     return canonical
 
@@ -269,12 +275,21 @@ class LiveStageDispatcher:
         total = 0
         deadline = time.monotonic() + self.timeout_seconds
         failure: OrchestrationBlocked | None = None
+        primary_error: BaseException | None = None
+        returncode: int | None = None
+
+        def stop_observation() -> ExitObservation | None:
+            try:
+                return owner.force_stop(timeout=5.0)
+            except BaseException:
+                return None
+
         try:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    observation = owner.force_stop(timeout=5.0)
-                    if not observation.confirmed:
+                    stopped = stop_observation()
+                    if stopped is None or not stopped.confirmed:
                         failure = OrchestrationBlocked(
                             f"live_provider_termination_unconfirmed:{provider}"
                         )
@@ -288,8 +303,8 @@ class LiveStageDispatcher:
                     if event.channel == "system" or total + len(event.data) > (
                         _MAX_PROVIDER_OUTPUT_BYTES
                     ):
-                        observation = owner.force_stop(timeout=5.0)
-                        if not observation.confirmed:
+                        stopped = stop_observation()
+                        if stopped is None or not stopped.confirmed:
                             failure = OrchestrationBlocked(
                                 f"live_provider_termination_unconfirmed:{provider}"
                             )
@@ -304,7 +319,9 @@ class LiveStageDispatcher:
                 if owner.poll() is not None and owner.output_closed:
                     observation = owner.wait(timeout=max(0.001, remaining))
                     if not observation.confirmed:
-                        observation = owner.force_stop(timeout=5.0)
+                        stopped = stop_observation()
+                        if stopped is not None:
+                            observation = stopped
                     if not observation.confirmed:
                         failure = OrchestrationBlocked(
                             f"live_provider_termination_unconfirmed:{provider}"
@@ -319,21 +336,31 @@ class LiveStageDispatcher:
                             f"live_provider_command_failed:{provider}"
                         )
                     break
-        except OrchestrationBlocked as exc:
-            failure = exc
-        except Exception:
-            observation = owner.force_stop(timeout=5.0)
-            failure = OrchestrationBlocked(
-                f"live_provider_command_failed:{provider}"
-                if observation.confirmed
-                else f"live_provider_termination_unconfirmed:{provider}"
-            )
-        close_observation = owner.close()
-        if not close_observation.confirmed:
+        except BaseException as exc:
+            primary_error = exc
+            stop_observation()
+        try:
+            close_observation = owner.close()
+        except BaseException:
+            close_observation = None
+        if close_observation is None or not close_observation.confirmed:
             raise OrchestrationBlocked(f"live_provider_termination_unconfirmed:{provider}")
+        if primary_error is not None:
+            if isinstance(primary_error, OrchestrationBlocked):
+                raise primary_error
+            if not isinstance(primary_error, Exception):
+                raise primary_error
+            raise OrchestrationBlocked(
+                f"live_provider_command_failed:{provider}"
+            ) from primary_error
         if failure is not None:
             raise failure
-        return int(close_observation.returncode or 0), stdout.decode("utf-8", errors="replace")
+        final_returncode = (
+            returncode if returncode is not None else close_observation.returncode
+        )
+        if final_returncode is None:
+            raise OrchestrationBlocked(f"live_provider_command_failed:{provider}")
+        return final_returncode, stdout.decode("utf-8", errors="replace")
 
     def dispatch(
         self,

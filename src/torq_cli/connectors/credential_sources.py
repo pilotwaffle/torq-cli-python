@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
@@ -42,6 +44,8 @@ _TOKEN_PLAN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps
 _TOKEN_PLAN_URL = re.compile(
     r"https://token-plan\.[a-z0-9-]+\.maas\.aliyuncs\.com(?::443)?/apps/anthropic\Z"
 )
+_BINARY = getattr(os, "O_BINARY", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _SAFE_CHILD_KEYS = frozenset({
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
     "LANG", "LC_ALL", "HOME", "USERPROFILE",
@@ -111,18 +115,44 @@ class ExplicitEnvVault:
     def __init__(self, source: Path) -> None:
         if not source.is_absolute():
             raise CredentialSourceError("credential_source_absolute_required")
+        descriptor = -1
         try:
-            if source.is_symlink() or not source.is_file():
+            descriptor = os.open(source, os.O_RDONLY | _BINARY | _NOFOLLOW)
+            before = os.fstat(descriptor)
+            if source.is_symlink() or not stat.S_ISREG(before.st_mode):
                 raise CredentialSourceError("credential_source_regular_file_required")
             if not signing_file_permissions_are_restricted(source):
                 raise CredentialSourceError("credential_source_permissions_unsafe")
-            if source.stat().st_size > MAX_CREDENTIAL_SOURCE_BYTES:
+            path_before = source.stat(follow_symlinks=False)
+            if not os.path.samestat(before, path_before):
+                raise CredentialSourceError("credential_source_changed")
+            if before.st_size > MAX_CREDENTIAL_SOURCE_BYTES:
                 raise CredentialSourceError("credential_source_too_large")
-            payload = source.read_bytes()
+            chunks: list[bytes] = []
+            remaining = MAX_CREDENTIAL_SOURCE_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(16_384, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            after = os.fstat(descriptor)
+            path_after = source.stat(follow_symlinks=False)
+            if (
+                not os.path.samestat(before, after)
+                or not os.path.samestat(after, path_after)
+                or before.st_size != after.st_size
+                or not signing_file_permissions_are_restricted(source)
+            ):
+                raise CredentialSourceError("credential_source_changed")
         except CredentialSourceError:
             raise
         except OSError as exc:
             raise CredentialSourceError("credential_source_unreadable") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         if len(payload) > MAX_CREDENTIAL_SOURCE_BYTES:
             raise CredentialSourceError("credential_source_too_large")
         self._values = _parse_env(payload)

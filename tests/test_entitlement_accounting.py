@@ -432,6 +432,7 @@ def test_unpriced_metered_call_books_configured_worst_case_ceiling(tmp_path: Pat
         for line in (chain.root / "receipts.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     g2a = next(row for row in receipts if row.get("role") == "g2a" and "cost_basis" in row)
-    assert g2a["billed_usd"] == "0.25"
+    assert g2a["cost_usd"] == "0.25"
+    assert g2a["billed_usd"] is None
     assert g2a["metered_usd"] is None
     assert g2a["cost_basis"] == "configured_worst_case_rate_unknown"

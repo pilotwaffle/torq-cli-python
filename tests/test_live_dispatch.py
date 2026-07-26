@@ -69,6 +69,24 @@ class _FakeOwner:
         return self._observation()
 
 
+class _AdversarialCleanupOwner(_FakeOwner):
+    def __init__(self, *, close_confirmed: bool = True) -> None:
+        super().__init__("", confirmed=close_confirmed)
+        self.close_called = False
+
+    def next_event(self, *, timeout: float) -> ProcessEvent | None:
+        del timeout
+        raise RuntimeError("event transport failed")
+
+    def force_stop(self, *, timeout: float = 5.0) -> ExitObservation:
+        del timeout
+        raise RuntimeError("stop failed")
+
+    def close(self) -> ExitObservation:
+        self.close_called = True
+        return self._observation()
+
+
 def _owner_factory(
     captured: dict[str, object],
     output: dict[str, Any] | str,
@@ -319,6 +337,38 @@ def test_live_dispatcher_never_terminalizes_unconfirmed_process_tree(tmp_path: P
         dispatcher.dispatch(
             role="builder", provider="deepseek", model="deepseek-v4-pro", prompt="build"
         )
+
+
+def test_live_dispatcher_closes_owner_when_event_and_force_stop_fail(tmp_path: Path) -> None:
+    owner = _AdversarialCleanupOwner()
+    dispatcher = LiveStageDispatcher(
+        _vault(tmp_path),
+        {"PATH": "safe"},
+        owner_factory=lambda *args, **kwargs: owner,
+    )
+
+    with pytest.raises(OrchestrationBlocked, match="live_provider_command_failed:deepseek"):
+        dispatcher.dispatch(
+            role="builder", provider="deepseek", model="deepseek-v4-pro", prompt="build"
+        )
+    assert owner.close_called
+
+
+def test_live_dispatcher_fails_closed_when_cleanup_cannot_confirm_exit(tmp_path: Path) -> None:
+    owner = _AdversarialCleanupOwner(close_confirmed=False)
+    dispatcher = LiveStageDispatcher(
+        _vault(tmp_path),
+        {"PATH": "safe"},
+        owner_factory=lambda *args, **kwargs: owner,
+    )
+
+    with pytest.raises(
+        OrchestrationBlocked, match="live_provider_termination_unconfirmed:deepseek"
+    ):
+        dispatcher.dispatch(
+            role="builder", provider="deepseek", model="deepseek-v4-pro", prompt="build"
+        )
+    assert owner.close_called
 
 
 def test_direct_openai_opener_ignores_ambient_proxy(
