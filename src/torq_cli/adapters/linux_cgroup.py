@@ -20,6 +20,7 @@ from pathlib import Path
 
 
 _BOOTSTRAP_LIMIT = 4_000_000
+_CONTROL_TIMEOUT = 2.0
 _TRUSTED_SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 _LAUNCHER_ENV_KEYS = frozenset(
     {
@@ -95,9 +96,19 @@ class LinuxSystemdCgroup:
 
     def launcher_environment(self, environment: Mapping[str, str]) -> dict[str, str]:
         """Return only variables needed to contact the user service manager."""
-        self._environment = {
-            key: value for key, value in environment.items() if key in _LAUNCHER_ENV_KEYS
-        }
+        # The provider environment is deliberately stripped of the user-bus
+        # address.  Preserve the trusted ambient launcher values captured at
+        # construction rather than replacing them with that narrower mapping.
+        # They are used only by systemd-run/systemctl and are never copied into
+        # the provider's framed environment.
+        self._environment.update(
+            {
+                key: value
+                for key, value in environment.items()
+                if key in _LAUNCHER_ENV_KEYS
+                and key not in {"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"}
+            }
+        )
         return dict(self._environment)
 
     @staticmethod
@@ -125,7 +136,11 @@ class LinuxSystemdCgroup:
         deadline = time.monotonic() + timeout
         last_error = "owned_process_systemd_start_unconfirmed"
         while time.monotonic() < deadline:
-            details = self._show()
+            try:
+                details = self._show(timeout=max(0.001, deadline - time.monotonic()))
+            except OSError as exc:
+                last_error = str(exc)
+                break
             if details is not None:
                 state, main_pid, control_group = details
                 if control_group and main_pid > 0 and state in {"active", "activating"}:
@@ -144,7 +159,10 @@ class LinuxSystemdCgroup:
                 last_error = "owned_process_systemd_start_failed"
                 break
             time.sleep(0.01)
-        self._kill_unit()
+        try:
+            self._kill_unit(timeout=max(0.001, deadline - time.monotonic()))
+        except OSError:
+            pass
         raise OSError(last_error)
 
     def active_processes(self) -> int:
@@ -173,11 +191,11 @@ class LinuxSystemdCgroup:
             raise OSError("owned_process_cgroup_population_invalid")
         return populated
 
-    def terminate(self) -> None:
+    def terminate(self, *, timeout: float = _CONTROL_TIMEOUT) -> None:
         """Ask systemd to SIGKILL every member of the owned cgroup."""
         if not self._started:
             return
-        result = self._kill_unit()
+        result = self._kill_unit(timeout=timeout)
         if result.returncode != 0 and self.active_processes() != 0:
             raise OSError("owned_process_cgroup_kill_failed")
 
@@ -187,42 +205,54 @@ class LinuxSystemdCgroup:
             return
         if self.active_processes() != 0:
             self.terminate()
-        subprocess.run(
-            (self._systemctl, "--user", "reset-failed", self.unit),
-            check=False,
-            capture_output=True,
-            env=self._environment,
-        )
+        try:
+            subprocess.run(
+                (self._systemctl, "--user", "reset-failed", self.unit),
+                check=False,
+                capture_output=True,
+                env=self._environment,
+                timeout=_CONTROL_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            raise OSError("owned_process_systemd_control_timeout") from None
 
-    def _kill_unit(self) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
-            (
-                self._systemctl,
-                "--user",
-                "kill",
-                "--kill-who=all",
-                "--signal=KILL",
-                self.unit,
-            ),
-            check=False,
-            capture_output=True,
-            env=self._environment,
-        )
+    def _kill_unit(self, *, timeout: float = _CONTROL_TIMEOUT) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                (
+                    self._systemctl,
+                    "--user",
+                    "kill",
+                    "--kill-who=all",
+                    "--signal=KILL",
+                    self.unit,
+                ),
+                check=False,
+                capture_output=True,
+                env=self._environment,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise OSError("owned_process_systemd_control_timeout") from None
 
-    def _show(self) -> tuple[str, int, str] | None:
-        result = subprocess.run(
-            (
-                self._systemctl,
-                "--user",
-                "show",
-                self.unit,
-                "--property=ActiveState,MainPID,ControlGroup",
-            ),
-            check=False,
-            capture_output=True,
-            env=self._environment,
-            text=True,
-        )
+    def _show(self, *, timeout: float = _CONTROL_TIMEOUT) -> tuple[str, int, str] | None:
+        try:
+            result = subprocess.run(
+                (
+                    self._systemctl,
+                    "--user",
+                    "show",
+                    self.unit,
+                    "--property=ActiveState,MainPID,ControlGroup",
+                ),
+                check=False,
+                capture_output=True,
+                env=self._environment,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise OSError("owned_process_systemd_control_timeout") from None
         if result.returncode != 0:
             return None
         values: dict[str, str] = {}
@@ -259,12 +289,16 @@ def _trusted_system_tool(name: str) -> str:
 
 
 def _filesystem_type(path: Path, stat_binary: str) -> str:
-    result = subprocess.run(
-        (stat_binary, "--file-system", "--format=%T", str(path)),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            (stat_binary, "--file-system", "--format=%T", str(path)),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_CONTROL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise OSError("owned_process_systemd_control_timeout") from None
     return result.stdout.strip() if result.returncode == 0 else ""
 
 

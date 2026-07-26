@@ -394,7 +394,10 @@ class OwnedProcess:
         forced = state is not ContainmentState.KNOWN_EMPTY
         if forced:
             self._force_requested = True
-            self._job.terminate()
+            if self._linux_job is not None:
+                self._linux_job.terminate(timeout=max(0.001, deadline - time.monotonic()))
+            else:
+                self._job.terminate()
         self._wait_root(max(0.0, deadline - time.monotonic()))
         state, active = self._containment()
         while state is ContainmentState.KNOWN_ACTIVE and time.monotonic() < deadline:

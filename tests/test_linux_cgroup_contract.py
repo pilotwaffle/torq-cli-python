@@ -10,6 +10,8 @@ import pytest
 
 from torq_cli.adapters import linux_cgroup
 from torq_cli.adapters.linux_cgroup import LinuxSystemdCgroup
+from torq_cli.adapters.process import ContainmentState, OwnedProcess
+from torq_cli.connectors.credential_sources import safe_child_environment
 
 
 def _bare_owner(tmp_path: Path) -> LinuxSystemdCgroup:
@@ -47,7 +49,9 @@ def test_command_has_pre_exec_systemd_guards_and_no_provider_secrets(tmp_path: P
             "ANTHROPIC_AUTH_TOKEN": "API_SECRET",
         }
     )
-    assert environment == {"PATH": "/usr/bin", "XDG_RUNTIME_DIR": "/run/user/1000"}
+    # User-bus coordinates come only from the ambient values captured by the
+    # owner; provider-controlled values cannot redirect the control plane.
+    assert environment == {"PATH": "/usr/bin"}
 
 
 def test_path_and_working_directory_shadows_never_replace_pinned_control_binary(
@@ -60,6 +64,37 @@ def test_path_and_working_directory_shadows_never_replace_pinned_control_binary(
     assert command[0] == "/usr/bin/systemd-run"
     assert command[0] != str(tmp_path / "systemd-run")
     assert launcher_environment["PATH"] == str(tmp_path)
+
+
+def test_production_child_environment_does_not_break_private_user_bus_launcher(
+    tmp_path: Path,
+) -> None:
+    owner = _bare_owner(tmp_path)
+    owner._environment = {
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "HOME": "/home/operator",
+    }
+    child = safe_child_environment(
+        {
+            **owner._environment,
+            "PATH": "/usr/bin",
+            "ANTHROPIC_AUTH_TOKEN": "ambient-must-not-survive",
+        }
+    )
+    child["ANTHROPIC_AUTH_TOKEN"] = "provider-secret"
+
+    launcher = owner.launcher_environment(child)
+    frame = owner.framed_input(child, b"hello")
+    env_size = int.from_bytes(frame[:4], "big")
+    provider = json.loads(frame[4 : 4 + env_size])
+
+    assert launcher["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    assert launcher["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert "ANTHROPIC_AUTH_TOKEN" not in launcher
+    assert "DBUS_SESSION_BUS_ADDRESS" not in provider
+    assert "XDG_RUNTIME_DIR" not in provider
+    assert provider["ANTHROPIC_AUTH_TOKEN"] == "provider-secret"
 
 
 def test_environment_and_prompt_are_private_stdin_frame() -> None:
@@ -170,6 +205,51 @@ def test_kill_targets_every_cgroup_member(
     owner._kill_unit()
     assert "--kill-who=all" in captured[0]
     assert "--signal=KILL" in captured[0]
+
+
+def test_hung_systemd_control_calls_fail_with_bounded_stable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+    captured_timeouts: list[float] = []
+
+    def hung(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, float)
+        captured_timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(linux_cgroup.subprocess, "run", hung)
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        owner._show(timeout=0.01)
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        owner._kill_unit(timeout=0.02)
+    monkeypatch.setattr(owner, "active_processes", lambda: 0)
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        owner.close()
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        linux_cgroup._filesystem_type(Path("/sys/fs/cgroup"), "/usr/bin/stat")
+    assert captured_timeouts == [
+        0.01,
+        0.02,
+        linux_cgroup._CONTROL_TIMEOUT,
+        linux_cgroup._CONTROL_TIMEOUT,
+    ]
+
+
+def test_control_timeout_cannot_be_projected_as_known_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+    process = object.__new__(OwnedProcess)
+    process._job = owner
+    monkeypatch.setattr(
+        owner,
+        "active_processes",
+        lambda: (_ for _ in ()).throw(OSError("owned_process_systemd_control_timeout")),
+    )
+
+    assert process._containment() == (ContainmentState.UNKNOWN, None)
 
 
 def test_control_binary_resolution_rejects_relative_or_untrusted_files(
