@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import hashlib
 import ipaddress
 import json
+import queue
 import re
 import secrets
 import socket
@@ -32,6 +34,8 @@ _FLEET_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/fleet.css": ("fleet.css", "text/css; charset=utf-8"),
     "/assets/fleet.js": ("fleet.js", "text/javascript; charset=utf-8"),
+    "/assets/chat.css": ("chat.css", "text/css; charset=utf-8"),
+    "/assets/chat.js": ("chat.js", "text/javascript; charset=utf-8"),
 }
 
 
@@ -119,6 +123,29 @@ class RecoveryController(Protocol):
     ) -> Mapping[str, Any]: ...
 
 
+class ChatController(Protocol):
+    @property
+    def root(self) -> Path: ...
+
+    def submit(
+        self,
+        *,
+        turn_id: str,
+        text: str,
+        attachments: list[Mapping[str, str]],
+    ) -> Mapping[str, Any]: ...
+
+    def cancel(self, turn_id: str, *, timeout: float = 5.0) -> Mapping[str, Any]: ...
+
+    def subscribe(self, *, capacity: int = 256) -> queue.Queue[Any]: ...
+
+    def unsubscribe(self, channel: queue.Queue[Any]) -> None: ...
+
+    def snapshot(self) -> Mapping[str, Any]: ...
+
+    def shutdown(self, *, timeout: float = 5.0) -> Mapping[str, Any] | None: ...
+
+
 @dataclass
 class _Session:
     token: str
@@ -160,9 +187,7 @@ class FleetSessionManager:
             self._sessions[token] = _Session(token, now, now)
             return token
 
-    def authenticate(
-        self, cookie_header: str | None, *, touch: bool = True
-    ) -> _Session | None:
+    def authenticate(self, cookie_header: str | None, *, touch: bool = True) -> _Session | None:
         if not cookie_header:
             return None
         cookie = SimpleCookie()
@@ -285,14 +310,18 @@ def create_fleet_server(
     sessions: FleetSessionManager | None = None,
     control_service: FleetControlService | None = None,
     operational_state_provider: Callable[[], Mapping[str, Any]] | None = None,
+    chat_controller: ChatController | None = None,
+    chat_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> ThreadingHTTPServer:
     if not _loopback_host(host):
         raise ValueError("fleet_loopback_required")
     if not 0 <= port <= 65535:
         raise ValueError("fleet_port_invalid")
     resolved_action_resolver = action_resolver
-    if resolved_action_resolver is None and context_injector is not None and hasattr(
-        context_injector, "resolve_action"
+    if (
+        resolved_action_resolver is None
+        and context_injector is not None
+        and hasattr(context_injector, "resolve_action")
     ):
         resolved_action_resolver = cast(ActionResolver, context_injector)
     if (
@@ -301,11 +330,13 @@ def create_fleet_server(
     ):
         raise ValueError("fleet_control_run_mismatch")
     for controller in (resolved_action_resolver, recovery_controller):
-        if (
-            controller is not None
-            and controller.root.resolve() != projector.run_root.resolve()
-        ):
+        if controller is not None and controller.root.resolve() != projector.run_root.resolve():
             raise ValueError("fleet_control_run_mismatch")
+    if (
+        chat_controller is not None
+        and chat_controller.root.resolve() != projector.run_root.resolve()
+    ):
+        raise ValueError("fleet_control_run_mismatch")
     session_manager = sessions or FleetSessionManager()
     fleet_assets = _load_fleet_assets()
 
@@ -366,16 +397,40 @@ def create_fleet_server(
         annotation_provider=operational_annotations,
     )
     sse_slots = BoundedSemaphore(4)
+    chat_sse_slots = BoundedSemaphore(4)
+
+    def chat_snapshot() -> dict[str, Any]:
+        if chat_controller is None or chat_snapshot_provider is None:
+            return {
+                "schema": "torq-chat-projection-v1",
+                "data_status": "unavailable",
+                "status": "unavailable",
+                "finding": "chat_runtime_unavailable",
+                "messages": [],
+                "active_turn_id": None,
+                "last_sequence": 0,
+            }
+        snapshot = dict(chat_snapshot_provider())
+        runtime = chat_controller.snapshot()
+        active = runtime.get("active_turn_id")
+        if isinstance(active, str) and snapshot.get("data_status") == "available":
+            snapshot["active_turn_id"] = active
+            snapshot["status"] = "running"
+        snapshot["stream_sequence"] = runtime.get("stream_sequence", 0)
+        return snapshot
 
     def fleet_envelope(session: _Session) -> dict[str, Any]:
         snapshot = projector.snapshot()
         run = snapshot.get("run")
         annotations = operational_annotations()
-        if isinstance(run, Mapping) and run.get("workflow_state") in {
-            "closed",
-            "abandoned",
-        } or any(
-            item.get("kind") == "workflow_reconciled" for item in annotations
+        if (
+            isinstance(run, Mapping)
+            and run.get("workflow_state")
+            in {
+                "closed",
+                "abandoned",
+            }
+            or any(item.get("kind") == "workflow_reconciled" for item in annotations)
         ):
             session_manager.downgrade(session)
         return controls.envelope(
@@ -415,9 +470,7 @@ def create_fleet_server(
                 self.send_header("Location", "/")
                 self.send_header(
                     "Set-Cookie",
-                    "torq_fleet_session="
-                    + token
-                    + "; HttpOnly; SameSite=Strict; Path=/",
+                    "torq_fleet_session=" + token + "; HttpOnly; SameSite=Strict; Path=/",
                 )
                 self._security_headers()
                 self.send_header("Content-Length", "0")
@@ -430,8 +483,14 @@ def create_fleet_server(
             if parsed.path == "/api/v1/fleet/events":
                 self._events(session)
                 return
+            if parsed.path == "/api/v1/chat/events":
+                self._chat_events(session)
+                return
             if parsed.path == "/api/v1/fleet":
                 self._json(200, fleet_envelope(session))
+                return
+            if parsed.path == "/api/v1/chat":
+                self._json(200, chat_snapshot())
                 return
             self._json(404, {"status": "not_found"})
 
@@ -469,9 +528,7 @@ def create_fleet_server(
                     event_id = _fleet_event_id(envelope)
                     if event_id != last_id:
                         frame = (
-                            f"id: {event_id}\n"
-                            "event: fleet\n"
-                            f"data: {encoded.decode('utf-8')}\n\n"
+                            f"id: {event_id}\nevent: fleet\ndata: {encoded.decode('utf-8')}\n\n"
                         ).encode("utf-8")
                         self.wfile.write(frame)
                         self.wfile.flush()
@@ -487,6 +544,84 @@ def create_fleet_server(
                 pass
             finally:
                 sse_slots.release()
+
+        def _chat_events(self, session: _Session) -> None:
+            if chat_controller is None:
+                self._json(
+                    405,
+                    {"status": "unavailable", "finding": "chat_runtime_unavailable"},
+                )
+                return
+            if not chat_sse_slots.acquire(blocking=False):
+                self._json(
+                    503,
+                    {"status": "blocked", "finding": "chat_sse_capacity_exceeded"},
+                )
+                return
+            channel = chat_controller.subscribe(capacity=256)
+            decoders: dict[tuple[str, str], codecs.IncrementalDecoder] = {}
+            cookie = self.headers.get("Cookie")
+            last_snapshot = ""
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "keep-alive")
+                self._security_headers()
+                self.end_headers()
+                self.connection.settimeout(5)
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    if session_manager.authenticate(cookie, touch=False) is None:
+                        break
+                    try:
+                        runtime_event = channel.get(timeout=0.25)
+                    except queue.Empty:
+                        runtime_event = None
+                    if runtime_event is not None:
+                        decoder = decoders.setdefault(
+                            (runtime_event.turn_id, runtime_event.kind),
+                            codecs.getincrementaldecoder("utf-8")("replace"),
+                        )
+                        decoded_text = decoder.decode(runtime_event.data, final=False)
+                        if not decoded_text:
+                            continue
+                        self._sse_json(
+                            {
+                                "type": "output_delta",
+                                "turn_id": runtime_event.turn_id,
+                                "stream_sequence": runtime_event.sequence,
+                                "channel": runtime_event.kind,
+                                "text": decoded_text,
+                            }
+                        )
+                    snapshot = chat_snapshot()
+                    active_turn = snapshot.get("active_turn_id")
+                    if isinstance(active_turn, str):
+                        decoders = {
+                            key: value for key, value in decoders.items() if key[0] == active_turn
+                        }
+                    else:
+                        decoders.clear()
+                    encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+                    if encoded != last_snapshot:
+                        self._sse_json({"type": "snapshot", "snapshot": snapshot})
+                        last_snapshot = encoded
+            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                pass
+            finally:
+                chat_controller.unsubscribe(channel)
+                chat_sse_slots.release()
+
+        def _sse_json(self, value: Mapping[str, Any]) -> None:
+            encoded = json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            self.wfile.write(f"data: {encoded}\n\n".encode("utf-8"))
+            self.wfile.flush()
 
         def do_POST(self) -> None:  # noqa: N802
             if not self._host_allowed():
@@ -505,7 +640,17 @@ def create_fleet_server(
                 r"/api/v1/fleet/actions/([A-Za-z0-9][A-Za-z0-9:._-]{0,127})/resolve",
                 path,
             )
-            if path in {"/api/v1/context", "/api/v1/fleet/context"}:
+            chat_cancel_match = re.fullmatch(
+                r"/api/v1/chat/turns/([A-Za-z0-9][A-Za-z0-9:._-]{0,127})/cancel",
+                path,
+            )
+            if path == "/api/v1/chat/turns":
+                operation = "chat_submit"
+                service_present = chat_controller is not None
+            elif chat_cancel_match is not None:
+                operation = "chat_cancel"
+                service_present = chat_controller is not None
+            elif path in {"/api/v1/context", "/api/v1/fleet/context"}:
                 operation = "context"
                 service_present = context_injector is not None
             elif action_match is not None:
@@ -553,6 +698,9 @@ def create_fleet_server(
                     {"status": "blocked", "finding": "fleet_origin_denied"},
                     session_token=token,
                 )
+                return
+            if operation in {"chat_submit", "chat_cancel"}:
+                self._chat_post(operation, chat_cancel_match, session)
                 return
             snapshot = projector.snapshot()
             envelope = controls.envelope(
@@ -629,10 +777,7 @@ def create_fleet_server(
                     raw_correlation = "legacy-" + secrets.token_hex(16)
                 if (
                     not isinstance(raw_correlation, str)
-                    or re.fullmatch(
-                        r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", raw_correlation
-                    )
-                    is None
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", raw_correlation) is None
                 ):
                     raise ValueError("fleet_correlation_invalid")
                 context_correlation = raw_correlation
@@ -650,7 +795,8 @@ def create_fleet_server(
                     if (
                         not isinstance(content, str)
                         or "content_base64" in payload
-                        or source_name is not None and not isinstance(source_name, str)
+                        or source_name is not None
+                        and not isinstance(source_name, str)
                     ):
                         raise ValueError("context_request_invalid")
                     media_type = payload.get("media_type", "text/plain")
@@ -716,10 +862,14 @@ def create_fleet_server(
                 if context_correlation is not None:
                     controls.failed(context_correlation)
                 token = session_manager.rotate(session)
-                self._json(400, {
-                    "status": "blocked",
-                    "finding": "context_request_invalid",
-                }, session_token=token)
+                self._json(
+                    400,
+                    {
+                        "status": "blocked",
+                        "finding": "context_request_invalid",
+                    },
+                    session_token=token,
+                )
                 return
             expected_sequence = result.get("sequence")
             if not isinstance(expected_sequence, int) or context_correlation is None:
@@ -743,6 +893,77 @@ def create_fleet_server(
                 },
                 session_token=rotated,
             )
+
+        def _chat_post(
+            self,
+            operation: str,
+            cancel_match: re.Match[str] | None,
+            session: _Session,
+        ) -> None:
+            assert chat_controller is not None
+            try:
+                payload = self._read_chat_payload()
+                if operation == "chat_cancel":
+                    if payload or cancel_match is None:
+                        raise ValueError("chat_cancel_request_invalid")
+                    result = chat_controller.cancel(cancel_match.group(1), timeout=5.0)
+                else:
+                    if set(payload) != {"turn_id", "text", "attachments"}:
+                        raise ValueError("chat_turn_request_invalid")
+                    turn_id = payload.get("turn_id")
+                    text_value = payload.get("text")
+                    attachments_value = payload.get("attachments")
+                    if (
+                        not isinstance(turn_id, str)
+                        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", turn_id) is None
+                        or not isinstance(text_value, str)
+                        or not isinstance(attachments_value, list)
+                        or not all(isinstance(item, Mapping) for item in attachments_value)
+                    ):
+                        raise ValueError("chat_turn_request_invalid")
+                    attachments = [cast(Mapping[str, str], item) for item in attachments_value]
+                    result = chat_controller.submit(
+                        turn_id=turn_id,
+                        text=text_value,
+                        attachments=attachments,
+                    )
+                rotated = session_manager.rotate(session)
+                self._json(
+                    202,
+                    {"status": "accepted", "result": dict(result)},
+                    session_token=rotated,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                rotated = session_manager.rotate(session)
+                self._json(
+                    409,
+                    {"status": "blocked", "finding": str(exc)},
+                    session_token=rotated,
+                )
+
+        def _read_chat_payload(self) -> Mapping[str, Any]:
+            content_types = self.headers.get_all("Content-Type", failobj=[])
+            if len(content_types) != 1 or content_types[0].casefold() not in {
+                "application/json",
+                "application/json; charset=utf-8",
+            }:
+                raise ValueError("chat_content_type_invalid")
+            if self.headers.get_all("Transfer-Encoding", failobj=[]):
+                raise ValueError("chat_transfer_encoding_denied")
+            lengths = self.headers.get_all("Content-Length", failobj=[])
+            if len(lengths) != 1 or not lengths[0].isdigit():
+                raise ValueError("chat_size_invalid")
+            length = int(lengths[0])
+            if length <= 0 or length > 42_000_000:
+                raise ValueError("chat_size_invalid")
+            payload = json.loads(
+                self.rfile.read(length),
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+            if not isinstance(payload, Mapping):
+                raise ValueError("chat_request_invalid")
+            return payload
 
         def _read_control_payload(self) -> Mapping[str, Any]:
             content_types = self.headers.get_all("Content-Type", failobj=[])
@@ -813,10 +1034,7 @@ def create_fleet_server(
                     if set(payload) != {"correlation_id", "confirmation_token"}:
                         raise ValueError("recovery_request_invalid")
                     confirmation_token = payload.get("confirmation_token")
-                    if (
-                        not isinstance(confirmation_token, str)
-                        or len(confirmation_token) > 256
-                    ):
+                    if not isinstance(confirmation_token, str) or len(confirmation_token) > 256:
                         raise ValueError("recovery_confirmation_invalid")
                     controls.consume_recovery_confirmation(
                         confirmation_token,
@@ -826,15 +1044,11 @@ def create_fleet_server(
                     assert recovery_controller is not None
                     verification = snapshot.get("verification")
                     lanes = snapshot.get("lanes")
-                    if not isinstance(verification, Mapping) or not isinstance(
-                        lanes, list
-                    ):
+                    if not isinstance(verification, Mapping) or not isinstance(lanes, list):
                         raise ValueError("recovery_snapshot_invalid")
                     covered = verification.get("covered_sequence")
                     manifest_generation = verification.get("manifest_generation")
-                    if not isinstance(covered, int) or not isinstance(
-                        manifest_generation, int
-                    ):
+                    if not isinstance(covered, int) or not isinstance(manifest_generation, int):
                         raise ValueError("recovery_snapshot_invalid")
                     attempt_ids = [
                         str(attempt["attempt_id"])
@@ -864,10 +1078,7 @@ def create_fleet_server(
                     resolution = payload.get("resolution")
                     if (
                         not isinstance(resolution, str)
-                        or re.fullmatch(
-                            r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", resolution
-                        )
-                        is None
+                        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", resolution) is None
                     ):
                         raise ValueError("action_resolution_request_invalid")
                     assert resolved_action_resolver is not None
@@ -940,9 +1151,7 @@ def create_fleet_server(
             if session_token is not None:
                 self.send_header(
                     "Set-Cookie",
-                    "torq_fleet_session="
-                    + session_token
-                    + "; HttpOnly; SameSite=Strict; Path=/",
+                    "torq_fleet_session=" + session_token + "; HttpOnly; SameSite=Strict; Path=/",
                 )
             self._security_headers()
             self.end_headers()

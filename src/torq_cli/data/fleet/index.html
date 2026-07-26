@@ -6,7 +6,9 @@
   <meta name="color-scheme" content="dark light">
   <title>TORQ Fleet</title>
   <link rel="stylesheet" href="/assets/fleet.css">
+  <link rel="stylesheet" href="/assets/chat.css">
   <script src="/assets/fleet.js" defer></script>
+  <script src="/assets/chat.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#fleet-board">Skip to fleet board</a>
@@ -86,6 +88,15 @@
         <div><span class="panel-kicker">RUN SETTLEMENT</span><h2 id="settlement-title">Evidence-backed usage</h2></div>
         <dl id="settlement-list" class="settlement-list"></dl>
       </section>
+
+      <section class="chat-workspace" aria-labelledby="chat-title">
+        <div class="section-heading">
+          <div><span class="panel-kicker">OWNED PROVIDER SESSION</span><h2 id="chat-title">Governed conversation</h2></div>
+          <span class="mono">SIGNED TERMINAL EVIDENCE</span>
+        </div>
+        <div id="chat-transcript" class="chat-transcript" aria-label="Verified conversation transcript"></div>
+        <p id="chat-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+      </section>
     </main>
   </div>
 
@@ -98,7 +109,7 @@
     <span id="monitor-elapsed" class="mono">—</span>
     <span id="monitor-open" class="monitor-open">0 OPEN</span>
     </div>
-    <form id="context-composer" class="context-composer" aria-labelledby="composer-title">
+    <form id="context-composer" class="context-composer" aria-labelledby="composer-title" hidden>
       <div class="composer-copy">
         <strong id="composer-title">Add governed context</strong>
         <span>Records evidence for a future attempt. This control does not dispatch a provider.</span>
@@ -115,6 +126,17 @@
         <span id="composer-hint">Text, PNG, JPEG or PDF · up to 4 files · 700 KB each · Ctrl+Enter to send</span>
         <span id="composer-status" role="status" aria-live="polite"></span>
       </div>
+    </form>
+    <form id="chat-composer" class="chat-composer" aria-label="Governed chat composer">
+      <label class="sr-only" for="chat-input">Message the governed provider</label>
+      <textarea id="chat-input" class="chat-input" rows="2" maxlength="65536" placeholder="Ask TORQ to work on the governed run..." aria-describedby="chat-help chat-status"></textarea>
+      <label class="sr-only" for="chat-attachments">Attach text, images, or PDF files</label>
+      <input id="chat-attachments" class="chat-attachments" type="file">
+      <div id="chat-attachment-list" class="chat-attachment-list" aria-label="Staged attachments"></div>
+      <button id="chat-stop" class="chat-stop" type="button" disabled>Stop</button>
+      <button id="chat-send" class="chat-send" type="submit">Send</button>
+      <p id="chat-help" class="chat-help">Text, PNG, JPEG, GIF, WebP or PDF · up to 6 files · 5 MB each · Ctrl+Enter to send</p>
+      <span id="chat-status" class="chat-status">Connecting to governed runtime...</span>
     </form>
   </footer>
 </body>

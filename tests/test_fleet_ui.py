@@ -84,7 +84,13 @@ def test_fleet_ui_shell_is_public_but_contains_no_run_data(tmp_path: Path) -> No
     assert audit.inline_scripts == 0
     assert audit.inline_styles == 0
     assert audit.landmarks == {"header", "main", "footer"}
-    assert audit.controls == {"notify-button", "attach-button", "context-submit"}
+    assert audit.controls == {
+        "notify-button",
+        "attach-button",
+        "context-submit",
+        "chat-send",
+        "chat-stop",
+    }
     assert 'href="#fleet-board"' in markup
     assert 'aria-live="polite"' in markup
 
@@ -226,6 +232,25 @@ def test_fleet_command_rail_accepts_governed_text_images_and_pdf() -> None:
     assert 'value === "sealed" ? "completed"' in javascript
     assert ".command-rail" in css
     assert "#context-input" in css
+
+
+def test_chat_composer_is_accessible_contrasted_and_non_clipping() -> None:
+    html = Path("src/torq_cli/data/fleet/index.html").read_text(encoding="utf-8")
+    javascript = Path("src/torq_cli/data/fleet/chat.js").read_text(encoding="utf-8")
+    css = Path("src/torq_cli/data/fleet/chat.css").read_text(encoding="utf-8")
+
+    assert 'id="chat-input"' in html
+    assert 'aria-describedby="chat-help chat-status"' in html
+    assert 'id="chat-announcer"' in html
+    assert 'id="chat-attachment-list"' in html
+    assert _contrast("#ffffff", "#604300") >= 4.5
+    assert ':root[data-theme="light"] .chat-send' in css
+    assert "max-height: calc(100dvh - 2rem)" in css
+    assert "(max-height: 42rem)" in css
+    assert "position: static" in css
+    assert "this.runtimeAvailable = false" in javascript
+    assert "this.elements.stop.focus()" in javascript
+    assert 'setAttribute("aria-live", "off")' in javascript
 
 
 def test_fleet_bootstrap_lands_on_ui_without_exposing_session_in_url(
