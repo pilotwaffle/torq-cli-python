@@ -235,6 +235,11 @@ def test_authenticated_local_broker_transport_binds_capability_to_peer_pid(
     server = EvidenceBrokerServer(EvidenceBroker(chain))
     endpoint = server.start()
     remote = RemoteEvidenceBroker(endpoint)
+    socket_path = Path(endpoint.address) if endpoint.family == "AF_UNIX" else None
+    if socket_path is not None:
+        assert len(os.fsencode(endpoint.address)) < 100
+        assert socket_path.parent.stat().st_mode & 0o077 == 0
+        assert socket_path.stat().st_mode & 0o077 == 0
     try:
         capability = remote.issue("orchestrator")
         assert capability.process_id == os.getpid()
@@ -259,6 +264,9 @@ def test_authenticated_local_broker_transport_binds_capability_to_peer_pid(
         assert remote.sequence == 1
     finally:
         server.close()
+    if socket_path is not None:
+        assert not socket_path.exists()
+        assert not socket_path.parent.exists()
 
 
 def test_broker_serializes_concurrent_multi_writer_appends(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ import multiprocessing
 import secrets
 import socket
 import struct
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -310,15 +311,29 @@ class EvidenceBrokerServer:
     def __init__(self, broker: EvidenceBroker) -> None:
         self._broker = broker
         self._stopped = Event()
+        self._closed = False
+        self._socket_dir: Path | None = None
         authkey = secrets.token_bytes(32)
         if os.name == "nt":
             address = rf"\\.\pipe\torq-evidence-{uuid.uuid4().hex}"
             family = "AF_PIPE"
         else:
-            address = str(broker.run_root / f".broker-{uuid.uuid4().hex}.sock")
+            short_root = Path("/tmp")
+            if not short_root.is_dir() or not os.access(short_root, os.W_OK):
+                short_root = Path(tempfile.gettempdir())
+            self._socket_dir = Path(
+                tempfile.mkdtemp(prefix="torq-b-", dir=str(short_root))
+            )
+            os.chmod(self._socket_dir, 0o700)
+            address = str(self._socket_dir / "broker.sock")
             family = "AF_UNIX"
         self.endpoint = BrokerEndpoint(address, family, authkey)
-        self._listener = Listener(address, family=family, authkey=authkey)
+        try:
+            self._listener = Listener(address, family=family, authkey=authkey)
+        except Exception:
+            if self._socket_dir is not None:
+                self._socket_dir.rmdir()
+            raise
         if family == "AF_UNIX":
             os.chmod(address, 0o600)
         self._thread: Thread | None = None
@@ -424,12 +439,21 @@ class EvidenceBrokerServer:
         return {"ok": True, "value": value}
 
     def close(self) -> None:
-        if self._stopped.is_set():
+        if self._closed:
             return
+        self._closed = True
         self._stopped.set()
-        self._listener.close()
+        try:
+            self._listener.close()
+        except OSError:
+            pass
         if self.endpoint.family == "AF_UNIX":
             Path(self.endpoint.address).unlink(missing_ok=True)
+            if self._socket_dir is not None:
+                try:
+                    self._socket_dir.rmdir()
+                except OSError:
+                    pass
 
 
 class RemoteEvidenceBroker:
