@@ -9,8 +9,14 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from torq_cli.domain.run_evidence import MAX_CONTENT_BYTES
+
 EXTRACTION_CONTRACT_VERSION = "1.1.0"
 MAX_ARTIFACT_BYTES = 1_048_576
+# The canonical extracted form is recorded as receipt-bounded context. Keep its
+# byte size aligned with domain.run_evidence.MAX_CONTENT_BYTES so an accepted
+# extraction cannot fail only after its encrypted artifact has been persisted.
+MAX_EXTRACTED_BYTES = MAX_CONTENT_BYTES
 
 _SUPPORTED_MEDIA_TYPES = frozenset({
     "application/json",
@@ -90,12 +96,15 @@ def extract_supported_artifact(
             media_type=normalized_type,
             source_name=normalized_name,
         )
+        extracted_bytes = len(text.encode("utf-8"))
+        if extracted_bytes > MAX_EXTRACTED_BYTES:
+            raise ArtifactExtractionError("artifact_extracted_too_large")
         return ExtractedArtifact(
             text=text,
             media_type=normalized_type,
             source_name=normalized_name,
             source_bytes=len(content),
-            extracted_bytes=len(text.encode("utf-8")),
+            extracted_bytes=extracted_bytes,
             extractor=extractor,
         )
     if content.startswith(_BINARY_SIGNATURES):
@@ -133,12 +142,15 @@ def extract_supported_artifact(
     except (json.JSONDecodeError, RecursionError) as exc:
         raise ArtifactExtractionError("artifact_structure_invalid") from exc
 
+    extracted_bytes = len(text.encode("utf-8"))
+    if extracted_bytes > MAX_EXTRACTED_BYTES:
+        raise ArtifactExtractionError("artifact_extracted_too_large")
     return ExtractedArtifact(
         text=text,
         media_type=normalized_type,
         source_name=normalized_name,
         source_bytes=len(content),
-        extracted_bytes=len(text.encode("utf-8")),
+        extracted_bytes=extracted_bytes,
         extractor=extractor,
     )
 
@@ -242,6 +254,7 @@ __all__ = [
     "ExtractedArtifact",
     "EXTRACTION_CONTRACT_VERSION",
     "MAX_ARTIFACT_BYTES",
+    "MAX_EXTRACTED_BYTES",
     "extract_supported_artifact",
     "validate_source_label",
 ]

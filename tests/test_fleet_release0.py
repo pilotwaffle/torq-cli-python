@@ -120,6 +120,95 @@ def test_canonical_oracle_and_all_signed_files_share_one_encoding(tmp_path: Path
     )
 
 
+def test_historical_schema_3_without_encoding_marker_remains_verifiable(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-schema-3")
+    chain.append("run_attested", {"mode": "dry_run"})
+
+    certificate = json.loads(chain.certificate_path.read_text(encoding="utf-8"))
+    certificate.pop("root_signature")
+    certificate.pop("canonical_encoding_marker")
+    certificate["certificate_schema_version"] = "3.0.0"
+    historical_certificate = {
+        **certificate,
+        "root_signature": Ed25519PrivateKey.from_private_bytes(chain.key)
+        .sign(_canonical(certificate))
+        .hex(),
+    }
+    chain.certificate_path.write_bytes(_canonical(historical_certificate))
+
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    manifest.pop("canonical_encoding_marker")
+    manifest["certificate_hash"] = ReceiptChain.hash_file(chain.certificate_path)
+    historical_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(_canonical(manifest))
+        .hex(),
+    }
+    manifest_bytes = _canonical(historical_manifest)
+    manifest_path.write_bytes(manifest_bytes)
+    chain._write_manifest_anchor(historical_manifest, manifest_bytes)
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "verified"
+    assert "canonical_encoding_marker" not in historical_certificate
+    assert "canonical_encoding_marker" not in historical_manifest
+    with pytest.raises(ValueError, match="run_certificate_legacy_read_only"):
+        _chain(root, "run-schema-3")
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    anchor.unlink()
+    anchored = verify_receipt_store(chain.root)
+    assert anchored.status == "tampered"
+    assert anchored.finding == "manifest_anchor_missing"
+
+
+@pytest.mark.parametrize("missing_from", ("certificate", "manifest"))
+def test_schema_4_requires_encoding_marker_on_every_signed_container(
+    tmp_path: Path,
+    missing_from: str,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, f"run-marker-{missing_from}")
+    chain.append("run_attested", {"mode": "dry_run"})
+
+    certificate = json.loads(chain.certificate_path.read_text(encoding="utf-8"))
+    certificate.pop("root_signature")
+    if missing_from == "certificate":
+        certificate.pop("canonical_encoding_marker")
+    signed_certificate = {
+        **certificate,
+        "root_signature": Ed25519PrivateKey.from_private_bytes(chain.key)
+        .sign(_canonical(certificate))
+        .hex(),
+    }
+    chain.certificate_path.write_bytes(_canonical(signed_certificate))
+
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    if missing_from == "manifest":
+        manifest.pop("canonical_encoding_marker")
+    manifest["certificate_hash"] = ReceiptChain.hash_file(chain.certificate_path)
+    signed_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(_canonical(manifest))
+        .hex(),
+    }
+    manifest_bytes = _canonical(signed_manifest)
+    manifest_path.write_bytes(manifest_bytes)
+    chain._write_manifest_anchor(signed_manifest, manifest_bytes)
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "run_certificate_invalid"
+
+
 def test_artifacts_are_aead_authenticated_and_run_bound(tmp_path: Path) -> None:
     root = tmp_path / "evidence"
     first = _chain(root, "run-a")

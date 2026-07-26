@@ -216,7 +216,7 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
     )
 
     assert receipt["schema_version"] == "2.0.0"
-    assert certificate["certificate_schema_version"] == "3.0.0"
+    assert certificate["certificate_schema_version"] == "4.0.0"
     assert certificate["manifest_rollback_policy"] == "external-signed-head-v1"
     assert receipt["writer_role"] == "orchestrator"
     assert receipt["evidence_basis"] == "observed"

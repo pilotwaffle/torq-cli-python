@@ -39,7 +39,11 @@ _AUTHORITY_RECEIPT_SCHEMA_VERSION = "1.1.0"
 _RECEIPT_SCHEMA_VERSION = "2.0.0"
 _LEGACY_CERTIFICATE_SCHEMA_VERSION = "1.0.0"
 _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION = "2.0.0"
-_CERTIFICATE_SCHEMA_VERSION = "3.0.0"
+_ROLLBACK_CERTIFICATE_SCHEMA_VERSION = "3.0.0"
+_CERTIFICATE_SCHEMA_VERSION = "4.0.0"
+_ROLLBACK_CERTIFICATE_SCHEMA_VERSIONS = frozenset(
+    {_ROLLBACK_CERTIFICATE_SCHEMA_VERSION, _CERTIFICATE_SCHEMA_VERSION}
+)
 _MANIFEST_ANCHOR_SCHEMA_VERSION = "1.0.0"
 _MANIFEST_ROLLBACK_POLICY = "external-signed-head-v1"
 _CANONICAL_ENCODING_MARKER = "UTF-8 \u2713"
@@ -914,7 +918,7 @@ class ReceiptChain:
         self._rollback_protected = (
             isinstance(certificate, Mapping)
             and certificate.get("certificate_schema_version")
-            == _CERTIFICATE_SCHEMA_VERSION
+            in _ROLLBACK_CERTIFICATE_SCHEMA_VERSIONS
             and certificate.get("manifest_rollback_policy")
             == _MANIFEST_ROLLBACK_POLICY
         )
@@ -1007,6 +1011,12 @@ class ReceiptChain:
                 == _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION
             ):
                 return target
+            if (
+                isinstance(existing, Mapping)
+                and existing.get("certificate_schema_version")
+                == _ROLLBACK_CERTIFICATE_SCHEMA_VERSION
+            ):
+                raise ValueError("run_certificate_legacy_read_only")
             if not hmac.compare_digest(target.read_bytes(), encoded):
                 raise ValueError("run_certificate_mismatch")
             return target
@@ -1667,6 +1677,7 @@ def verify_receipt_store(
                 certificate_schema_version not in {
                     _LEGACY_CERTIFICATE_SCHEMA_VERSION,
                     _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION,
+                    _ROLLBACK_CERTIFICATE_SCHEMA_VERSION,
                     _CERTIFICATE_SCHEMA_VERSION,
                 }
                 or certificate.get("run_id") != signed.get("run_id")
@@ -1686,7 +1697,8 @@ def verify_receipt_store(
             ):
                 return StoreVerification("tampered", "run_certificate_invalid")
             if (
-                certificate_schema_version != _CERTIFICATE_SCHEMA_VERSION
+                certificate_schema_version
+                not in _ROLLBACK_CERTIFICATE_SCHEMA_VERSIONS
                 and _manifest_anchor_path(
                     root.parent,
                     str(certificate.get("run_id")),
@@ -1696,6 +1708,7 @@ def verify_receipt_store(
             if (
                 certificate_schema_version in {
                     _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION,
+                    _ROLLBACK_CERTIFICATE_SCHEMA_VERSION,
                     _CERTIFICATE_SCHEMA_VERSION,
                 }
                 and certificate_bytes != _canonical(full_certificate)
@@ -1718,7 +1731,7 @@ def verify_receipt_store(
                 )
             except InvalidSignature:
                 return StoreVerification("tampered", "manifest_signature_invalid")
-            if certificate_schema_version == _CERTIFICATE_SCHEMA_VERSION:
+            if certificate_schema_version in _ROLLBACK_CERTIFICATE_SCHEMA_VERSIONS:
                 if (
                     certificate.get("manifest_rollback_policy")
                     != _MANIFEST_ROLLBACK_POLICY
@@ -1792,7 +1805,8 @@ def verify_receipt_store(
                 return StoreVerification("tampered", "run_certificate_invalid")
             for receipt in receipts:
                 if (
-                    certificate_schema_version == _CERTIFICATE_SCHEMA_VERSION
+                    certificate_schema_version
+                    in _ROLLBACK_CERTIFICATE_SCHEMA_VERSIONS
                     and receipt.get("run_id") != certificate.get("run_id")
                 ):
                     return StoreVerification("tampered", "receipt_run_id_mismatch")

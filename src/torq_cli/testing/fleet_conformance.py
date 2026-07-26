@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from copy import deepcopy
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from torq_cli.application.fleet import reduce_fleet_snapshot
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from torq_cli.application.fleet import FleetProjector, reduce_fleet_snapshot
 from torq_cli.application.fleet_controls import compose_fleet_envelope
+from torq_cli.core.canonical_json import canonical_json
 from torq_cli.domain.evidence_transitions import (
     TRANSITION_RULES,
     transition_authority_finding,
@@ -17,6 +22,11 @@ from torq_cli.domain.evidence_transitions import (
 from torq_cli.testing.fleet_preconditions import (
     negative_precondition_case,
     positive_precondition_case,
+)
+from torq_cli.safety.receipts import (
+    MemoryRunKeyStore,
+    ReceiptChain,
+    verify_receipt_store,
 )
 
 
@@ -326,26 +336,6 @@ def _ui_chain_for_lane_state(state: str) -> list[dict[str, Any]]:
     return receipts
 
 
-def _unavailable_snapshot(state: str, finding: str) -> dict[str, Any]:
-    return {
-        "schema": "torq-fleet-snapshot-v3",
-        "verification": {
-            "state": state,
-            "finding": finding,
-            "covered_sequence": None,
-            "store_sequence": None,
-            "manifest_generation": None,
-        },
-        "data_status": "unavailable",
-        "run": None,
-        "summary": None,
-        "lanes": [],
-        "actions": [],
-        "settlement": None,
-        "accounting": None,
-    }
-
-
 def _scenario_specs() -> list[dict[str, str]]:
     specs: list[dict[str, str]] = []
     base = {
@@ -413,6 +403,130 @@ def _scenario_specs() -> list[dict[str, str]]:
     return specs
 
 
+def _rewrite_mutated_receipt(
+    chain: ReceiptChain,
+    *,
+    schema_version: str | None = None,
+    foreign_writer: bool = False,
+) -> None:
+    envelope = json.loads(chain.receipts_path.read_text(encoding="utf-8"))
+    envelope.pop("receipt_hash")
+    envelope.pop("writer_signature")
+    if schema_version is not None:
+        envelope["schema_version"] = schema_version
+    private = (
+        Ed25519PrivateKey.generate()
+        if foreign_writer
+        else Ed25519PrivateKey.from_private_bytes(chain.run_keys.orchestrator)
+    )
+    signed = {
+        **envelope,
+        "writer_signature": private.sign(canonical_json(envelope)).hex(),
+    }
+    receipt_hash = "sha256:" + hashlib.sha256(canonical_json(signed)).hexdigest()
+    mutated = {**signed, "receipt_hash": receipt_hash}
+    chain.receipts_path.write_bytes(canonical_json(mutated) + b"\n")
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    manifest["terminal_receipt_hash"] = receipt_hash
+    signed_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(canonical_json(manifest))
+        .hex(),
+    }
+    manifest_bytes = canonical_json(signed_manifest)
+    manifest_path.write_bytes(manifest_bytes)
+    chain._write_manifest_anchor(signed_manifest, manifest_bytes)
+
+
+def _mutate_and_project(stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Apply a named corruption and project only what the real verifier admits."""
+    with tempfile.TemporaryDirectory(prefix="torq-fleet-conformance-") as directory:
+        evidence_root = Path(directory) / "evidence"
+        armed = [False]
+
+        def observer(step: str) -> None:
+            if (
+                stage == "withhold_manifest_replacement"
+                and armed[0]
+                and step == "receipt_fsynced"
+            ):
+                raise RuntimeError("withheld_manifest_replacement")
+
+        chain = ReceiptChain(
+            evidence_root,
+            "run-conformance",
+            MemoryRunKeyStore(),
+            profile_version="1.0.0",
+            policy_version="3.1.3",
+            commit_observer=observer,
+        )
+        chain.append("run_attested", {"mode": "dry_run"})
+        if stage == "truncate_chain":
+            chain.receipts_path.write_bytes(b"")
+        elif stage == "resign_foreign_key":
+            _rewrite_mutated_receipt(chain, foreign_writer=True)
+        elif stage == "restore_manifest_generation":
+            earlier = (chain.root / "terminal-manifest.json").read_bytes()
+            chain.append("run_attested", {"mode": "dry_run", "ordinal": 2})
+            (chain.root / "terminal-manifest.json").write_bytes(earlier)
+        elif stage == "withhold_manifest_replacement":
+            armed[0] = True
+            try:
+                chain.append("run_attested", {"mode": "dry_run", "ordinal": 2})
+            except RuntimeError as exc:
+                if str(exc) != "withheld_manifest_replacement":
+                    raise
+        elif stage == "replace_schema_unsupported":
+            _rewrite_mutated_receipt(chain, schema_version="99.0.0")
+        else:
+            raise ValueError(f"fleet_ui_mutator_unknown:{stage}")
+        trusted_public_key = (
+            Ed25519PrivateKey.from_private_bytes(chain.key)
+            .public_key()
+            .public_bytes_raw()
+        )
+        verification = verify_receipt_store(
+            chain.root,
+            trusted_public_key=trusted_public_key,
+        )
+        snapshot = FleetProjector(
+            chain.root,
+            trusted_public_key=trusted_public_key,
+        ).snapshot()
+        receipts_text = chain.receipts_path.read_text(encoding="utf-8")
+        receipts = [json.loads(line) for line in receipts_text.splitlines()]
+        manifest = json.loads(
+            (chain.root / "terminal-manifest.json").read_text(encoding="utf-8")
+        )
+        return (
+            {
+                "receipts": receipts,
+                "manifest": manifest,
+                "mutated_surfaces": {
+                    "truncate_chain": ["receipts.jsonl"],
+                    "resign_foreign_key": [
+                        "receipts.jsonl",
+                        "terminal-manifest.json",
+                    ],
+                    "restore_manifest_generation": ["terminal-manifest.json"],
+                    "withhold_manifest_replacement": ["receipts.jsonl"],
+                    "replace_schema_unsupported": [
+                        "receipts.jsonl",
+                        "terminal-manifest.json",
+                    ],
+                }[stage],
+                "verification": {
+                    "state": verification.status,
+                    "finding": verification.finding,
+                },
+            },
+            snapshot,
+        )
+
+
 def generate_ui_corpus() -> dict[str, Any]:
     """Generate paired chain/envelope fixtures over every declared UI axis."""
     chain_fixtures: list[dict[str, Any]] = []
@@ -420,6 +534,7 @@ def generate_ui_corpus() -> dict[str, Any]:
     observed: dict[str, set[str]] = {name: set() for name in UI_AXIS_VALUES}
     observed_mutators: set[str] = set()
     for spec in _scenario_specs():
+        mutator_stage = spec["mutator_stage"]
         receipts = _ui_chain_for_lane_state(spec["lane_state"])
         schema = spec["schema_version"]
         if schema in {"1.0.0", "1.1.0"}:
@@ -433,15 +548,17 @@ def generate_ui_corpus() -> dict[str, Any]:
             "terminal_receipt_hash": "sha256:" + "2" * 64,
         }
         verification = spec["verification_state"]
-        if verification in {"tampered", "unreadable", "incomplete"}:
-            snapshot = _unavailable_snapshot(
-                verification,
-                {
-                    "tampered": "receipt_signature_invalid",
-                    "unreadable": "receipt_schema_unsupported",
-                    "incomplete": "receipt_chain_truncated",
-                }[verification],
-            )
+        mutation_input: dict[str, Any] | None = None
+        if mutator_stage != "none":
+            mutation_input, snapshot = _mutate_and_project(mutator_stage)
+            actual = snapshot["verification"]["state"]
+            if actual != verification:
+                raise ValueError(
+                    f"fleet_ui_mutator_result_mismatch:{mutator_stage}:"
+                    f"{verification}:{actual}"
+                )
+            receipts = mutation_input["receipts"]
+            manifest = mutation_input["manifest"]
         else:
             reducer_state = (
                 "verified"
@@ -486,9 +603,10 @@ def generate_ui_corpus() -> dict[str, Any]:
             {
                 "fixture_id": spec["fixture_id"],
                 "axes": axes,
-                "mutator_stage": spec["mutator_stage"],
+                "mutator_stage": mutator_stage,
                 "receipts": deepcopy(receipts),
                 "manifest": manifest,
+                "mutation_result": mutation_input,
             }
         )
         snapshot_fixtures.append(
@@ -500,8 +618,8 @@ def generate_ui_corpus() -> dict[str, Any]:
         )
         for name, value in axes.items():
             observed[name].add(value)
-        if spec["mutator_stage"] != "none":
-            observed_mutators.add(spec["mutator_stage"])
+        if mutator_stage != "none":
+            observed_mutators.add(mutator_stage)
     missing_axes = {
         name: sorted(set(values) - observed[name])
         for name, values in UI_AXIS_VALUES.items()

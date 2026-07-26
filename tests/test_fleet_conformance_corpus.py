@@ -124,8 +124,14 @@ def test_ui_corpus_pairs_every_chain_with_a_whole_snapshot_envelope() -> None:
     for fixture_id, chain in chains.items():
         paired = snapshots[fixture_id]
         assert chain["axes"] == paired["axes"]
-        assert chain["receipts"]
-        assert chain["manifest"]["receipt_count"] == len(chain["receipts"])
+        if chain["mutator_stage"] == "none":
+            assert chain["receipts"]
+            assert chain["manifest"]["receipt_count"] == len(chain["receipts"])
+        else:
+            assert chain["mutation_result"] is not None
+            assert chain["mutation_result"]["verification"]["state"] == (
+                paired["envelope"]["snapshot"]["verification"]["state"]
+            )
         assert set(paired["envelope"]) == {
             "snapshot",
             "annotations",
@@ -163,7 +169,15 @@ def test_ui_corpus_declares_and_covers_every_axis_and_invalid_mutator() -> None:
 def test_ui_annotation_overlays_are_deterministic_and_outside_snapshot() -> None:
     first = generate_ui_corpus()
     second = generate_ui_corpus()
-    assert first == second
+    first_annotations = {
+        fixture["fixture_id"]: fixture["envelope"]["annotations"]
+        for fixture in first["snapshot_fixtures"]
+    }
+    second_annotations = {
+        fixture["fixture_id"]: fixture["envelope"]["annotations"]
+        for fixture in second["snapshot_fixtures"]
+    }
+    assert first_annotations == second_annotations
     for fixture in first["snapshot_fixtures"]:
         envelope = fixture["envelope"]
         assert "annotations" not in envelope["snapshot"]
@@ -185,3 +199,45 @@ def test_invalid_ui_fixtures_never_render_evidence_values_as_available() -> None
         assert snapshot["summary"] is None
         assert snapshot["lanes"] == []
         assert snapshot["actions"] == []
+
+
+def test_invalid_mutators_change_real_inputs_and_use_real_verifier_findings() -> None:
+    corpus = generate_ui_corpus()
+    mutated = {
+        row["mutator_stage"]: row
+        for row in corpus["chain_fixtures"]
+        if row["mutator_stage"] != "none"
+    }
+    expected = {
+        "truncate_chain": ("incomplete", "receipt_chain_truncated"),
+        "resign_foreign_key": (
+            "tampered",
+            "receipt_writer_signature_invalid",
+        ),
+        "restore_manifest_generation": (
+            "tampered",
+            "manifest_rollback_detected",
+        ),
+        "withhold_manifest_replacement": (
+            "live_catching_up",
+            "manifest_coverage_lag",
+        ),
+        "replace_schema_unsupported": (
+            "unreadable",
+            "receipt_schema_unsupported",
+        ),
+    }
+    for stage, (state, finding) in expected.items():
+        fixture = mutated[stage]
+        assert fixture["mutation_result"]["verification"] == {
+            "state": state,
+            "finding": finding,
+        }
+        assert fixture["mutation_result"]["mutated_surfaces"]
+    assert mutated["truncate_chain"]["receipts"] == []
+    assert mutated["replace_schema_unsupported"]["receipts"][0][
+        "schema_version"
+    ] == "99.0.0"
+    for stage in {"restore_manifest_generation", "withhold_manifest_replacement"}:
+        fixture = mutated[stage]
+        assert fixture["manifest"]["receipt_count"] < len(fixture["receipts"])
