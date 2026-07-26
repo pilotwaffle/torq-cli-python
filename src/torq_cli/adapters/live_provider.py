@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import urllib.request
 from collections.abc import Mapping
+from pathlib import Path
 
 from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.connectors.credential_sources import (
@@ -90,9 +91,18 @@ def current_environment() -> Mapping[str, str]:
     return dict(os.environ)
 
 
-def provider_binary_available(base_environment: Mapping[str, str]) -> bool:
-    """Return whether the governed Claude-compatible transport is installed."""
-    return shutil.which("claude", path=base_environment.get("PATH")) is not None
+def provider_binary_path(base_environment: Mapping[str, str]) -> str | None:
+    """Resolve the governed transport once so dispatch cannot re-search PATH."""
+    candidate = shutil.which("claude", path=base_environment.get("PATH"))
+    if candidate is None:
+        return None
+    try:
+        resolved = Path(candidate).resolve(strict=True)
+    except OSError:
+        return None
+    if not resolved.is_absolute() or not resolved.is_file():
+        return None
+    return str(resolved)
 
 
 def _single_json_object(value: object, provider: str) -> str:
@@ -125,10 +135,14 @@ class LiveStageDispatcher:
         base_environment: Mapping[str, str],
         *,
         timeout_seconds: int = 90,
+        claude_binary: str = "claude",
+        runtime_directory: str | None = None,
     ) -> None:
         self.vault = vault
         self.base_environment = dict(base_environment)
         self.timeout_seconds = timeout_seconds
+        self.claude_binary = claude_binary
+        self.runtime_directory = runtime_directory
 
     def dispatch(
         self,
@@ -173,12 +187,14 @@ class LiveStageDispatcher:
         )
         completed = subprocess.run(
             (
-                "claude", "-p", prompt, "--output-format", "json", "--model", model,
+                self.claude_binary, "-p", prompt, "--output-format", "json", "--model", model,
                 "--json-schema", json.dumps(schema, separators=(",", ":")),
                 "--tools", "", "--no-session-persistence", "--permission-mode", "plan",
-                "--disable-slash-commands",
+                "--disable-slash-commands", "--setting-sources", "",
+                "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             ),
             env=environment,
+            cwd=self.runtime_directory,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -195,7 +211,7 @@ class LiveStageDispatcher:
         result = payload.get("structured_output", payload.get("result"))
         model_usage = payload.get("modelUsage")
         resolved = set(model_usage) if isinstance(model_usage, Mapping) else set()
-        if not isinstance(result, (str, Mapping)) or model not in resolved:
+        if not isinstance(result, (str, Mapping)) or resolved != {model}:
             raise OrchestrationBlocked(f"live_model_unattested:{provider_name}")
         usage = payload.get("usage")
         usage_map = usage if isinstance(usage, Mapping) else {}
@@ -274,4 +290,4 @@ class LiveStageDispatcher:
         )
 
 
-__all__ = ["LiveStageDispatcher", "current_environment", "provider_binary_available"]
+__all__ = ["LiveStageDispatcher", "current_environment", "provider_binary_path"]

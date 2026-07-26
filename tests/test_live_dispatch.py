@@ -65,6 +65,47 @@ def test_live_dispatcher_scopes_claude_compatible_environment(
     assert response.usage["prompt_tokens"] == 2
 
 
+def test_live_dispatcher_uses_preflight_pinned_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: object, **_: object) -> SimpleNamespace:
+        captured["command"] = command
+        captured["cwd"] = _.get("cwd")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "structured_output": {"status": "build_complete", "proposal": "safe"},
+                "modelUsage": {"deepseek-v4-pro": {}},
+                "usage": {},
+            }),
+        )
+
+    monkeypatch.setattr("torq_cli.adapters.live_provider.subprocess.run", fake_run)
+    dispatcher = LiveStageDispatcher(
+        _vault(tmp_path),
+        {"PATH": str(tmp_path / "shadow")},
+        claude_binary="C:/trusted/claude.exe",
+        runtime_directory="C:/isolated/torq-runtime",
+    )
+
+    dispatcher.dispatch(
+        role="builder",
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        prompt="build",
+    )
+
+    command = captured["command"]
+    assert isinstance(command, tuple)
+    assert command[0] == "C:/trusted/claude.exe"
+    assert command[command.index("--setting-sources") + 1] == ""
+    assert command[command.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    assert "--strict-mcp-config" in command
+    assert captured["cwd"] == "C:/isolated/torq-runtime"
+
+
 def test_live_dispatcher_rejects_non_object_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -99,6 +140,30 @@ def test_live_dispatcher_fails_closed_on_unattested_model(
         ),
     )
     dispatcher = LiveStageDispatcher(_vault(tmp_path), {"PATH": "safe"})
+    with pytest.raises(OrchestrationBlocked, match="live_model_unattested:deepseek"):
+        dispatcher.dispatch(
+            role="builder",
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            prompt="proposal",
+        )
+
+
+def test_live_dispatcher_rejects_mixed_resolved_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "torq_cli.adapters.live_provider.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "result": '{"status":"build_complete","proposal":"safe"}',
+                "modelUsage": {"deepseek-v4-pro": {}, "fallback-model": {}},
+            }),
+        ),
+    )
+    dispatcher = LiveStageDispatcher(_vault(tmp_path), {"PATH": "safe"})
+
     with pytest.raises(OrchestrationBlocked, match="live_model_unattested:deepseek"):
         dispatcher.dispatch(
             role="builder",

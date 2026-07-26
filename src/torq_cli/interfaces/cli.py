@@ -237,15 +237,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 5
     if args.command == "run":
         try:
-            identity = RunIdentity(**json.loads(Path(args.identity).read_text(encoding="utf-8")))
+            try:
+                identity_value = json.loads(Path(args.identity).read_text(encoding="utf-8"))
+                if not isinstance(identity_value, dict):
+                    raise ValueError
+                identity = RunIdentity(**identity_value)
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                raise ValueError("run_identity_invalid") from exc
+            if not args.resume and not args.goal:
+                raise ValueError("goal_required")
+            if args.live and not args.resume and not (args.allow_live and args.policy_allow_live):
+                raise ValueError("double_opt_in_required")
+            expected = None
+            actual = None
+            if not args.resume:
+                try:
+                    expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
+                    actual = json.loads(Path(args.actual).read_text(encoding="utf-8"))
+                    if not isinstance(expected, dict) or not isinstance(actual, dict):
+                        raise ValueError
+                except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                    raise ValueError("run_attestation_input_invalid") from exc
+                for field, expected_value in expected.items():
+                    observed = actual.get(field)
+                    if observed is None:
+                        raise ValueError(f"attestation_unattestable:{field}")
+                    if observed != expected_value:
+                        raise ValueError(f"attestation_mismatch:{field}")
             live_runtime = None
-            if args.live:
+            if args.live and not args.resume:
                 if args.config is None:
                     raise ValueError("live_config_required")
                 live_runtime = build_live_runtime(
                     Path(args.config).resolve(),
                     Path(args.run_root).resolve(),
                     expected_config_version=identity.config_version,
+                    expected_profile_version=identity.profile_version,
+                    expected_policy_version=identity.policy_version,
                 )
             controller = RunController(
                 Path(args.run_root),
@@ -257,10 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 report = {"status": "resumed", "remaining": remaining}
             else:
-                if not args.goal:
-                    raise ValueError("goal_required")
-                expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
-                actual = json.loads(Path(args.actual).read_text(encoding="utf-8"))
+                assert expected is not None and actual is not None
                 report = controller.start(
                     identity,
                     actual,

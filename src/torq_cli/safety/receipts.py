@@ -595,6 +595,11 @@ def _restrict_signing_directory(path: Path, failure: str) -> None:
         raise PermissionError(failure)
 
 
+def restrict_owner_only_directory(path: Path) -> None:
+    """Restrict a sensitive runtime directory to the current OS identity."""
+    _restrict_signing_directory(path, "runtime_directory_permissions_unsafe")
+
+
 def _restrict_private_key(path: Path) -> None:
     _restrict_signing_file(path, "receipt_signing_key_permissions_unsafe")
 

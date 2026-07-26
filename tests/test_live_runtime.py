@@ -105,7 +105,7 @@ def _write_config(path: Path, credential_file: Path) -> Path:
 def _factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LiveRuntime:
     source = _write_source(tmp_path / "provider.env")
     config = _write_config(tmp_path / "config.yaml", source)
-    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_available", lambda *_a: True)
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
     return build_live_runtime(config, tmp_path / "runs", base_environment={"PATH": "safe"})
 
 
@@ -132,7 +132,7 @@ def test_factory_rejects_direct_deepseek_key_without_metered_fallback_before_run
     source = _write_source(tmp_path / "provider.env", deepseek_direct_only=True)
     config = _write_config(tmp_path / "config.yaml", source)
     run_root = tmp_path / "runs"
-    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_available", lambda *_a: True)
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
 
     with pytest.raises(ValueError, match="provider_credential_missing:deepseek"):
         build_live_runtime(config, run_root, base_environment={"PATH": "safe"})
@@ -145,7 +145,7 @@ def test_factory_rejects_invalid_token_plan_region_before_run_creation(
     source = _write_source(tmp_path / "provider.env", base_url="http://wrong-region.example")
     config = _write_config(tmp_path / "config.yaml", source)
     run_root = tmp_path / "runs"
-    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_available", lambda *_a: True)
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
 
     with pytest.raises(ValueError, match="provider_base_url_invalid"):
         build_live_runtime(config, run_root, base_environment={"PATH": "safe"})
@@ -170,7 +170,7 @@ def test_factory_hard_failures_leave_no_evidence_root(
     if mutation == "missing_config":
         config = tmp_path / "absent.yaml"
     else:
-        monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_available", lambda *_a: False)
+        monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: None)
     run_root = tmp_path / "runs"
 
     with pytest.raises(ValueError, match=finding):
@@ -184,7 +184,7 @@ def test_factory_config_version_mismatch_leaves_no_evidence_root(
     source = _write_source(tmp_path / "provider.env")
     config = _write_config(tmp_path / "config.yaml", source)
     run_root = tmp_path / "runs"
-    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_available", lambda *_a: True)
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
 
     with pytest.raises(ValueError, match="config_version_mismatch"):
         build_live_runtime(
@@ -192,6 +192,35 @@ def test_factory_config_version_mismatch_leaves_no_evidence_root(
             run_root,
             base_environment={"PATH": "safe"},
             expected_config_version=2,
+        )
+    assert not run_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "finding"),
+    [
+        ("expected_profile_version", "9.9.9", "profile_version_mismatch"),
+        ("expected_policy_version", "9.9.9", "policy_version_mismatch"),
+    ],
+)
+def test_factory_identity_mismatch_leaves_no_evidence_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+    finding: str,
+) -> None:
+    source = _write_source(tmp_path / "provider.env")
+    config = _write_config(tmp_path / "config.yaml", source)
+    run_root = tmp_path / "runs"
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
+
+    with pytest.raises(ValueError, match=finding):
+        build_live_runtime(
+            config,
+            run_root,
+            base_environment={"PATH": "safe"},
+            **{field: value},
         )
     assert not run_root.exists()
 
@@ -205,9 +234,58 @@ def test_factory_invalid_entitlement_window_leaves_no_evidence_root(
     document["entitlement_accounts"]["subscriptions"]["used"] = 101
     config.write_text(yaml.safe_dump(document, sort_keys=True), encoding="utf-8")
     run_root = tmp_path / "runs"
-    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_available", lambda *_a: True)
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
 
     with pytest.raises(ValueError, match="live_config_invalid:config_schema_invalid"):
+        build_live_runtime(config, run_root, base_environment={"PATH": "safe"})
+    assert not run_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("account", "settlement", "provider"),
+    [
+        ("openai-api", "plan_covered", "openai"),
+        ("subscriptions", "metered", "anthropic"),
+    ],
+)
+def test_factory_rejects_transport_settlement_mismatch_before_run_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    account: str,
+    settlement: str,
+    provider: str,
+) -> None:
+    source = _write_source(tmp_path / "provider.env")
+    config = _write_config(tmp_path / "config.yaml", source)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["entitlement_accounts"][account]["settlement"] = settlement
+    config.write_text(yaml.safe_dump(document, sort_keys=True), encoding="utf-8")
+    run_root = tmp_path / "runs"
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
+
+    with pytest.raises(ValueError, match=f"entitlement_settlement_mismatch:{provider}"):
+        build_live_runtime(config, run_root, base_environment={"PATH": "safe"})
+    assert not run_root.exists()
+
+
+def test_factory_rejects_runtime_cwd_inside_operator_tree_before_run_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_source(tmp_path / "provider.env")
+    config = _write_config(tmp_path / "config.yaml", source)
+    run_root = tmp_path / "runs"
+    unsafe_runtime = tmp_path / "attacker-controlled-runtime"
+    unsafe_runtime.mkdir()
+    monkeypatch.setattr(
+        "torq_cli.application.live_runtime.provider_binary_path",
+        lambda *_a: "C:/trusted/claude.exe",
+    )
+    monkeypatch.setattr(
+        "torq_cli.application.live_runtime.tempfile.mkdtemp",
+        lambda **_k: str(unsafe_runtime),
+    )
+
+    with pytest.raises(ValueError, match="live_runtime_directory_unsafe"):
         build_live_runtime(config, run_root, base_environment={"PATH": "safe"})
     assert not run_root.exists()
 
@@ -299,3 +377,102 @@ def test_installed_cli_requires_config_and_uses_factory_for_live_only(
     monkeypatch.setattr(cli, "build_live_runtime", lambda *_a, **_k: runtime)
     assert cli.main([*common, "--config", str(tmp_path / "config.yaml")]) == 0
     assert json.loads(capsys.readouterr().out)["verdict"] == "awaiting_approval"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "finding"),
+    [
+        ("identity", "run_identity_invalid"),
+        ("expected", "run_attestation_input_invalid"),
+        ("goal", "goal_required"),
+        ("opt_in", "double_opt_in_required"),
+        ("mismatch", "attestation_mismatch:profile"),
+    ],
+)
+def test_installed_cli_invalid_preflight_is_governed_and_leaves_no_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mutation: str,
+    finding: str,
+) -> None:
+    source = _write_source(tmp_path / "provider.env")
+    config = _write_config(tmp_path / "config.yaml", source)
+    identity = tmp_path / "identity.json"
+    expected = tmp_path / "expected.json"
+    actual = tmp_path / "actual.json"
+    identity.write_text(json.dumps({
+        "profile_version": "1.0.0",
+        "policy_version": "3.1.3",
+        "prompt_binding": "prompt-v1",
+        "model_resolution": "profile-bound-live",
+        "sandbox_identity": "sandbox",
+        "config_version": 1,
+        "receipt_chain_hash": "new",
+    }), encoding="utf-8")
+    expected.write_text('{"profile":"torq-v5-6-live"}', encoding="utf-8")
+    actual.write_text('{"profile":"torq-v5-6-live"}', encoding="utf-8")
+    goal = "test"
+    opt_ins = ["--allow-live", "--policy-allow-live"]
+    if mutation == "identity":
+        identity = tmp_path / "missing-identity.json"
+    elif mutation == "expected":
+        expected = tmp_path / "missing-expected.json"
+    elif mutation == "goal":
+        goal = ""
+    elif mutation == "opt_in":
+        opt_ins = []
+    elif mutation == "mismatch":
+        actual.write_text('{"profile":"wrong"}', encoding="utf-8")
+    run_root = tmp_path / "runs"
+    monkeypatch.setattr("torq_cli.application.live_runtime.provider_binary_path", lambda *_a: "C:/trusted/claude.exe")
+    argv = [
+        "run", "--run-root", str(run_root), "--identity", str(identity),
+        "--expected", str(expected), "--actual", str(actual), "--config", str(config),
+        "--live", *opt_ins,
+    ]
+    if goal:
+        argv.extend(["--goal", goal])
+
+    assert cli.main(argv) == 3
+    assert json.loads(capsys.readouterr().out)["finding"] == finding
+    assert not run_root.exists()
+
+
+def test_live_resume_does_not_construct_or_persist_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    identity_value = {
+        "profile_version": "1.0.0",
+        "policy_version": "3.1.3",
+        "prompt_binding": "prompt-v1",
+        "model_resolution": "profile-bound-live",
+        "sandbox_identity": "sandbox",
+        "config_version": 1,
+        "receipt_chain_hash": "new",
+    }
+    identity = tmp_path / "identity.json"
+    checkpoint = tmp_path / "checkpoint.json"
+    identity.write_text(json.dumps(identity_value), encoding="utf-8")
+    checkpoint.write_text(json.dumps({
+        "run_id": "run-old",
+        "identity": identity_value,
+        "completed": ["g1d"],
+    }), encoding="utf-8")
+    run_root = tmp_path / "runs"
+    monkeypatch.setattr(
+        cli,
+        "build_live_runtime",
+        lambda *_a, **_k: pytest.fail("resume must not construct a live runtime"),
+    )
+
+    assert cli.main([
+        "run", "--run-root", str(run_root), "--identity", str(identity),
+        "--expected", str(tmp_path / "unused-expected.json"),
+        "--actual", str(tmp_path / "unused-actual.json"),
+        "--resume", str(checkpoint), "--live",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "resumed"
+    assert not run_root.exists()
