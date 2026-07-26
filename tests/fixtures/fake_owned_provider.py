@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -27,9 +28,54 @@ def _sleep_forever() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--role", choices=("parent", "child", "grandchild"), required=True)
+    parser.add_argument(
+        "--role",
+        choices=(
+            "parent",
+            "child",
+            "grandchild",
+            "exiting-parent",
+            "partial",
+            "dual-stream",
+            "complete",
+            "failed",
+            "flood",
+        ),
+        required=True,
+    )
     args = parser.parse_args()
     _ignore_stop()
+    if args.role == "complete":
+        _emit("complete")
+        return 0
+    if args.role == "failed":
+        print("provider-failed", file=sys.stderr, flush=True)
+        return 7
+    if args.role == "partial":
+        sys.stdout.buffer.write(b"partial-token")
+        sys.stdout.buffer.flush()
+        _sleep_forever()
+    if args.role == "dual-stream":
+        barrier = threading.Barrier(3)
+
+        def emit_bytes(descriptor: int, value: bytes) -> None:
+            barrier.wait()
+            os.write(descriptor, value)
+
+        threads = (
+            threading.Thread(target=emit_bytes, args=(1, b"stdout-event\n")),
+            threading.Thread(target=emit_bytes, args=(2, b"stderr-event\n")),
+        )
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        _sleep_forever()
+    if args.role == "flood":
+        block = b"x" * 4096
+        while True:
+            os.write(1, block)
     if args.role == "grandchild":
         _emit("ready", role="grandchild")
         _sleep_forever()
@@ -40,6 +86,13 @@ def main() -> int:
         )
         _emit("ready", role="child", child_pid=grandchild.pid)
         _sleep_forever()
+    if args.role == "exiting-parent":
+        child = subprocess.Popen(
+            (sys.executable, __file__, "--role", "child"),
+            stdin=subprocess.DEVNULL,
+        )
+        _emit("ready", role="exiting-parent", child_pid=child.pid)
+        return 0
     child = subprocess.Popen(
         (sys.executable, __file__, "--role", "child"),
         stdin=subprocess.DEVNULL,
