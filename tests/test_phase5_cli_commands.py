@@ -57,7 +57,7 @@ def test_evidence_verify_accepts_external_public_key(tmp_path, capsys) -> None:
         profile_version="1.0.0",
         policy_version="3.1.3",
     )
-    chain.append("run_decision", {"status": "awaiting_approval"})
+    chain.append("portable_export_requested", {"format": "bundle"})
     chain.seal()
     public_key = evidence_root / ".torq-receipt-signing-key.pub"
 

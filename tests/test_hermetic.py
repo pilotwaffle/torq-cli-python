@@ -43,15 +43,16 @@ def test_production_imports_forbid_subprocess() -> None:
             local_allow = {"subprocess", "urllib"}
         elif source_path.as_posix().endswith("torq_cli/interfaces/fleet_http.py"):
             # The local Fleet transport is isolated to this loopback-only,
-            # read-only interface; the application projector remains hermetic.
-            local_allow = {"http", "urllib"}
+            # bounded interface; the application projector remains hermetic.
+            # socket is used only for slow-client timeouts on the SSE stream.
+            local_allow = {"http", "socket", "urllib"}
         elif source_path.as_posix().endswith(
             (
-                    "torq_cli/safety/workspace.py",
-                    "torq_cli/safety/receipts.py",
-                    "torq_cli/safety/evidence_broker.py",
-                    "torq_cli/safety/accounting_registry.py",
-                )
+                "torq_cli/safety/workspace.py",
+                "torq_cli/safety/receipts.py",
+                "torq_cli/safety/evidence_broker.py",
+                "torq_cli/safety/accounting_registry.py",
+            )
         ):
             local_allow = {"os"}
         elif source_path.as_posix().endswith("torq_cli/connectors/native_credentials.py"):

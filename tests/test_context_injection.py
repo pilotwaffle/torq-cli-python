@@ -372,14 +372,14 @@ def test_unreachable_context_is_finalized_unapplied_before_terminal(
     rows = [json.loads(line) for line in chain.receipts_path.read_text().splitlines()]
     final = rows[-3:]
     assert [row["transition"] for row in final] == [
-        "run_decision",
+        "terminalization_started",
         "command_unapplied",
         "run_decision",
     ]
-    assert final[0]["payload"]["status"] == "terminating"
+    assert final[0]["payload"]["reason"] == "pending_commands"
     assert final[1]["payload"]["command_id"] == accepted["command_id"]
     assert final[1]["payload"]["reason"] == "run_terminating"
-    assert final[2]["payload"]["status"] == "workflow_closed"
+    assert final[2]["payload"]["decision"] == "blocked"
     assert verify_receipt_store(chain.root).status == "verified"
 
 
@@ -414,6 +414,30 @@ def test_context_validation_writes_safe_rejections_before_artifact(tmp_path: Pat
     serialized = chain.receipts_path.read_text(encoding="utf-8")
     assert "sk-" + "A" * 24 not in serialized
     assert not (chain.root / "artifacts").exists()
+
+
+def test_context_command_id_replay_is_durable_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-context-replay")
+    first = GovernedOrchestrator().inject_context(
+        chain,
+        "Preserve this constraint",
+        command_id="context-correlation-1",
+    )
+    before = chain.sequence
+
+    replay = GovernedOrchestrator().inject_context(
+        chain,
+        "A retry body must not replace the accepted command",
+        command_id="context-correlation-1",
+    )
+
+    assert replay["idempotent_replay"] is True
+    assert replay["sequence"] == first["sequence"]
+    assert replay["artifact_hash"] == first["artifact_hash"]
+    assert chain.sequence == before
+    assert verify_receipt_store(chain.root).status == "verified"
 
 
 def test_duplicate_command_id_is_rejected_before_append(tmp_path: Path) -> None:
@@ -555,7 +579,7 @@ def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path
         assert file_result["context"]["command_type"] == "artifact"
 
         snapshot = FleetProjector(chain.root).snapshot()
-        assert snapshot["verification"]["status"] == "verified"
+        assert snapshot["verification"]["state"] == "live_verified"
         assert snapshot["run"]["context_commands_accepted"] == 2
         assert snapshot["run"]["context_injections"] == 0
         g2a = next(row for row in snapshot["lanes"] if row["role"] == "g2a")
@@ -602,7 +626,7 @@ def test_terminal_run_rejects_mutation_without_a_prior_fleet_poll(tmp_path: Path
         with pytest.raises(urllib.error.HTTPError) as blocked:
             urllib.request.urlopen(request)
         assert blocked.value.code == 409
-        assert json.loads(blocked.value.read())["finding"] == "fleet_run_not_mutable"
+        assert json.loads(blocked.value.read())["finding"] == "run_terminal"
         assert chain.sequence == before
     finally:
         server.shutdown()

@@ -1,12 +1,14 @@
 # Fleet backend contract
 
-Status: **Release 3 backend implemented; protected-main merge pending 2026-07-25.**
+Status: **Rev 5.5A backend and Fleet control surface implemented; see
+[`../prd-fleet-ui-rev-5-5a.md`](../prd-fleet-ui-rev-5-5a.md).**
 
 The Fleet backend is a local projection of authenticated run evidence. Its
 server-side reducer is the only evidence reducer. It does not tail provider
 output, expose receipt keys, or let the browser reconstruct lifecycle state.
-The standalone service is read-only except when an in-process governed context
-injector is explicitly supplied.
+The standalone service is read-only unless run-bound context, action, and/or
+recovery controllers are explicitly supplied. Eligibility reports unavailable
+services rather than presenting a nonfunctional control.
 
 ## Commands
 
@@ -25,12 +27,13 @@ torq fleet --run-root .\export\run `
   --trusted-public-key .\export\.torq-receipt-signing-key.pub
 ```
 
-The HTTP read contract is `GET /api/v1/fleet`. `GET /healthz` returns only the
-fixed liveness shape `{status: ok}`. Mutation methods return `405 read_only`
-unless an active
-in-process orchestrator explicitly supplies a `GovernedContextInjector`; that
-opt-in enables the same-origin `POST /api/v1/context` contract. The standalone
-CLI server remains read-only. The server rejects non-loopback bind addresses.
+The HTTP read contracts are `GET /api/v1/fleet` and bounded SSE
+`GET /api/v1/fleet/events`. `GET /healthz` returns only the fixed liveness shape
+`{status: ok}`. Mutation methods return `405 read_only` unless an active
+in-process runtime supplies the corresponding controller. Controller opt-in
+enables same-origin context injection, action resolution, and two-step recovery.
+The standalone CLI server remains read-only. The server rejects non-loopback
+bind addresses.
 Only the run owner's `ActiveRunRuntime` may provide that opt-in. It owns one
 broker and separate fixed-role orchestrator/operator-gateway facades; the
 gateway cannot decrypt artifacts, inspect covered receipts, or seal the run.
@@ -61,9 +64,10 @@ New receipts include `observed_at`, allowing the UI to display receipt-backed
 start/update time. Historical receipts without timestamps explicitly return
 `receipt_timestamps_unavailable`; the projector does not invent elapsed time.
 
-## Snapshot schema
+## Snapshot and control envelope
 
-`torq-fleet-snapshot-v2` contains:
+`torq-fleet-envelope-v3` carries `snapshot`, `annotations`, `session`,
+`eligibility`, and `pending`. Its `torq-fleet-snapshot-v3` contains:
 
 - verification status and finding;
 - run identity, mode, decision, seal state, and waiting-on list;
@@ -74,5 +78,6 @@ start/update time. Historical receipts without timestamps explicitly return
 - settlement totals reconstructed from completed-stage receipts.
 
 The projector never reads encrypted artifact bodies. Operational orphan and
-recovery annotations remain explicitly non-evidentiary. Artifact decryption
-requires a separate attended application boundary.
+recovery annotations remain explicitly non-evidentiary. The browser consumes
+only server-reduced state and uses complete-envelope SSE updates with polling
+fallback; it never merges partial events.

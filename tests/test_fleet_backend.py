@@ -11,6 +11,7 @@ import pytest
 
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.orchestrator import GovernedOrchestrator
+from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces.cli import main
 from torq_cli.interfaces.fleet_http import FleetSessionManager, create_fleet_server
@@ -28,16 +29,18 @@ def _chain(tmp_path: Path, name: str = "run-fleet") -> ReceiptChain:
     )
 
 
-def _planned(chain: ReceiptChain) -> None:
+def _planned(
+    chain: ReceiptChain, *, mode: ExecutionMode = ExecutionMode.LIVE
+) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     chain.append(
         "run_planned",
         {
-            "mode": "live",
+            "mode": mode.value,
             "profile_id": "torq-v5-6-live",
             "strategy_id": "standard_v1",
             "planned_roles": ("g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui"),
-            "lane_catalog": GovernedOrchestrator._lane_catalog(profile),
+            "lane_catalog": GovernedOrchestrator._lane_catalog(profile, mode=mode),
         },
     )
 
@@ -79,9 +82,9 @@ def test_rolling_manifest_authenticates_a_live_unsealed_snapshot(tmp_path: Path)
     manifest = json.loads((chain.root / "terminal-manifest.json").read_text(encoding="utf-8"))
     assert manifest["sealed"] is False
     snapshot = FleetProjector(chain.root).snapshot()
-    assert snapshot["verification"]["normalized_state"] == "live_verified"
+    assert snapshot["verification"]["state"] == "live_verified"
     assert snapshot["run"]["sealed"] is False
-    assert snapshot["run"]["status"] == "running"
+    assert snapshot["run"]["decision"] == "running"
     assert snapshot["summary"]["running"] == 1
     assert snapshot["summary"]["queued"] == 3
     assert snapshot["summary"]["dormant"] == 2
@@ -142,7 +145,7 @@ def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Pat
     chain.append(
         "run_decision",
         {
-            "status": "blocked",
+            "decision": "blocked",
             "reason": "plan_window_exceeded:g1r",
             "provider_dispatch": True,
         },
@@ -152,7 +155,7 @@ def test_completed_and_blocked_lanes_project_receipt_backed_values(tmp_path: Pat
     snapshot = FleetProjector(chain.root).snapshot()
 
     assert snapshot["run"]["sealed"] is True
-    assert snapshot["run"]["status"] == "blocked"
+    assert snapshot["run"]["decision"] == "blocked"
     assert snapshot["run"]["waiting_on"] == []
     assert snapshot["summary"]["blocked"] == 1
     assert snapshot["summary"]["needs_you"] == 0
@@ -185,6 +188,8 @@ def test_open_lane_action_promotes_blocked_lane_to_needs_you(tmp_path: Path) -> 
             "target": "g1r",
             "summary": "Approve the blocked lane.",
             "caused_by_sequence": blocked["sequence"],
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
         },
     )
 
@@ -206,7 +211,7 @@ def test_tampered_chain_never_projects_plausible_fleet_data(tmp_path: Path) -> N
 
     snapshot = FleetProjector(chain.root).snapshot()
 
-    assert snapshot["verification"]["status"] == "tampered"
+    assert snapshot["verification"]["state"] == "tampered"
     assert snapshot["data_status"] == "unavailable"
     assert snapshot["run"] is None
     assert snapshot["lanes"] == []
@@ -215,11 +220,11 @@ def test_tampered_chain_never_projects_plausible_fleet_data(tmp_path: Path) -> N
 
 def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     chain = _chain(tmp_path, "run-cli")
-    _planned(chain)
+    _planned(chain, mode=ExecutionMode.DRY_RUN)
     chain.append(
         "run_decision",
         {
-            "status": "workflow_closed",
+            "decision": "completed",
             "outcome": "dry_run_complete",
             "provider_dispatch": False,
         },
@@ -230,7 +235,7 @@ def test_fleet_cli_emits_stable_json_snapshot(tmp_path: Path, capsys: pytest.Cap
     output = json.loads(capsys.readouterr().out)
 
     assert code == 0
-    assert output["schema"] == "torq-fleet-snapshot-v2"
+    assert output["schema"] == "torq-fleet-snapshot-v3"
     assert output["run"]["run_id"] == "run-cli"
 
 
@@ -244,16 +249,17 @@ def test_fleet_projects_certified_writer_provenance(
         "stage_interrupted",
         {
             **attempt,
-            "reason": "worker_lease_expired",
+            "reason": "worker_crash",
             "provider_dispatch": "unknown",
+            "observation_source": "worker_exit",
         },
         writer_role="supervisor",
-        evidence_basis="derived",
+        evidence_basis="observed",
     )
     chain.append(
         "run_decision",
         {
-            "status": "workflow_failed",
+            "decision": "failed",
             "interruption_sequence": interrupted["sequence"],
         },
         writer_role="supervisor",
@@ -295,8 +301,12 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
         )
         with urllib.request.urlopen(first_request) as response:
             assert response.headers["Cache-Control"] == "no-store"
-            first = json.loads(response.read())
-        assert first["verification"]["status"] == "verified"
+            first_envelope = json.loads(response.read())
+            first = first_envelope["snapshot"]
+        assert first["verification"]["state"] == "live_verified"
+        assert set(first_envelope) == {
+            "snapshot", "annotations", "session", "eligibility", "pending"
+        }
 
         connection = http.client.HTTPConnection(host, port)
         connection.putrequest("GET", "/healthz", skip_host=True)
@@ -326,8 +336,8 @@ def test_fleet_http_is_loopback_read_only_and_reverifies_each_request(tmp_path: 
             headers=cookie,
         )
         with urllib.request.urlopen(second_request) as response:
-            second = json.loads(response.read())
-        assert second["verification"]["status"] == "tampered"
+            second = json.loads(response.read())["snapshot"]
+        assert second["verification"]["state"] == "tampered"
         assert second["data_status"] == "unavailable"
 
         request = urllib.request.Request(

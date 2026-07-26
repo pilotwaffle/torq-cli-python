@@ -14,6 +14,7 @@ from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.domain.run_evidence import validate_v2_receipt_contract
+from torq_cli.domain.run_plan import initial_plan_body, plan_hash
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
 
 
@@ -73,6 +74,30 @@ def _chain(tmp_path: Path, run_id: str = "run-contract") -> ReceiptChain:
         FileRunKeyStore(root),
         profile_version="1.0.0",
         policy_version="3.1.3",
+    )
+
+
+def _append_live_plan(chain: ReceiptChain) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    catalog = GovernedOrchestrator._lane_catalog(profile)
+    planned_roles = GovernedOrchestrator._PLANNED_ROLES
+    body = initial_plan_body(
+        profile_id=profile.profile_id,
+        strategy_id=profile.strategy_id,
+        planned_roles=planned_roles,
+        lane_catalog=catalog,
+    )
+    chain.append(
+        "run_planned",
+        {
+            "mode": "live",
+            "profile_id": profile.profile_id,
+            "strategy_id": profile.strategy_id,
+            "planned_roles": planned_roles,
+            "plan_contract": "torq-run-plan-v1",
+            "plan_hash": plan_hash(body),
+            "lane_catalog": catalog,
+        },
     )
 
 
@@ -148,10 +173,10 @@ def test_happy_path_projects_catalog_attempts_action_and_linked_closure(
         resolver_identity="operator:test",
     )
 
-    assert closure["status"] == "workflow_closed"
+    assert closure["status"] == "completed"
     assert verify_receipt_store(chain.root).status == "verified"
     closed = FleetProjector(chain.root).snapshot()
-    assert closed["verification"]["normalized_state"] == "sealed_verified"
+    assert closed["verification"]["state"] == "sealed_verified"
     assert closed["run"]["workflow_state"] == "closed"
     assert closed["run"]["decision_writer"]["writer_role"] == "operator_gateway"
     assert closed["summary"]["open_actions"] == 0
@@ -160,8 +185,7 @@ def test_happy_path_projects_catalog_attempts_action_and_linked_closure(
     terminating = next(
         row
         for row in receipts
-        if row["transition"] == "run_decision"
-        and row["payload"].get("status") == "terminating"
+        if row["transition"] == "terminalization_started"
     )
     unapplied = next(row for row in receipts if row["transition"] == "command_unapplied")
     assert terminating["sequence"] < unapplied["sequence"] < closure["run_decision_sequence"]
@@ -265,7 +289,30 @@ def test_awaiting_approval_cannot_be_abandoned_even_without_open_attempts(
     tmp_path: Path,
 ) -> None:
     chain = _chain(tmp_path, "run-awaiting-approval")
-    chain.append("run_decision", {"status": "awaiting_approval"})
+    chain.append("run_attested", {"mode": "live"})
+    action = chain.append(
+        "action_opened",
+        {
+            "action_id": "approval",
+            "type": "approval_required",
+            "scope": "run",
+            "target": "operator",
+            "summary": "Review.",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
+            "caused_by_sequence": 1,
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "run_decision",
+        {
+            "decision": "awaiting_approval",
+            "action_id": "approval",
+            "action_opened_sequence": action["sequence"],
+            "provider_dispatch": False,
+        },
+    )
     before = chain.receipts_path.read_bytes()
 
     with pytest.raises(ValueError, match="run_abandoned_operator_action_open"):
@@ -294,7 +341,10 @@ def test_open_operator_action_blocks_recovery_abandonment(tmp_path: Path) -> Non
             "scope": "run",
             "target": "operator",
             "summary": "Review the governed result.",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
             "caused_by_sequence": 1,
+            "provider_dispatch": False,
         },
     )
     attempt = {
@@ -321,13 +371,165 @@ def test_open_operator_action_blocks_recovery_abandonment(tmp_path: Path) -> Non
         )
 
 
+def test_awaiting_approval_state_blocks_recovery_after_action_resolution(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-awaiting-resolved-action")
+    chain.append("run_attested", {"mode": "live"})
+    action = chain.append(
+        "action_opened",
+        {
+            "action_id": "approval-resolved",
+            "type": "approval_required",
+            "scope": "run",
+            "target": "operator",
+            "summary": "Review.",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
+            "caused_by_sequence": 1,
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "run_decision",
+        {
+            "decision": "awaiting_approval",
+            "action_id": "approval-resolved",
+            "action_opened_sequence": action["sequence"],
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "action_resolved",
+        {
+            "action_id": "approval-resolved",
+            "resolution": "approved",
+            "resolver_identity": "operator:local-session",
+            "opened_sequence": action["sequence"],
+        },
+        writer_role="operator_gateway",
+        evidence_basis="submitted",
+    )
+
+    with pytest.raises(ValueError, match="run_abandoned_operator_action_open"):
+        chain.append(
+            "run_abandoned",
+            {
+                "attempt_ids": ["invented-open-attempt"],
+                "last_covered_sequence": chain.sequence,
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+
+
+def test_empty_abandonment_enumeration_accepts_a_planned_zero_attempt_run(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-empty-abandonment")
+    _append_live_plan(chain)
+    abandoned = chain.terminalize(
+        "run_abandoned",
+        {
+            "attempt_ids": [],
+            "operator_assertion": "no_live_worker",
+        },
+        writer_role="recovery",
+        evidence_basis="submitted",
+    )
+    chain.seal()
+
+    assert abandoned["payload"]["attempt_ids"] == []
+    assert verify_receipt_store(chain.root).status == "verified"
+
+
+def test_empty_abandonment_enumeration_rejects_any_historical_attempt(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-empty-abandonment-historical-attempt")
+    _append_live_plan(chain)
+    attempt = {
+        "role": "g1d",
+        "attempt_id": "attempt-terminal-before-recovery",
+        "attempt_ordinal": 1,
+        "repair_cycle": 0,
+    }
+    chain.append("stage_attempt_created", {**attempt, "provider_dispatch": False})
+    chain.append("stage_blocked", {**attempt, "provider_dispatch": False})
+    before = chain.receipts_path.read_bytes()
+
+    with pytest.raises(
+        ValueError,
+        match="run_abandoned_empty_enumeration_invalid",
+    ):
+        chain.terminalize(
+            "run_abandoned",
+            {
+                "attempt_ids": [],
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+
+    assert chain.receipts_path.read_bytes() == before
+
+
+def test_empty_abandonment_requires_pending_commands_to_be_finalized(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path, "run-empty-abandonment-command")
+    _append_live_plan(chain)
+    GovernedOrchestrator().inject_context(
+        chain,
+        "This pending command must be finalized first",
+        command_id="pending-before-abandonment",
+    )
+    before = chain.receipts_path.read_bytes()
+
+    with pytest.raises(ValueError, match="command_pending_at_terminal"):
+        chain.append(
+            "run_abandoned",
+            {
+                "attempt_ids": [],
+                "last_covered_sequence": chain.sequence,
+                "operator_assertion": "no_live_worker",
+            },
+            writer_role="recovery",
+            evidence_basis="submitted",
+        )
+    assert chain.receipts_path.read_bytes() == before
+
+    abandoned = chain.terminalize(
+        "run_abandoned",
+        {
+            "attempt_ids": [],
+            "operator_assertion": "no_live_worker",
+        },
+        writer_role="recovery",
+        evidence_basis="submitted",
+    )
+    transitions = [
+        json.loads(line)["transition"]
+        for line in chain.receipts_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert transitions[-3:] == [
+        "terminalization_started",
+        "command_unapplied",
+        "run_abandoned",
+    ]
+    assert abandoned["payload"]["attempt_ids"] == []
+
+
 def test_invented_orchestrator_decision_status_is_rejected_before_append(
     tmp_path: Path,
 ) -> None:
     chain = _chain(tmp_path, "run-invented-decision")
 
-    with pytest.raises(ValueError, match="run_decision_status_unauthorized"):
-        chain.append("run_decision", {"status": "looks_finished_to_me"})
+    with pytest.raises(ValueError, match="run_decision_value_unauthorized"):
+        chain.append("run_decision", {"decision": "looks_finished_to_me"})
 
     assert chain.sequence == 0
     assert not chain.receipts_path.exists()
@@ -380,7 +582,9 @@ def test_legacy_signed_non_finite_receipt_remains_verifiable(tmp_path: Path) -> 
     manifest["signature"] = Ed25519PrivateKey.from_private_bytes(
         chain.run_keys.manifest
     ).sign(legacy_canonical(manifest)).hex()
-    manifest_path.write_bytes(legacy_canonical(manifest))
+    manifest_bytes = legacy_canonical(manifest)
+    manifest_path.write_bytes(manifest_bytes)
+    chain._write_manifest_anchor(manifest, manifest_bytes)
 
     assert verify_receipt_store(chain.root).status == "verified"
 
