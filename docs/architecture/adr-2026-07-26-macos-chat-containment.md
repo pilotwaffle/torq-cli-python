@@ -22,8 +22,14 @@ built.
 ## Primary-source basis
 
 - Apple's [Endpoint Security overview](https://developer.apple.com/documentation/EndpointSecurity)
-  documents monitoring/authorization of exec, fork, and signal events through
-  a system extension. It does not document a descendant containment domain.
+  documents process-event monitoring and authorization through a system
+  extension. More specifically, Apple exposes authorization events for
+  [exec](https://developer.apple.com/documentation/endpointsecurity/es_event_type_auth_exec)
+  and
+  [signal](https://developer.apple.com/documentation/endpointsecurity/es_event_type_auth_signal),
+  but fork is a
+  [notification-only event](https://developer.apple.com/documentation/endpointsecurity/es_event_type_notify_fork).
+  None of those contracts documents a descendant containment domain.
 - The [Endpoint Security client entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.developer.endpoint-security.client)
   must be requested from Apple; client creation fails when it is absent.
 - Apple's [Endpoint Security client contract](https://developer.apple.com/documentation/endpointsecurity/client)
