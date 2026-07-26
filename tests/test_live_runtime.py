@@ -12,6 +12,7 @@ from torq_cli.application.run_command import RunController, RunIdentity
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.interfaces import cli
 from torq_cli.safety.receipts import verify_receipt_store
+from torq_cli.safety.receipts import restrict_receipt_trust_anchor
 
 
 _BINDINGS = {
@@ -41,6 +42,7 @@ def _write_source(
     if base_url is not None:
         values["QWEN_TOKEN_PLAN_BASE_URL"] = base_url
     path.write_text("".join(f"{key}={value}\n" for key, value in values.items()), encoding="utf-8")
+    restrict_receipt_trust_anchor(path)
     return path.resolve()
 
 

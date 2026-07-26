@@ -15,6 +15,7 @@ from torq_cli.connectors.headless_credentials import (
     ConfiguredHeadlessVault,
     HeadlessEncryptedFileStore,
 )
+from torq_cli.safety.receipts import signing_file_permissions_are_restricted
 
 
 MAX_CREDENTIAL_SOURCE_BYTES = 65_536
@@ -38,6 +39,9 @@ _PROVIDER_BASE_URL_KEYS: Mapping[str, tuple[str, ...]] = {
 # The Token Plan is regional. This is the documented default host; an operator
 # entitled to another region names it in their credential source and it wins.
 _TOKEN_PLAN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+_TOKEN_PLAN_URL = re.compile(
+    r"https://token-plan\.[a-z0-9-]+\.maas\.aliyuncs\.com(?::443)?/apps/anthropic\Z"
+)
 _SAFE_CHILD_KEYS = frozenset({
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
     "LANG", "LC_ALL", "HOME", "USERPROFILE",
@@ -97,6 +101,10 @@ def _parse_env(payload: bytes) -> dict[str, str]:
     return parsed
 
 
+def _valid_token_plan_base_url(value: str) -> bool:
+    return _TOKEN_PLAN_URL.fullmatch(value) is not None
+
+
 class ExplicitEnvVault:
     """Read a bounded, explicit external env file without copying it into TORQ."""
 
@@ -106,6 +114,8 @@ class ExplicitEnvVault:
         try:
             if source.is_symlink() or not source.is_file():
                 raise CredentialSourceError("credential_source_regular_file_required")
+            if not signing_file_permissions_are_restricted(source):
+                raise CredentialSourceError("credential_source_permissions_unsafe")
             if source.stat().st_size > MAX_CREDENTIAL_SOURCE_BYTES:
                 raise CredentialSourceError("credential_source_too_large")
             payload = source.read_bytes()
@@ -199,7 +209,7 @@ def claude_compatible_environment(
         reader = getattr(vault, "base_url", None)
         declared = reader(normalized) if callable(reader) else None
         if declared is not None:
-            if not isinstance(declared, str) or not declared.startswith("https://"):
+            if not isinstance(declared, str) or not _valid_token_plan_base_url(declared):
                 raise CredentialSourceError("provider_base_url_invalid")
             base_url = declared
     child = safe_child_environment(base_environment)

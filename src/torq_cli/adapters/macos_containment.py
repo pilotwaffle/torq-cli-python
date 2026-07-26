@@ -44,4 +44,3 @@ def require_macos_strong_containment() -> None:
     capability = macos_containment_capability()
     if not capability.available:
         raise OSError(capability.finding)
-

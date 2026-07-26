@@ -762,12 +762,18 @@ class GovernedOrchestrator:
             cost_basis = "configured_worst_case"
         else:
             billed_usd = (
-                "0" if budget.settlement == "plan_covered" else quote.metered_usd
+                "0"
+                if budget.settlement == "plan_covered"
+                else (
+                    quote.metered_usd
+                    if quote.metered_usd is not None
+                    else str(budget.ceiling_usd)
+                )
             )
             cost_basis = (
                 "sealed_token_counts"
                 if quote.pricing_status == "priced"
-                else "rate_unknown"
+                else "configured_worst_case_rate_unknown"
             )
         usage_rows.append(
             {

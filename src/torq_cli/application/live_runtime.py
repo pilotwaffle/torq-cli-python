@@ -107,13 +107,16 @@ def build_live_runtime(
     if findings:
         raise ValueError("live_config_invalid:" + findings[0].id)
     config_version = config.get("config_version")
-    assert isinstance(config_version, int) and not isinstance(config_version, bool)
+    if not isinstance(config_version, int) or isinstance(config_version, bool):
+        raise ValueError("live_config_version_invalid")
     if expected_config_version is not None and config_version != expected_config_version:
         raise ValueError("config_version_mismatch")
     profile_value = config.get("profile")
-    assert isinstance(profile_value, Mapping)
+    if not isinstance(profile_value, Mapping):
+        raise ValueError("live_profile_invalid")
     profile_id = profile_value.get("id")
-    assert isinstance(profile_id, str)
+    if not isinstance(profile_id, str):
+        raise ValueError("live_profile_invalid")
     profile = registry.profiles[profile_id]
     if (
         expected_profile_version is not None
@@ -144,13 +147,17 @@ def build_live_runtime(
         if validated_entitlements.window(provider).settlement != expected_settlement:
             raise ValueError(f"entitlement_settlement_mismatch:{provider}")
     policy = config.get("policy")
-    assert isinstance(policy, Mapping)
+    if not isinstance(policy, Mapping):
+        raise ValueError("live_policy_invalid")
     limits = policy.get("resource_limits")
-    assert isinstance(limits, Mapping)
+    if not isinstance(limits, Mapping):
+        raise ValueError("live_policy_invalid")
     max_cost_cents = limits.get("max_cost_cents")
     loop_budget = policy.get("loop_budget")
-    assert isinstance(max_cost_cents, int) and not isinstance(max_cost_cents, bool)
-    assert isinstance(loop_budget, int) and not isinstance(loop_budget, bool)
+    if not isinstance(max_cost_cents, int) or isinstance(max_cost_cents, bool):
+        raise ValueError("live_policy_invalid")
+    if not isinstance(loop_budget, int) or isinstance(loop_budget, bool):
+        raise ValueError("live_policy_invalid")
     budget_usd = max_cost_cents / 100
     runtime_directory = _isolated_runtime_directory(
         (config_path.parent, run_root, Path.cwd())

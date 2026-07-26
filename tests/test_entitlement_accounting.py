@@ -379,3 +379,59 @@ def test_mixed_run_budgets_only_openai_and_reports_both_settlements(tmp_path: Pa
     assert result.usage["settlement"]["metered_roles"] == ["g2a"]
     assert Decimal(result.usage["budget"]["consumed_usd"]) < Decimal("0.25")
     assert Decimal(result.usage["settlement"]["billed_usd"]) > 0
+
+
+def test_unpriced_metered_call_books_configured_worst_case_ceiling(tmp_path: Path) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    dispatcher = _Dispatcher(
+        {
+            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
+            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+            "g2a": [_response("openai", "gpt-5.5", {"verdict": "approve", "defects": []})],
+        }
+    )
+    rates_without_openai = RateTable.from_document(
+        {
+            "rate_table_version": "test-rates-without-openai.v1",
+            "rates": {
+                "anthropic": {
+                    "claude-fable-5": {
+                        "input_usd_per_mtok": "10", "output_usd_per_mtok": "50",
+                    },
+                    "claude-opus-4-8": {
+                        "input_usd_per_mtok": "15", "output_usd_per_mtok": "75",
+                    },
+                },
+                "deepseek": {
+                    "deepseek-v4-pro": {
+                        "input_usd_per_mtok": "0.55", "output_usd_per_mtok": "2.19",
+                    }
+                },
+            },
+        }
+    )
+    chain = _chain(tmp_path, "unpriced-metered")
+
+    result = GovernedOrchestrator(
+        dispatcher,
+        budget_usd=1.0,
+        cost_ceiling_usd_by_role={"g2a": 0.25},
+        entitlement_ledger=_ledger(),
+        rate_table=rates_without_openai,
+    ).execute(
+        goal="Conservatively account for unknown price",
+        profile=profile,
+        mode=ExecutionMode.LIVE,
+        chain=chain,
+    )
+
+    assert result.usage["budget"]["consumed_usd"] == "0.25"
+    receipts = [
+        json.loads(line)["payload"]
+        for line in (chain.root / "receipts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    g2a = next(row for row in receipts if row.get("role") == "g2a" and "cost_basis" in row)
+    assert g2a["billed_usd"] == "0.25"
+    assert g2a["metered_usd"] is None
+    assert g2a["cost_basis"] == "configured_worst_case_rate_unknown"

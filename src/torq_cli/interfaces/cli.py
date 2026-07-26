@@ -317,7 +317,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             print(json.dumps(report, sort_keys=True))
             return 0
-        except (ValueError, BackendUnavailable, NativeCredentialError) as exc:
+        except (
+            ValueError,
+            BackendUnavailable,
+            CredentialSourceError,
+            HeadlessCredentialError,
+            NativeCredentialError,
+        ) as exc:
             print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
             return 3
         except Exception:
