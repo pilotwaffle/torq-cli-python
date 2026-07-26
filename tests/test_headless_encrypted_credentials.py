@@ -551,6 +551,7 @@ def test_store_root_nul_is_rejected_before_filesystem_access(tmp_path: Path) -> 
 
     answers = _answers()
     answers["credential_refs"] = {
+        "codex": "credref_33333333333333333333333333333333",
         "deepseek": REF,
         "kimi": "credref_11111111111111111111111111111111",
         "zai": "credref_22222222222222222222222222222222",
@@ -564,6 +565,7 @@ def test_store_root_nul_is_rejected_before_filesystem_access(tmp_path: Path) -> 
 def test_setup_persists_explicit_headless_backend_without_secret(tmp_path: Path) -> None:
     answers = _answers()
     answers["credential_refs"] = {
+        "codex": "credref_33333333333333333333333333333333",
         "deepseek": REF,
         "kimi": "credref_11111111111111111111111111111111",
         "zai": "credref_22222222222222222222222222222222",
@@ -572,9 +574,32 @@ def test_setup_persists_explicit_headless_backend_without_secret(tmp_path: Path)
     answers["credential_store_root"] = str((tmp_path / "vault").resolve())
     target = tmp_path / "config.yaml"
     document = SetupService().configure(target, answers)
+    assert document["connectors"]["g2a-main"]["credential_ref"] == (
+        "credref_33333333333333333333333333333333"
+    )
     assert document["credential_source"] == {
         "kind": "headless_encrypted_file", "path": str((tmp_path / "vault").resolve()),
     }
     rendered = target.read_text(encoding="utf-8")
     assert PASSPHRASE not in rendered
     assert "headless_encrypted_file" in rendered
+
+
+def test_setup_headless_backend_requires_codex_ref_before_store_creation(
+    tmp_path: Path,
+) -> None:
+    answers = _answers()
+    answers["credential_refs"] = {
+        "deepseek": REF,
+        "kimi": "credref_11111111111111111111111111111111",
+        "zai": "credref_22222222222222222222222222222222",
+    }
+    answers["credential_backend"] = "headless_encrypted_file"
+    store_root = tmp_path / "vault"
+    answers["credential_store_root"] = str(store_root.resolve())
+    target = tmp_path / "config.yaml"
+
+    with pytest.raises(SetupError, match="^provider_credential_ref_missing:codex$"):
+        SetupService().configure(target, answers)
+    assert not target.exists()
+    assert not store_root.exists()

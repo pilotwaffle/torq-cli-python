@@ -20,6 +20,7 @@ class SetupError(ValueError):
 
 _REQUIRED_ROLES = {"g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui"}
 _ELIGIBILITY = {"builder": {"deepseek", "codex"}, "refine_bug": {"kimi"}, "refine_ui": {"zai", "codex"}}
+_CREDENTIAL_REQUIRED_PROVIDERS = frozenset({"codex", "deepseek", "kimi", "zai"})
 _REGISTRY_PROVIDER = {
     "claude": "anthropic",
     "codex": "openai",
@@ -67,7 +68,8 @@ class SetupService:
             direct_providers = {
                 str(raw.get("provider"))
                 for raw in bindings.values()
-                if isinstance(raw, Mapping) and raw.get("provider") in {"deepseek", "kimi", "zai"}
+                if isinstance(raw, Mapping)
+                and raw.get("provider") in _CREDENTIAL_REQUIRED_PROVIDERS
             }
             missing = sorted(provider for provider in direct_providers if vault.get(provider) is None)
             if missing:
@@ -93,7 +95,8 @@ class SetupService:
             direct_providers = {
                 str(raw.get("provider"))
                 for raw in bindings.values()
-                if isinstance(raw, Mapping) and raw.get("provider") in {"deepseek", "kimi", "zai"}
+                if isinstance(raw, Mapping)
+                and raw.get("provider") in _CREDENTIAL_REQUIRED_PROVIDERS
             }
             missing = sorted(direct_providers - set(credential_refs))
             if missing:

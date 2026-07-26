@@ -142,6 +142,9 @@ def build_live_runtime(
     # Validate every window in memory first. Persistent construction creates the
     # accounting signing identity, so no fallible config parsing may follow it.
     validated_entitlements = InMemoryEntitlementLedger.from_config(entitlements)
+    for window in validated_entitlements.windows.values():
+        if window.used != 0 or window.reserved != 0:
+            raise ValueError("entitlement_baseline_unsupported")
     for provider in sorted({binding.provider_id for binding in profile.bindings.values()}):
         expected_settlement = "metered" if provider == "openai" else "plan_covered"
         if validated_entitlements.window(provider).settlement != expected_settlement:

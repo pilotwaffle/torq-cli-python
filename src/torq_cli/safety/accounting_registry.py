@@ -127,6 +127,8 @@ class PersistentEntitlementLedger:
         for account, window in self._windows.items():
             if account != window.account:
                 raise ValueError("entitlement_account_key_mismatch")
+            if window.used != 0 or window.reserved != 0:
+                raise ValueError("entitlement_baseline_unsupported")
             for provider in window.providers:
                 if provider in self._providers:
                     raise ValueError(f"entitlement_provider_ambiguous:{provider}")

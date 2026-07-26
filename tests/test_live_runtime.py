@@ -243,6 +243,29 @@ def test_factory_invalid_entitlement_window_leaves_no_evidence_root(
     assert not run_root.exists()
 
 
+def test_factory_rejects_nonzero_entitlement_baseline_before_run_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source(tmp_path / "provider.env")
+    config = _write_config(tmp_path / "config.yaml", source)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["entitlement_accounts"]["subscriptions"]["used"] = 1
+    config.write_text(yaml.safe_dump(document, sort_keys=True), encoding="utf-8")
+    run_root = tmp_path / "runs"
+    monkeypatch.setattr(
+        "torq_cli.application.live_runtime.provider_binary_path",
+        lambda *_a: "C:/trusted/claude.exe",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^entitlement_baseline_unsupported$",
+    ):
+        build_live_runtime(config, run_root, base_environment={"PATH": "safe"})
+    assert not run_root.exists()
+
+
 @pytest.mark.parametrize(
     ("account", "settlement", "provider"),
     [

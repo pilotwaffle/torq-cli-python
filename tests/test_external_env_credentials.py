@@ -266,15 +266,20 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
     assert codex_environment["OPENAI_MODEL"] == "gpt-5.5"
 
     incomplete = tmp_path / "incomplete.env"
-    incomplete.write_text("DEEPSEEK_API_KEY=only-one\n", encoding="utf-8")
+    incomplete.write_text(
+        "QWEN_TOKEN_PLAN_API_KEY=qwen\nKIMI_API_KEY=kimi\nGLM_API_KEY=glm\n",
+        encoding="utf-8",
+    )
     restrict_receipt_trust_anchor(incomplete)
+    previous_config = target.read_bytes()
     assert main([
         "setup", "--config", str(target), "--answers", str(answers),
         "--credential-file", str(incomplete),
     ]) == 3
     assert json.loads(capsys.readouterr().out)["finding"] == (
-        "provider_credential_missing:deepseek,kimi,zai"
+        "provider_credential_missing:codex"
     )
+    assert target.read_bytes() == previous_config
 
 
 def test_managed_process_loads_saved_source_and_scopes_child_environment(
