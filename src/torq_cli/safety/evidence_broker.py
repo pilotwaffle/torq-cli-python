@@ -261,12 +261,16 @@ def _connection_peer_pid(connection: Connection) -> int:
         from ctypes import wintypes
 
         process_id = wintypes.ULONG()
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        win_dll = getattr(ctypes, "WinDLL", None)
+        get_last_error = getattr(ctypes, "get_last_error", None)
+        if not callable(win_dll) or not callable(get_last_error):
+            raise OSError("broker_peer_identity_unavailable")
+        kernel32 = win_dll("kernel32", use_last_error=True)
         function = kernel32.GetNamedPipeClientProcessId
         function.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.ULONG))
         function.restype = wintypes.BOOL
         if not function(wintypes.HANDLE(handle), ctypes.byref(process_id)):
-            raise OSError(ctypes.get_last_error(), "broker_peer_identity_failed")
+            raise OSError(get_last_error(), "broker_peer_identity_failed")
         return int(process_id.value)
 
     duplicate = socket.fromfd(
