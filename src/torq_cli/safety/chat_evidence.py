@@ -136,11 +136,13 @@ def _journal_lock(run_root: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            locking = getattr(msvcrt, "locking")
+            locking(descriptor, int(getattr(msvcrt, "LK_LOCK")), 1)
         else:
             import fcntl
 
-            fcntl.flock(descriptor, fcntl.LOCK_EX)  # type: ignore[attr-defined]
+            flock = getattr(fcntl, "flock")
+            flock(descriptor, int(getattr(fcntl, "LOCK_EX")))
         yield
     finally:
         try:
@@ -148,11 +150,13 @@ def _journal_lock(run_root: Path) -> Iterator[None]:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                locking = getattr(msvcrt, "locking")
+                locking(descriptor, int(getattr(msvcrt, "LK_UNLCK")), 1)
             else:
                 import fcntl
 
-                fcntl.flock(descriptor, fcntl.LOCK_UN)  # type: ignore[attr-defined]
+                flock = getattr(fcntl, "flock")
+                flock(descriptor, int(getattr(fcntl, "LOCK_UN")))
         finally:
             os.close(descriptor)
 
