@@ -106,8 +106,11 @@ def test_hermetic_network_policy_denies_non_loopback_and_rejects_invalid_mode() 
 
 def test_ci_headless_job_exercises_encrypted_fallback_contract() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert workflow.count("actions/checkout@v6") == 4
-    assert workflow.count("actions/setup-python@v6") == 4
+    job_count = workflow.count("    runs-on:")
+    assert job_count >= 5
+    assert workflow.count("actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803") == job_count
+    assert workflow.count("actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1") == job_count
+    assert workflow.count("persist-credentials: false") == job_count
     assert "actions/checkout@v4" not in workflow
     assert "actions/setup-python@v5" not in workflow
     assert "TORQ_TEST_NETWORK_MODE: deny" in workflow

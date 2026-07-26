@@ -58,6 +58,56 @@ def _ledger(root: Path, *, now: datetime | None = None) -> PersistentEntitlement
     return PersistentEntitlementLedger(root, _windows(), clock=lambda: instant)
 
 
+@pytest.mark.parametrize(("used", "reserved"), [(1, 0), (0, 1)])
+def test_persistent_ledger_rejects_unauthenticated_baseline_before_key_creation(
+    tmp_path: Path,
+    used: int,
+    reserved: int,
+) -> None:
+    root = tmp_path / "evidence"
+    windows = _windows()
+    original = windows["qwen-token-plan"]
+    windows["qwen-token-plan"] = PlanWindow(
+        account=original.account,
+        providers=original.providers,
+        settlement=original.settlement,
+        used=used,
+        limit=original.limit,
+        resets_at=original.resets_at,
+        used_source=original.used_source,
+        limit_source=original.limit_source,
+        reserved=reserved,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^entitlement_baseline_unsupported$",
+    ):
+        PersistentEntitlementLedger(root, windows)
+    assert not root.exists()
+
+
+def test_persistent_ledger_from_config_rejects_baseline_without_filesystem_mutation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    raw = {
+        "qwen-token-plan": {
+            "providers": {"qwen": True, "deepseek": True},
+            "settlement": "plan_covered",
+            "used": 1,
+            "limit": 10,
+            "resets_at": _RESET,
+            "used_source": "provider_reported",
+            "limit_source": "operator_declared",
+        }
+    }
+
+    with pytest.raises(ValueError, match="^entitlement_baseline_unsupported$"):
+        PersistentEntitlementLedger.from_config(root, raw)
+    assert not root.exists()
+
+
 def test_rate_table_content_hash_is_immutable_and_sealed_for_misses() -> None:
     first = RateTable.from_document(
         {

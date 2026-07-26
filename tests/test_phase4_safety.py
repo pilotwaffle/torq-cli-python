@@ -349,7 +349,50 @@ def test_usage_summary_reconstructs_totals_and_preserves_unreported() -> None:
     summary = summarize_usage(receipts, budget_usd=1.0)
     assert summary["budget"] == {"consumed_usd": "0.3", "remaining_usd": "0.7"}
     assert summary["settlement"]["billed_usd"] == "0.3"
+    assert summary["settlement"]["billed_status"] == "complete"
     assert summary["settlement"]["metered_equivalent_usd"] == "0.3"
     assert summary["providers"]["claude"]["cost_usd"] == "0.1"
     assert summary["providers"]["codex"]["usage"] == "unreported"
     assert json.loads(json.dumps(summary)) == summary
+
+
+def test_usage_summary_does_not_turn_unknown_billing_into_zero() -> None:
+    summary = summarize_usage(
+        [{
+            "agent": "g2a", "provider": "openai", "cost_usd": "0.25",
+            "billed_usd": None, "metered_usd": None, "settlement": "metered",
+            "pricing_status": "rate_unknown", "usage": "unreported",
+        }],
+        budget_usd=1.0,
+    )
+
+    assert summary["budget"]["consumed_usd"] == "0.25"
+    assert summary["settlement"]["billed_usd"] is None
+    assert summary["settlement"]["billed_status"] == "incomplete"
+
+
+def test_legacy_worst_case_cost_is_not_upgraded_to_known_billing() -> None:
+    summary = summarize_usage(
+        [{
+            "agent": "g2a", "provider": "openai", "cost_usd": "0.25",
+            "cost_basis": "configured_worst_case", "settlement": "metered",
+            "usage": "unreported",
+        }],
+        budget_usd=1.0,
+    )
+
+    assert summary["settlement"]["billed_usd"] is None
+    assert summary["settlement"]["billed_status"] == "incomplete"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows owner SID contract")
+def test_windows_restricted_acl_rejects_foreign_file_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "owner-check.txt"
+    target.write_text("test", encoding="utf-8")
+    receipts_module.restrict_receipt_trust_anchor(target)
+    assert signing_file_permissions_are_restricted(target)
+
+    monkeypatch.setattr(receipts_module, "_windows_current_user_sid", lambda: "S-1-1-0")
+    assert not signing_file_permissions_are_restricted(target)

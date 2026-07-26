@@ -37,10 +37,18 @@ def test_production_imports_forbid_subprocess() -> None:
             local_allow = {"os", "stat", "ctypes"}
         elif source_path.as_posix().endswith("torq_cli/adapters/process.py"):
             local_allow = {"os", "subprocess"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/linux_cgroup.py"):
+            # Linux ownership control plane: systemd creates the cgroup-v2
+            # service before provider exec and systemctl observes/kills it.
+            local_allow = {"os", "subprocess", "sys"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/linux_cgroup_exec.py"):
+            # Trusted contained supervisor; provider subprocesses exist only
+            # inside the already-created systemd cgroup.
+            local_allow = {"os", "subprocess", "sys"}
         elif source_path.as_posix().endswith("torq_cli/adapters/live_provider.py"):
             # T-33's explicit, operator-authorized live transport is isolated to
             # this adapter; core, connector contracts, and imports stay hermetic.
-            local_allow = {"subprocess", "urllib"}
+            local_allow = {"os", "subprocess", "urllib"}
         elif source_path.as_posix().endswith("torq_cli/adapters/chat_bridge.py"):
             # The owned chat child is the isolated streaming HTTP boundary.
             local_allow = {"os", "sys", "urllib"}
@@ -57,20 +65,28 @@ def test_production_imports_forbid_subprocess() -> None:
                 "torq_cli/safety/workspace.py",
                 "torq_cli/safety/receipts.py",
                 "torq_cli/safety/evidence_broker.py",
-                    "torq_cli/safety/accounting_registry.py",
-                    "torq_cli/safety/chat_evidence.py",
-                )
-            ):
-                # The evidence broker owns the authenticated local-only IPC
-                # boundary (AF_PIPE on Windows, AF_UNIX on POSIX).
-                local_allow = (
-                    {"os", "socket"}
-                    if source_path.name == "evidence_broker.py"
-                    else {"os"}
-                )
+                "torq_cli/safety/accounting_registry.py",
+                "torq_cli/safety/chat_evidence.py",
+            )
+        ):
+            # The evidence broker owns the authenticated local-only IPC
+            # boundary (AF_PIPE on Windows, AF_UNIX on POSIX).
+            local_allow = (
+                {"os", "socket"}
+                if source_path.name == "evidence_broker.py"
+                else {"os"}
+            )
         elif source_path.as_posix().endswith("torq_cli/connectors/native_credentials.py"):
             # DISPLAY/WAYLAND_DISPLAY are explicit session-type facts only;
             # this adapter never enumerates credential-bearing environment keys.
+            local_allow = {"os"}
+        elif source_path.as_posix().endswith("torq_cli/connectors/headless_credentials.py"):
+            # The explicit operator-selected encrypted store needs local
+            # terminal, filesystem, permission, and durability primitives.
+            local_allow = {"os"}
+        elif source_path.as_posix().endswith("torq_cli/connectors/credential_sources.py"):
+            # The explicit compatibility source is opened once with no-follow
+            # semantics and validated through its descriptor before parsing.
             local_allow = {"os"}
         else:
             local_allow = set()

@@ -17,6 +17,7 @@ from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.chat_projection import reduce_chat_projection
 from torq_cli.application.chat_runtime import ChatRuntimeCoordinator
 from torq_cli.application.run_command import RunController, RunIdentity
+from torq_cli.application.live_runtime import build_live_runtime
 from torq_cli.application.resolve import envelope_to_dict, resolve_path
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.application.status_effective import effective_status
@@ -24,15 +25,22 @@ from torq_cli.connectors.status import inspect_harness
 from torq_cli.connectors.credential_sources import CredentialSourceError, ExplicitEnvVault
 from torq_cli.connectors.native_credentials import (
     NativeCredentialError,
+    NativeCredentialStore,
     native_store_for_current_platform,
 )
+from torq_cli.connectors.headless_credentials import (
+    HeadlessCredentialError,
+    HeadlessEncryptedFileStore,
+)
 from torq_cli.adapters.chat_provider import ChatProviderCommandFactory, current_environment
+from torq_cli.adapters.linux_containment import linux_containment_capability
 from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
 from torq_cli.interfaces.fleet_http import create_fleet_server
 from torq_cli.safety.chat_evidence import ChatEvidenceJournal, verify_chat_evidence
 from torq_cli.safety.receipts import FileRunKeyStore, verify_receipt_store
+from torq_cli.safety.production_trust import evaluate_production_trust
 
 
 def exit_code_for(status: str, require_effective: bool, findings: Sequence[object]) -> int:
@@ -107,6 +115,11 @@ def _parser() -> argparse.ArgumentParser:
         native = auth_sub.add_parser(action)
         native.add_argument("--provider", required=True)
         native.add_argument("--credential-ref", required=True)
+        native.add_argument(
+            "--backend", choices=("platform_keychain", "headless_encrypted_file"),
+            default="platform_keychain",
+        )
+        native.add_argument("--store-root")
     harness = sub.add_parser("harness")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     inspect = harness_sub.add_parser("inspect")
@@ -123,6 +136,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--identity", required=True)
     run.add_argument("--expected", required=True)
     run.add_argument("--actual", required=True)
+    run.add_argument("--config")
     run.add_argument("--live", action="store_true")
     run.add_argument("--allow-live", action="store_true")
     run.add_argument("--policy-allow-live", action="store_true")
@@ -144,6 +158,9 @@ def _parser() -> argparse.ArgumentParser:
     fleet.add_argument("--chat-model")
     fleet.add_argument("--credential-file")
     fleet.add_argument("--claude-bin", default="claude")
+    trust = sub.add_parser("trust")
+    trust_sub = trust.add_subparsers(dest="trust_command", required=True)
+    trust_sub.add_parser("readiness")
     return parser
 
 
@@ -205,6 +222,94 @@ def _read_trusted_public_key(path: str | None) -> bytes | None:
     return trusted_public_key
 
 
+def _load_run_identity(path: str) -> RunIdentity:
+    try:
+        identity_value = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(identity_value, dict):
+            raise ValueError
+        return RunIdentity(**identity_value)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("run_identity_invalid") from exc
+
+
+def _load_run_attestation(expected_path: str, actual_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        expected = json.loads(Path(expected_path).read_text(encoding="utf-8"))
+        actual = json.loads(Path(actual_path).read_text(encoding="utf-8"))
+        if not isinstance(expected, dict) or not isinstance(actual, dict):
+            raise ValueError
+        return expected, actual
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("run_attestation_input_invalid") from exc
+
+
+def _handle_run(args: argparse.Namespace) -> int:
+    try:
+        identity = _load_run_identity(args.identity)
+        if not args.resume and not args.goal:
+            raise ValueError("goal_required")
+        if args.live and not args.resume and not (args.allow_live and args.policy_allow_live):
+            raise ValueError("double_opt_in_required")
+
+        expected = None
+        actual = None
+        if not args.resume:
+            expected, actual = _load_run_attestation(args.expected, args.actual)
+            for field, expected_value in expected.items():
+                observed = actual.get(field)
+                if observed is None:
+                    raise ValueError(f"attestation_unattestable:{field}")
+                if observed != expected_value:
+                    raise ValueError(f"attestation_mismatch:{field}")
+
+        live_runtime = None
+        if args.live and not args.resume:
+            if args.config is None:
+                raise ValueError("live_config_required")
+            live_runtime = build_live_runtime(
+                Path(args.config).resolve(),
+                Path(args.run_root).resolve(),
+                expected_config_version=identity.config_version,
+                expected_profile_version=identity.profile_version,
+                expected_policy_version=identity.policy_version,
+            )
+
+        controller = RunController(
+            Path(args.run_root),
+            None if live_runtime is None else live_runtime.orchestrator,
+        )
+        if args.resume:
+            remaining = controller.resume(
+                Path(args.resume), identity, stages=("g1d", "g1r", "builder", "g2a")
+            )
+            report = {"status": "resumed", "remaining": remaining}
+        else:
+            assert expected is not None and actual is not None
+            report = controller.start(
+                identity,
+                actual,
+                expected=expected,
+                live=args.live,
+                live_opt_in=args.allow_live,
+                policy_opt_in=args.policy_allow_live,
+                goal=args.goal,
+                profile=None if live_runtime is None else live_runtime.profile,
+            )
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    except (
+        ValueError,
+        BackendUnavailable,
+        HeadlessCredentialError,
+        NativeCredentialError,
+    ) as exc:
+        print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
+        return 3
+    except Exception:
+        print(json.dumps({"status": "internal_error"}, sort_keys=True))
+        return 5
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     supplied = list(argv) if argv is not None else sys.argv[1:]
     import_boundary = (
@@ -214,6 +319,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         envelope = import_boundary.output_rejected()
         return 5 if _print_envelope(envelope, compact=True) else 2
     args = _parser().parse_args(argv)
+    if args.command == "trust":
+        trust_report = evaluate_production_trust()
+        print(json.dumps(trust_report.to_dict(), sort_keys=True))
+        return 0 if trust_report.status == "ready" else 3
     if args.command == "setup":
         try:
             answers = json.loads(Path(args.answers).read_text(encoding="utf-8"))
@@ -234,36 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"status": "internal_error"}, sort_keys=True))
             return 5
     if args.command == "run":
-        try:
-            identity = RunIdentity(**json.loads(Path(args.identity).read_text(encoding="utf-8")))
-            controller = RunController(Path(args.run_root))
-            if args.resume:
-                remaining = controller.resume(
-                    Path(args.resume), identity, stages=("g1d", "g1r", "builder", "g2a")
-                )
-                report = {"status": "resumed", "remaining": remaining}
-            else:
-                if not args.goal:
-                    raise ValueError("goal_required")
-                expected = json.loads(Path(args.expected).read_text(encoding="utf-8"))
-                actual = json.loads(Path(args.actual).read_text(encoding="utf-8"))
-                report = controller.start(
-                    identity,
-                    actual,
-                    expected=expected,
-                    live=args.live,
-                    live_opt_in=args.allow_live,
-                    policy_opt_in=args.policy_allow_live,
-                    goal=args.goal,
-                )
-            print(json.dumps(report, sort_keys=True))
-            return 0
-        except ValueError as exc:
-            print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
-            return 3
-        except Exception:
-            print(json.dumps({"status": "internal_error"}, sort_keys=True))
-            return 5
+        return _handle_run(args)
     if args.command in {"evidence", "fleet"}:
         try:
             trusted_public_key = _read_trusted_public_key(args.trusted_public_key)
@@ -290,7 +370,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.chat_provider is not None:
                     if args.chat_model is None:
                         raise ValueError("chat_model_required")
-                    if sys.platform != "win32":
+                    if sys.platform.startswith("linux"):
+                        capability = linux_containment_capability()
+                        if not capability.available:
+                            raise ValueError(capability.reason)
+                    elif sys.platform != "win32":
                         raise ValueError("chat_strong_containment_unavailable")
                     vault = None
                     if args.chat_provider != "claude":
@@ -400,7 +484,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report = _matrix_auth_status(args.credential_file)
                 print(json.dumps(report, sort_keys=True))
                 return int(report["exit_code"])
-            store = native_store_for_current_platform()
+            store: HeadlessEncryptedFileStore | NativeCredentialStore
+            if args.backend == "headless_encrypted_file":
+                if not isinstance(args.store_root, str):
+                    raise HeadlessCredentialError("credential_store_root_required")
+                store_root = Path(args.store_root)
+                if not store_root.is_absolute():
+                    raise HeadlessCredentialError("credential_store_absolute_required")
+                store = HeadlessEncryptedFileStore(store_root)
+            else:
+                if args.store_root is not None:
+                    raise NativeCredentialError("credential_backend_selection_invalid")
+                store = native_store_for_current_platform()
             if args.auth_command == "store":
                 secret = _read_attended_secret()
                 try:
@@ -411,8 +506,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 code = 0
             elif args.auth_command == "verify-access":
                 present = store.contains(args.provider, args.credential_ref)
+                present_status = (
+                    "present"
+                    if store.backend == "headless_encrypted_file"
+                    else "access_verified"
+                )
                 report = {
-                    "status": "access_verified" if present else "absent",
+                    "status": present_status if present else "absent",
                     "backend": store.backend,
                 }
                 code = 0 if present else 3
@@ -423,7 +523,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "backend": store.backend,
                 }
                 code = 0 if revoked else 3
-        except (BackendUnavailable, CredentialSourceError, NativeCredentialError) as exc:
+        except (
+            BackendUnavailable, CredentialSourceError, HeadlessCredentialError,
+            NativeCredentialError,
+        ) as exc:
             print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
             return 3
         print(json.dumps(report, sort_keys=True))

@@ -317,7 +317,7 @@ def _windows_current_user_sid() -> str:
         kernel32.CloseHandle(token)
 
 
-def _set_windows_owner_only_acl(path: Path) -> None:
+def _set_windows_acl_for_sid(path: Path, sid: str) -> None:
     import ctypes
     from ctypes import wintypes
 
@@ -339,6 +339,12 @@ def _set_windows_owner_only_acl(path: Path) -> None:
         ctypes.POINTER(wintypes.BOOL),
     )
     advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorOwner.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    )
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
     advapi32.SetNamedSecurityInfoW.argtypes = (
         wintypes.LPWSTR,
         wintypes.DWORD,
@@ -350,7 +356,7 @@ def _set_windows_owner_only_acl(path: Path) -> None:
     )
     advapi32.SetNamedSecurityInfoW.restype = wintypes.DWORD
     descriptor = ctypes.c_void_p()
-    sddl = f"D:P(A;;FA;;;{_windows_current_user_sid()})"
+    sddl = f"O:{sid}D:P(A;;FA;;;{sid})"
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl,
         1,
@@ -361,7 +367,15 @@ def _set_windows_owner_only_acl(path: Path) -> None:
     try:
         present = wintypes.BOOL()
         defaulted = wintypes.BOOL()
+        owner_defaulted = wintypes.BOOL()
+        owner_sid = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
+        if not advapi32.GetSecurityDescriptorOwner(
+            descriptor,
+            ctypes.byref(owner_sid),
+            ctypes.byref(owner_defaulted),
+        ) or not owner_sid.value:
+            raise OSError(_windows_last_error(), "security_descriptor_owner_failed")
         if not advapi32.GetSecurityDescriptorDacl(
             descriptor,
             ctypes.byref(present),
@@ -372,8 +386,8 @@ def _set_windows_owner_only_acl(path: Path) -> None:
         result = advapi32.SetNamedSecurityInfoW(
             str(path),
             1,
-            0x80000004,
-            None,
+            0x80000005,
+            owner_sid,
             None,
             dacl,
             None,
@@ -382,6 +396,10 @@ def _set_windows_owner_only_acl(path: Path) -> None:
             raise OSError(result, "private_key_acl_failed")
     finally:
         kernel32.LocalFree(descriptor)
+
+
+def _set_windows_owner_only_acl(path: Path) -> None:
+    _set_windows_acl_for_sid(path, _windows_current_user_sid())
 
 
 def _windows_acl_sddl(path: Path) -> str:
@@ -513,12 +531,13 @@ def _windows_acl_is_owner_only(path: Path) -> bool:
     advapi32.EqualSid.restype = wintypes.BOOL
 
     descriptor = ctypes.c_void_p()
+    owner_sid = ctypes.c_void_p()
     dacl = ctypes.c_void_p()
     result = advapi32.GetNamedSecurityInfoW(
         str(path),
         1,
-        0x00000004,
-        None,
+        0x00000005,
+        ctypes.byref(owner_sid),
         None,
         ctypes.byref(dacl),
         None,
@@ -540,6 +559,8 @@ def _windows_acl_is_owner_only(path: Path) -> bool:
         ):
             raise OSError(_windows_last_error(), "private_key_acl_control_failed")
         if not control.value & 0x1000 or not dacl.value:
+            return False
+        if not owner_sid.value or not advapi32.EqualSid(owner_sid, expected_sid):
             return False
         info = AclSizeInformation()
         if not advapi32.GetAclInformation(
@@ -593,6 +614,11 @@ def _restrict_signing_directory(path: Path, failure: str) -> None:
         os.chmod(path, 0o700)
     if not signing_file_permissions_are_restricted(path):
         raise PermissionError(failure)
+
+
+def restrict_owner_only_directory(path: Path) -> None:
+    """Restrict a sensitive runtime directory to the current OS identity."""
+    _restrict_signing_directory(path, "runtime_directory_permissions_unsafe")
 
 
 def _restrict_private_key(path: Path) -> None:

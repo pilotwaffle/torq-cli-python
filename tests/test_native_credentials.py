@@ -127,6 +127,7 @@ def test_setup_persists_only_native_refs_and_runtime_resolves_selected_provider(
 ) -> None:
     answers = _answers()
     answers["credential_refs"] = {
+        "codex": "credref_33333333333333333333333333333333",
         "deepseek": _REF,
         "kimi": "credref_11111111111111111111111111111111",
         "zai": "credref_22222222222222222222222222222222",
@@ -136,6 +137,9 @@ def test_setup_persists_only_native_refs_and_runtime_resolves_selected_provider(
     rendered = target.read_text(encoding="utf-8")
 
     assert document["credential_source"] == {"kind": "platform_keychain"}
+    assert document["connectors"]["g2a-main"]["credential_ref"] == (
+        "credref_33333333333333333333333333333333"
+    )
     assert "kind: platform_keychain" in rendered
     assert "credential_ref:" in rendered
     assert validate_config(parse_config_text(rendered), load_registry()) == ()
@@ -158,12 +162,18 @@ def test_setup_persists_only_native_refs_and_runtime_resolves_selected_provider(
     assert "KIMI_API_KEY" not in environment
 
     missing = _answers()
-    missing["credential_refs"] = {"deepseek": _REF}
-    with pytest.raises(SetupError, match="provider_credential_ref_missing:kimi,zai"):
+    missing["credential_refs"] = {
+        "deepseek": _REF,
+        "kimi": "credref_11111111111111111111111111111111",
+        "zai": "credref_22222222222222222222222222222222",
+    }
+    with pytest.raises(SetupError, match="^provider_credential_ref_missing:codex$"):
         SetupService().configure(tmp_path / "missing.yaml", missing)
+    assert not (tmp_path / "missing.yaml").exists()
 
     unknown = _answers()
     unknown["credential_refs"] = {
+        "codex": "credref_44444444444444444444444444444444",
         "deepseek": _REF,
         "kimi": "credref_11111111111111111111111111111111",
         "zai": "credref_22222222222222222222222222222222",

@@ -1,5 +1,13 @@
 # Production-readiness audit — 2026-07-24
 
+> **Historical v0.1.0 audit.** The attended headless encrypted-file backend and
+> installed live-dispatch factory are implemented in the v0.2.0 candidate.
+> Their old "unavailable" findings below describe the assessed v0.1.0 baseline,
+> not current source. Windows governed chat is production-enabled; Linux and
+> macOS chat fail closed. Production trust remains blocked by the exportable
+> local signer and same-volume anchor. No v0.2.0 CI or release evidence is
+> claimed here.
+
 Commit baseline: `6d4d5647001b35dfbea592e32a0c36370bfcb93c` on protected
 `main`, including merged PR #12 and the committed fresh-Windows evidence.
 Hosted quality run
@@ -132,11 +140,17 @@ downloaded wheel passed the isolated installation smoke test.
   can replace and reuse the private identity. Accepted for v0.1.0 with the
   documented limitation; non-exportable key storage and remote receipt
   anchoring are future hardening.
-- **Medium — headless encrypted-file credentials are unavailable.** Selection
-  fails closed. Accepted only because v0.1.0 does not claim this backend.
-- **Medium — default CLI has no production live transport factory.** The
-  authorized T-33 script proves the adapter and governed path, while installed
-  `torq run --live` refuses. Accepted only as a documented v0.1.0 boundary.
+  The machine-readable `torq trust readiness` gate now fails closed as
+  `production_signing_identity_exportable` and
+  `production_receipt_anchor_not_independent`. Platform adapters and the remote
+  service remain external delivery gates; see
+  `docs/architecture/production-trust-hardening-decision.md`.
+- **Historical Medium — headless encrypted-file credentials were unavailable.**
+  This was accepted for v0.1.0 and is resolved in the v0.2.0 candidate by the
+  explicit attended encrypted-file backend.
+- **Historical Medium — default CLI had no production live transport factory.**
+  This was accepted for v0.1.0 and is resolved in the v0.2.0 candidate by the
+  installed fail-closed dispatcher factory.
 
 ## Repository controls — active on `main`
 

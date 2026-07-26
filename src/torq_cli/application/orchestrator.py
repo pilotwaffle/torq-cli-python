@@ -758,22 +758,26 @@ class GovernedOrchestrator:
         quote = self.rate_table.quote(binding.provider_id, binding.model_id, usage)
         billed_usd: str | None
         if self.entitlement_ledger is None:
-            billed_usd = str(budget.ceiling_usd)
+            billed_usd = None
+            cost_usd = str(budget.ceiling_usd)
             cost_basis = "configured_worst_case"
+        elif budget.settlement == "plan_covered":
+            billed_usd = "0"
+            cost_usd = "0"
+            cost_basis = "plan_entitlement"
+        elif quote.metered_usd is not None:
+            billed_usd = quote.metered_usd
+            cost_usd = quote.metered_usd
+            cost_basis = "sealed_token_counts"
         else:
-            billed_usd = (
-                "0" if budget.settlement == "plan_covered" else quote.metered_usd
-            )
-            cost_basis = (
-                "sealed_token_counts"
-                if quote.pricing_status == "priced"
-                else "rate_unknown"
-            )
+            billed_usd = None
+            cost_usd = str(budget.ceiling_usd)
+            cost_basis = "configured_worst_case_rate_unknown"
         usage_rows.append(
             {
                 "provider": binding.provider_id,
                 "agent": role,
-                "cost_usd": billed_usd,
+                "cost_usd": cost_usd,
                 "billed_usd": billed_usd,
                 "metered_usd": quote.metered_usd,
                 "settlement": budget.settlement,
@@ -799,7 +803,7 @@ class GovernedOrchestrator:
                 "model": provenance.model,
                 "fallback_used": provenance.fallback_used,
                 "usage": usage,
-                "cost_usd": billed_usd,
+                "cost_usd": cost_usd,
                 "billed_usd": billed_usd,
                 "metered_usd": quote.metered_usd,
                 "settlement": budget.settlement,

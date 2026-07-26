@@ -17,7 +17,7 @@ class _Vault:
 
     def base_url(self, provider: str) -> str | None:
         assert provider == "deepseek"
-        return "https://token-plan.example/apps/anthropic"
+        return "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
 
 
 def test_plan_provider_secret_and_prompt_never_enter_argv(tmp_path: Path) -> None:

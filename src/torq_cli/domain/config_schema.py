@@ -290,15 +290,22 @@ def validate_config_shape(config: Mapping[str, Any], registry: Registry) -> tupl
             findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source"))
         else:
             source_kind = credential_source.get("kind")
-            allowed_keys = {"kind", "path"} if source_kind == "external_env" else {"kind"}
+            allowed_keys = (
+                {"kind", "path"}
+                if source_kind in {"external_env", "headless_encrypted_file"}
+                else {"kind"}
+            )
             findings.extend(reject_unknown_keys(credential_source, allowed_keys, "/credential_source"))
-            if source_kind not in {"external_env", "platform_keychain"}:
+            if source_kind not in {
+                "external_env", "platform_keychain", "headless_encrypted_file",
+            }:
                 findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/kind"))
-            if source_kind == "external_env":
+            if source_kind in {"external_env", "headless_encrypted_file"}:
                 source_path = credential_source.get("path")
                 if (
                     not isinstance(source_path, str)
                     or not source_path
+                    or "\x00" in source_path
                     or not (source_path.startswith("/") or _WINDOWS_ABSOLUTE.match(source_path))
                 ):
                     findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/path"))

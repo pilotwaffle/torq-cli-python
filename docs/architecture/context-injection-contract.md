@@ -1,6 +1,6 @@
 # Governed context injection contract
 
-Status: **Release 3 backend implemented; protected-main merge pending.**
+Status: **Release 3 backend implemented and merged before this v0.2.0 candidate.**
 
 `GovernedContextInjector` binds one active `GovernedOrchestrator` to its
 authenticated `ReceiptChain`. It is the only supported Fleet write boundary.

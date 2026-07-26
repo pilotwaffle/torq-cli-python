@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from torq_cli.connectors.credential_sources import (
 from torq_cli.domain.config_schema import parse_config_text, validate_config
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces.cli import main
+from torq_cli.safety.receipts import restrict_receipt_trust_anchor
 from test_phase5_cli_experience import _answers
 
 
@@ -31,11 +33,12 @@ def _credential_file(tmp_path: Path) -> Path:
                 'GLM_API_KEY="glm-secret"',
                 "OPENAI_API_KEY=openai-secret",
                 "QWEN_TOKEN_PLAN_API_KEY=qwen-secret",
-                "QWEN_TOKEN_PLAN_BASE_URL=https://token-plan.example/apps/anthropic",
+                "QWEN_TOKEN_PLAN_BASE_URL=https://token-plan.us-east-1.maas.aliyuncs.com/apps/anthropic",
             )
         ),
         encoding="utf-8",
     )
+    restrict_receipt_trust_anchor(source)
     return source
 
 
@@ -59,12 +62,66 @@ def test_source_is_explicit_bounded_regular_and_duplicate_keys_fail_closed(tmp_p
         ExplicitEnvVault(Path(".env"))
     oversized = tmp_path / "oversized.env"
     oversized.write_bytes(b"X" * 65_537)
+    restrict_receipt_trust_anchor(oversized)
     with pytest.raises(CredentialSourceError, match="credential_source_too_large"):
         ExplicitEnvVault(oversized)
     duplicate = tmp_path / "duplicate.env"
     duplicate.write_text("KIMI_API_KEY=one\nKIMI_API_KEY=two\n", encoding="utf-8")
+    restrict_receipt_trust_anchor(duplicate)
     with pytest.raises(CredentialSourceError, match="credential_source_duplicate_key"):
         ExplicitEnvVault(duplicate)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink contract")
+def test_external_source_rejects_symlink(tmp_path: Path) -> None:
+    source = _credential_file(tmp_path)
+    link = tmp_path / "linked.env"
+    link.symlink_to(source)
+
+    with pytest.raises(CredentialSourceError, match="credential_source_(unreadable|regular_file_required)"):
+        ExplicitEnvVault(link)
+
+
+def test_external_source_permissions_are_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "unsafe.env"
+    source.write_text("OPENAI_API_KEY=test-only\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "torq_cli.connectors.credential_sources.signing_file_permissions_are_restricted",
+        lambda _path: False,
+    )
+
+    with pytest.raises(CredentialSourceError, match="credential_source_permissions_unsafe"):
+        ExplicitEnvVault(source)
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        "https://attacker.example/apps/anthropic",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com.evil.test/apps/anthropic",
+        "https://user@token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic?redirect=1",
+        "https://token-plan.-.maas.aliyuncs.com/apps/anthropic",
+        "https://token-plan.-us.maas.aliyuncs.com/apps/anthropic",
+        "https://token-plan.us-.maas.aliyuncs.com/apps/anthropic",
+        "https://token-plan.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.maas.aliyuncs.com/apps/anthropic",
+    ],
+)
+def test_token_plan_override_is_restricted_to_canonical_alibaba_route(
+    tmp_path: Path, declared: str
+) -> None:
+    source = tmp_path / "route.env"
+    source.write_text(
+        f"QWEN_TOKEN_PLAN_API_KEY=test-only\nQWEN_TOKEN_PLAN_BASE_URL={declared}\n",
+        encoding="utf-8",
+    )
+    restrict_receipt_trust_anchor(source)
+    vault = ExplicitEnvVault(source)
+
+    with pytest.raises(CredentialSourceError, match="provider_base_url_invalid"):
+        claude_compatible_environment("deepseek", vault, {"PATH": "safe"})
 
 
 def test_provider_child_environment_contains_only_selected_secret(tmp_path: Path) -> None:
@@ -75,7 +132,9 @@ def test_provider_child_environment_contains_only_selected_secret(tmp_path: Path
     assert deepseek["PATH"] == "safe"
     assert deepseek["ANTHROPIC_AUTH_TOKEN"] == "qwen-secret"
     # The declared Token Plan region governs both plan lanes, not just qwen.
-    assert deepseek["ANTHROPIC_BASE_URL"] == "https://token-plan.example/apps/anthropic"
+    assert deepseek["ANTHROPIC_BASE_URL"] == (
+        "https://token-plan.us-east-1.maas.aliyuncs.com/apps/anthropic"
+    )
     assert deepseek["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
     assert deepseek["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "deepseek-v4-pro"
     assert deepseek["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-v4-pro"
@@ -93,7 +152,9 @@ def test_provider_child_environment_contains_only_selected_secret(tmp_path: Path
     assert zai["ANTHROPIC_MODEL"] == ""
     qwen = claude_compatible_environment("qwen", vault, base)
     assert qwen["ANTHROPIC_AUTH_TOKEN"] == "qwen-secret"
-    assert qwen["ANTHROPIC_BASE_URL"] == "https://token-plan.example/apps/anthropic"
+    assert qwen["ANTHROPIC_BASE_URL"] == (
+        "https://token-plan.us-east-1.maas.aliyuncs.com/apps/anthropic"
+    )
     assert qwen["ANTHROPIC_MODEL"] == "qwen3.8-max-preview"
     assert "openai-secret" not in qwen.values()
     with pytest.raises(CredentialSourceError, match="provider_unsupported"):
@@ -106,6 +167,52 @@ def test_provider_child_environment_contains_only_selected_secret(tmp_path: Path
         "OPENAI_MODEL": "gpt-5.5",
     }
     assert "qwen-secret" not in codex.values()
+
+
+def test_external_source_detects_path_identity_change_and_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _credential_file(tmp_path)
+    real_samestat = __import__("os").path.samestat
+    real_close = __import__("os").close
+    comparisons = 0
+    closed: list[int] = []
+
+    def changing_samestat(left, right):
+        nonlocal comparisons
+        comparisons += 1
+        return real_samestat(left, right) if comparisons == 1 else False
+
+    def tracking_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr("torq_cli.connectors.credential_sources.os.path.samestat", changing_samestat)
+    monkeypatch.setattr("torq_cli.connectors.credential_sources.os.close", tracking_close)
+
+    with pytest.raises(CredentialSourceError, match="credential_source_changed"):
+        ExplicitEnvVault(source)
+    assert len(closed) == 1
+
+
+def test_external_source_detects_permission_change_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _credential_file(tmp_path)
+    checks = 0
+
+    def changing_permissions(_path: Path) -> bool:
+        nonlocal checks
+        checks += 1
+        return checks == 1
+
+    monkeypatch.setattr(
+        "torq_cli.connectors.credential_sources.signing_file_permissions_are_restricted",
+        changing_permissions,
+    )
+
+    with pytest.raises(CredentialSourceError, match="credential_source_changed"):
+        ExplicitEnvVault(source)
 
 
 def test_auth_status_accepts_explicit_external_store_without_printing_values(
@@ -150,21 +257,29 @@ def test_setup_records_only_external_source_path_and_checks_direct_provider_keys
     assert validate_config(parsed, load_registry()) == ()
     environment = provider_environment_from_config(parsed, "deepseek", {"PATH": "safe"})
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "qwen-secret"
-    assert environment["ANTHROPIC_BASE_URL"] == "https://token-plan.example/apps/anthropic"
+    assert environment["ANTHROPIC_BASE_URL"] == (
+        "https://token-plan.us-east-1.maas.aliyuncs.com/apps/anthropic"
+    )
     assert environment["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
     codex_environment = provider_environment_from_config(parsed, "codex", {"PATH": "safe"})
     assert codex_environment["OPENAI_API_KEY"] == "openai-secret"
     assert codex_environment["OPENAI_MODEL"] == "gpt-5.5"
 
     incomplete = tmp_path / "incomplete.env"
-    incomplete.write_text("DEEPSEEK_API_KEY=only-one\n", encoding="utf-8")
+    incomplete.write_text(
+        "QWEN_TOKEN_PLAN_API_KEY=qwen\nKIMI_API_KEY=kimi\nGLM_API_KEY=glm\n",
+        encoding="utf-8",
+    )
+    restrict_receipt_trust_anchor(incomplete)
+    previous_config = target.read_bytes()
     assert main([
         "setup", "--config", str(target), "--answers", str(answers),
         "--credential-file", str(incomplete),
     ]) == 3
     assert json.loads(capsys.readouterr().out)["finding"] == (
-        "provider_credential_missing:deepseek,kimi,zai"
+        "provider_credential_missing:codex"
     )
+    assert target.read_bytes() == previous_config
 
 
 def test_managed_process_loads_saved_source_and_scopes_child_environment(

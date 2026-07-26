@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -13,6 +14,9 @@ from enum import Enum
 from io import BufferedReader
 from typing import Any
 
+from torq_cli.adapters.macos_containment import require_macos_strong_containment
+from torq_cli.adapters.linux_cgroup import LinuxSystemdCgroup
+from torq_cli.adapters.linux_containment import linux_containment_capability
 from torq_cli.adapters.owned_stream import BoundedEventStream, ProcessChannel, ProcessEvent
 from torq_cli.adapters.windows_job import WindowsJob, cpython_process_handle
 
@@ -90,15 +94,16 @@ class ExitObservation:
 
 
 class OwnedProcess:
-    """Own one Windows process tree and expose bounded provisional output.
+    """Own one kernel-contained process tree and expose bounded provisional output.
 
-    The actual provider is created suspended, assigned to a kill-on-close Job
-    Object, and only then resumed. POSIX process groups cannot prevent
-    ``setsid()`` escape or PGID reuse, so this spike fails closed there until a
-    kernel-backed containment adapter exists.
+    Windows creates the provider suspended, assigns it to a kill-on-close Job
+    Object, and only then resumes it. Linux delegates pre-exec placement and
+    whole-cgroup termination to a protected transient systemd service. Other
+    platforms fail closed; process groups are never treated as ownership.
     """
 
     _CREATE_SUSPENDED = 0x00000004
+    _EXPERIMENTAL_LINUX = False
 
     def __init__(
         self,
@@ -112,8 +117,14 @@ class OwnedProcess:
     ) -> None:
         if not command or any(not isinstance(part, str) or "\x00" in part for part in command):
             raise ValueError("owned_process_command_invalid")
-        if os.name != "nt":
+        if sys.platform == "darwin":
+            require_macos_strong_containment()
+        if os.name != "nt" and not sys.platform.startswith("linux"):
             raise OSError("owned_process_strong_containment_unavailable")
+        if sys.platform.startswith("linux") and not self._EXPERIMENTAL_LINUX:
+            capability = linux_containment_capability()
+            if not capability.available:
+                raise OSError("owned_process_strong_containment_unavailable")
         if len(subprocess.list2cmdline(command)) > 32_767:
             raise ValueError("owned_process_command_too_large")
         if event_capacity_bytes < len(b"stream_overflow"):
@@ -125,7 +136,14 @@ class OwnedProcess:
 
         self._events = BoundedEventStream(event_capacity_bytes)
         self._chunk_size = chunk_size
-        self._job = WindowsJob()
+        self._windows_job = WindowsJob() if os.name == "nt" else None
+        self._linux_job = LinuxSystemdCgroup() if os.name != "nt" else None
+        if self._windows_job is not None:
+            self._job: WindowsJob | LinuxSystemdCgroup = self._windows_job
+        elif self._linux_job is not None:
+            self._job = self._linux_job
+        else:
+            raise OSError("owned_process_strong_containment_unavailable")
         self._lifecycle = threading.Condition(threading.RLock())
         self._stopping = False
         self._cleaning = False
@@ -139,19 +157,39 @@ class OwnedProcess:
 
         process: subprocess.Popen[bytes]
         try:
+            launch_command = command
+            launch_environment = dict(env)
+            launch_input = input_data
+            creation_flags = self._CREATE_SUSPENDED
+            if os.name != "nt":
+                linux_job = self._linux_job
+                if linux_job is None:
+                    raise OSError("owned_process_strong_containment_unavailable")
+                launch_command = linux_job.launch_command(command, cwd=cwd)
+                launch_environment = linux_job.launcher_environment(env)
+                launch_input = linux_job.framed_input(env, input_data)
+                creation_flags = 0
             process = subprocess.Popen(
-                command,
+                launch_command,
                 cwd=cwd,
-                env=dict(env),
-                stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+                env=launch_environment,
+                stdin=subprocess.PIPE if launch_input is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=self._CREATE_SUSPENDED,
+                creationflags=creation_flags,
                 bufsize=0,
             )
-            process_handle = cpython_process_handle(process)
-            self._job.assign_process_handle(process_handle)
-            self._job.resume_process_handle(process_handle)
+            if os.name == "nt":
+                windows_job = self._windows_job
+                if windows_job is None:
+                    raise OSError("owned_process_strong_containment_unavailable")
+                process_handle = cpython_process_handle(process)
+                windows_job.assign_process_handle(process_handle)
+                windows_job.resume_process_handle(process_handle)
+            else:
+                if linux_job is None:
+                    raise OSError("owned_process_strong_containment_unavailable")
+                linux_job.bind_process(process)
         except BaseException:
             try:
                 self._cleanup_failed_start(locals().get("process"))
@@ -160,10 +198,10 @@ class OwnedProcess:
             raise
         self._process = process
         self._stdin_writer: threading.Thread | None = None
-        if input_data is not None:
+        if launch_input is not None:
             self._stdin_writer = threading.Thread(
                 target=self._write_input,
-                args=(input_data,),
+                args=(launch_input, os.name == "nt"),
                 daemon=True,
             )
             self._stdin_writer.start()
@@ -186,6 +224,8 @@ class OwnedProcess:
     @property
     def pid(self) -> int:
         """Return the owned leader PID without exposing its process handle."""
+        if self._linux_job is not None and self._linux_job.leader_pid is not None:
+            return self._linux_job.leader_pid
         return self._process.pid
 
     @property
@@ -235,7 +275,7 @@ class OwnedProcess:
             thread.start()
         return threads
 
-    def _write_input(self, content: bytes) -> None:
+    def _write_input(self, content: bytes, close_stream: bool = True) -> None:
         stream = self._process.stdin
         if stream is None:
             return
@@ -254,10 +294,11 @@ class OwnedProcess:
                         self._background_error = exc
         finally:
             remaining.release()
-            try:
-                stream.close()
-            except (OSError, ValueError):
-                pass
+            if close_stream:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
 
     def _drain(self, channel: ProcessChannel, stream: BufferedReader) -> None:
         try:
@@ -362,7 +403,10 @@ class OwnedProcess:
         forced = state is not ContainmentState.KNOWN_EMPTY
         if forced:
             self._force_requested = True
-            self._job.terminate()
+            if self._linux_job is not None:
+                self._linux_job.terminate(timeout=max(0.001, deadline - time.monotonic()))
+            else:
+                self._job.terminate()
         self._wait_root(max(0.0, deadline - time.monotonic()))
         state, active = self._containment()
         while state is ContainmentState.KNOWN_ACTIVE and time.monotonic() < deadline:
@@ -502,3 +546,9 @@ class OwnedProcess:
         """Stop and close the owned boundary."""
         del exc_type, exc, traceback
         self.close()
+
+
+class ExperimentalLinuxOwnedProcess(OwnedProcess):
+    """Exercise user-systemd behavior without advertising production ownership."""
+
+    _EXPERIMENTAL_LINUX = True

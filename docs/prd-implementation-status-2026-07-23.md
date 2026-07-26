@@ -1,5 +1,14 @@
 # PRD r5 implementation status — 2026-07-24
 
+This is the v0.1.0 historical record. Since that release, the attended headless
+encrypted-file backend and installed `torq run --live` dispatcher factory have
+been implemented. Governed Fleet chat is production-enabled on Windows; Linux
+and macOS fail closed for the platform-specific containment reasons documented
+in `architecture/governed-chat-runtime.md`. Local production trust remains
+blocked by an exportable signing identity and a same-volume receipt anchor. No
+v0.2.0 protected-main CI, tag, signature, or published release is claimed by
+this update.
+
 Current protected-main baseline: `8d5f014218f3e7d1ff2f91c1ae3a28abed425fb9`.
 Hosted quality run
 [`30160472701`](https://github.com/pilotwaffle/torq-cli-python/actions/runs/30160472701)
@@ -44,14 +53,14 @@ complete.
 | T-05 | Complete | Standalone Python repository, wheel/pipx distribution, OS implications, and one version source are documented. |
 | T-07 | Complete | Hermetic Windows/macOS/Linux/headless CI is green. `main` currently requires the strict four-job matrix, admin enforcement, linear history, and conversation resolution; force-push and deletion are disabled. |
 | T-08–T-12 | Complete | Provider-neutral engine, graph, routing, redaction, retry/budget contracts, and conformance fixtures pass. |
-| T-13–T-20 | Complete at the injected-transport boundary | Six connector contracts, auth/health status, explicit credential-source handling, and credential-free conformance pass. There is no standalone production transport factory. |
+| T-13–T-20 | Complete; v0.2.0 extended | Six connector contracts, auth/health status, explicit credential-source handling, and credential-free conformance pass. The v0.2.0 candidate adds the installed live transport factory. |
 | T-21 | Complete | The manual-only runner produced `docs/evidence/live-smoke-2026-07-24.json`: all six provider smokes passed with resolved-model identity and usage metadata. The report is machine-generated, secret-free, and explicitly non-receipt-backed. SHA-256: `9B09AC38AAA4092860EFA4FE8AF9241D7C3F0C876ADE1852FC92F88F5290EE17`. |
 | T-22–T-27 | Complete | Isolation, execution policy, governed orchestration, bounded repair/re-audit, approval, usage, encrypted artifacts, and receipt verification pass. The `.pub`-swap exploit is replayed end-to-end and rejected as `trust_anchor_substituted`; unsafe/missing identity variants also fail closed. |
-| T-28–T-31 | Complete at the implemented boundary | Setup, dry-run, injected live orchestration, cancellation/resume, effective status, and evidence verification exist. Standalone `torq run --live` fails before creating a run with `live_dispatcher_required`. |
+| T-28–T-31 | Complete; v0.2.0 extended | Setup, dry-run, orchestration, cancellation/resume, effective status, and evidence verification exist. The v0.2.0 candidate adds the installed fail-closed `torq run --live` dispatcher factory. |
 | T-32 | Complete for merged-main baseline `6d4d564` | The refreshed audit resolves live-provider and three-OS native credential evidence, verifies the receipt bundle and repository controls, and records only the explicitly authorized signed release identity/artifacts as the remaining T-36 gate. |
 | T-33 | Complete | The authorized proposal-only runner dispatched G1D/G1R/Builder/G2A across Anthropic, DeepSeek, and OpenAI, verified exact profile-bound model identities, and stopped at `awaiting_approval`. The portable signed receipt bundle verifies against its separately exported public key; no application transition occurred. Report SHA-256: `77CE748C5054DE8B525835287CA32F7DCB17B79101C66E71A99B8E450016B262`. |
 | T-34 | Complete | `SECURITY.md` distinguishes the authenticated private identity from the mutable public-key cache and states the same-principal/private-identity limitation. |
-| T-35 | Complete for native attended backends | Fresh hosted Windows, macOS, and Linux runners verified and installed the same exact wheel, then passed native store/resolve/revoke/absence operations with generated ephemeral values and `secret_persisted: false`. The Windows evidence report is `docs/evidence/native-credential-windows-2026-07-24.json`, SHA-256 `54F026CC0CDB0D2D8957519B648072B62121F07892224C1159697BE464BAF8FE`. The separately gated headless encrypted-file contract remains unimplemented and fails closed. |
+| T-35 | Complete for native attended backends; v0.2.0 headless implementation added | Fresh hosted Windows, macOS, and Linux runners verified v0.1.0 native operations. The v0.2.0 candidate adds the explicit attended headless encrypted-file backend; fresh clean-machine headless effectiveness remains a separate release gate. |
 | T-36 | Complete | Signed annotated tag `v0.1.0` targets protected-main commit `f6df23e`; GitHub reports its registered Ed25519 signature `verified: true` with reason `valid`. The public release contains the wheel, source archive, `SHA256SUMS`, and the signed checksum manifest. Re-downloaded hashes and signature verified, and the published wheel passed an isolated install smoke test. |
 
 ## Verification
@@ -111,7 +120,7 @@ revoke, and absence checks with `secret_persisted: false`. Machine report:
 | --- | --- | --- | --- |
 | T-36 | Signed `v0.1.0` tag, immutable artifact hashes, checksum signature, public GitHub release, and clean re-download verification | King Flowers explicitly authorized signing/publication on 2026-07-24 | Complete: `https://github.com/pilotwaffle/torq-cli-python/releases/tag/v0.1.0`. |
 
-All PRD r5 tasks through T-36 are now complete at their documented boundaries.
-Headless encrypted-file credentials, remote receipt anchoring, non-exportable
-signing identity, and turnkey default CLI live transport remain explicitly
-separate future work rather than incomplete v0.1.0 claims.
+All PRD r5 tasks through T-36 remain complete at their documented v0.1.0
+boundaries. Headless encrypted-file credentials and the turnkey installed live
+dispatcher are now implemented. Remote receipt anchoring and non-exportable
+signing identity remain external production-trust prerequisites.

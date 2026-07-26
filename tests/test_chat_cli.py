@@ -24,7 +24,7 @@ class _Server:
         return
 
 
-@pytest.mark.skipif(cli.sys.platform != "win32", reason="strong Windows containment only")
+@pytest.mark.skipif(cli.sys.platform != "win32", reason="production chat is Windows-only")
 def test_fleet_chat_cli_requires_explicit_provider_and_wires_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -92,3 +92,40 @@ def test_fleet_chat_cli_fails_closed_without_model(
     report = json.loads(capsys.readouterr().out)
     assert result == 3
     assert report == {"finding": "chat_model_required", "status": "blocked"}
+
+
+def test_fleet_chat_cli_macos_refuses_before_keys_or_provider_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_root = tmp_path / "must-not-be-created"
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("macOS preflight must precede key and provider setup")
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "FileRunKeyStore", forbidden)
+    monkeypatch.setattr(cli, "ChatProviderCommandFactory", forbidden)
+    monkeypatch.setattr(cli, "create_fleet_server", forbidden)
+
+    result = cli.main(
+        [
+            "fleet",
+            "--run-root",
+            str(run_root),
+            "--serve",
+            "--chat-provider",
+            "claude",
+            "--chat-model",
+            "claude-opus-4-8",
+        ]
+    )
+
+    assert result == 3
+    assert json.loads(capsys.readouterr().out) == {
+        "finding": "chat_strong_containment_unavailable",
+        "status": "blocked",
+    }
+    assert not run_root.exists()

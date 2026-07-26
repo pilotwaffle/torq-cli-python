@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from torq_cli.adapters import linux_cgroup
+from torq_cli.adapters.linux_cgroup import LinuxSystemdCgroup
+from torq_cli.adapters.process import ContainmentState, OwnedProcess
+from torq_cli.connectors.credential_sources import safe_child_environment
+
+
+def _bare_owner(tmp_path: Path) -> LinuxSystemdCgroup:
+    owner = object.__new__(LinuxSystemdCgroup)
+    owner.unit = "torq-chat-contract.service"
+    owner._control_group = tmp_path
+    owner._leader_pid = 42
+    owner._started = True
+    owner._environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    }
+    owner._systemd_run = "/usr/bin/systemd-run"
+    owner._systemctl = "/usr/bin/systemctl"
+    owner._stat = "/usr/bin/stat"
+    return owner
+
+
+def test_command_has_pre_exec_systemd_guards_and_no_provider_secrets(tmp_path: Path) -> None:
+    owner = _bare_owner(tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(linux_cgroup.os, "getuid", lambda: 1000, raising=False)
+    try:
+        command = owner.launch_command(("provider", "--model", "safe"), cwd=str(tmp_path))
+    finally:
+        monkeypatch.undo()
+    joined = " ".join(command)
+    assert "--service-type=exec" in command
+    assert "--property=KillMode=control-group" in command
+    assert "--property=ProtectControlGroups=yes" in command
+    inaccessible = next(part for part in command if part.startswith("--property=InaccessiblePaths="))
+    assert "/run/user/1000/bus" in inaccessible
+    assert "/run/user/1000/systemd" in inaccessible
+    assert "/run/dbus/system_bus_socket" in inaccessible
+    assert "/run/systemd/private" in inaccessible
+    assert "/proc" in inaccessible
+    assert "--property=RestrictAddressFamilies=AF_INET AF_INET6" in command
+    assert "torq_cli.adapters.linux_cgroup_exec" in command
+    assert "API_SECRET" not in joined
+    systemd_boundary = command.index("--")
+    helper_boundary = command.index("--", systemd_boundary + 1)
+    assert command[0] == "/usr/bin/systemd-run"
+    assert command[systemd_boundary + 1] == sys.executable
+    assert command[helper_boundary + 1 :] == ("provider", "--model", "safe")
+
+    environment = owner.launcher_environment(
+        {
+            "PATH": "/usr/bin",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "ANTHROPIC_AUTH_TOKEN": "API_SECRET",
+        }
+    )
+    # User-bus coordinates come only from the ambient values captured by the
+    # owner; provider-controlled values cannot redirect the control plane.
+    assert environment == {
+        "PATH": "/usr/bin",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    }
+
+
+def test_path_and_working_directory_shadows_never_replace_pinned_control_binary(
+    tmp_path: Path,
+) -> None:
+    owner = _bare_owner(tmp_path)
+    (tmp_path / "systemd-run").write_text("attacker", encoding="utf-8")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(linux_cgroup.os, "getuid", lambda: 1000, raising=False)
+    try:
+        command = owner.launch_command(("provider",), cwd=str(tmp_path))
+    finally:
+        monkeypatch.undo()
+    launcher_environment = owner.launcher_environment({"PATH": str(tmp_path)})
+    assert command[0] == "/usr/bin/systemd-run"
+    assert command[0] != str(tmp_path / "systemd-run")
+    assert launcher_environment["PATH"] == str(tmp_path)
+
+
+def test_production_child_environment_does_not_break_private_user_bus_launcher(
+    tmp_path: Path,
+) -> None:
+    owner = _bare_owner(tmp_path)
+    owner._environment = {
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "HOME": "/home/operator",
+    }
+    child = safe_child_environment(
+        {
+            **owner._environment,
+            "PATH": "/usr/bin",
+            "ANTHROPIC_AUTH_TOKEN": "ambient-must-not-survive",
+        }
+    )
+    child["ANTHROPIC_AUTH_TOKEN"] = "provider-secret"
+
+    launcher = owner.launcher_environment(child)
+    frame = owner.framed_input(child, b"hello")
+    env_size = int.from_bytes(frame[:4], "big")
+    provider = json.loads(frame[4 : 4 + env_size])
+
+    assert launcher["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    assert launcher["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert "ANTHROPIC_AUTH_TOKEN" not in launcher
+    assert "DBUS_SESSION_BUS_ADDRESS" not in provider
+    assert "XDG_RUNTIME_DIR" not in provider
+    assert provider["ANTHROPIC_AUTH_TOKEN"] == "provider-secret"
+
+
+def test_environment_and_prompt_are_private_stdin_frame() -> None:
+    frame = LinuxSystemdCgroup.framed_input(
+        {"ANTHROPIC_AUTH_TOKEN": "secret", "LANG": "C.UTF-8"}, b"hello"
+    )
+    env_size = int.from_bytes(frame[:4], "big")
+    environment = json.loads(frame[4 : 4 + env_size])
+    prompt_start = 4 + env_size
+    prompt_size = int.from_bytes(frame[prompt_start : prompt_start + 8], "big")
+    assert environment["ANTHROPIC_AUTH_TOKEN"] == "secret"
+    assert frame[prompt_start + 8 :] == b"hello"
+    assert prompt_size == 5
+
+
+def test_contained_supervisor_forwards_prompt_and_environment() -> None:
+    command = (
+        sys.executable,
+        "-m",
+        "torq_cli.adapters.linux_cgroup_exec",
+        "--",
+        sys.executable,
+        "-c",
+        "import os,sys; print(os.environ['TOKEN']); print(sys.stdin.read())",
+    )
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdin is not None
+    process.stdin.write(LinuxSystemdCgroup.framed_input({"TOKEN": "private"}, b"prompt"))
+    process.stdin.flush()
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == b"private"
+    assert process.stdout.readline().strip() == b"prompt"
+    assert process.wait(timeout=10) == 0
+
+
+def test_population_is_read_from_kernel_cgroup_events(tmp_path: Path) -> None:
+    owner = _bare_owner(tmp_path)
+    (tmp_path / "cgroup.events").write_text("populated 1\nfrozen 0\n", encoding="ascii")
+    assert owner.active_processes() == 1
+    (tmp_path / "cgroup.events").write_text("populated 0\nfrozen 0\n", encoding="ascii")
+    assert owner.active_processes() == 0
+
+
+def test_missing_population_is_unknown_not_empty(tmp_path: Path) -> None:
+    owner = _bare_owner(tmp_path)
+    (tmp_path / "cgroup.events").write_text("frozen 0\n", encoding="ascii")
+    with pytest.raises(OSError, match="population_invalid"):
+        owner.active_processes()
+
+
+def test_disappeared_cgroup_is_empty_only_after_unit_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+    owner._control_group = tmp_path / "collected-unit"
+    monkeypatch.setattr(linux_cgroup, "_filesystem_type", lambda path, stat: "cgroup2fs")
+    assert owner.active_processes() == 0
+
+
+def test_disappeared_cgroup_is_unknown_if_unified_mount_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+    owner._control_group = tmp_path / "collected-unit"
+    monkeypatch.setattr(linux_cgroup, "_filesystem_type", lambda path, stat: "tmpfs")
+    with pytest.raises(OSError, match="observation_unavailable"):
+        owner.active_processes()
+
+
+def test_cgroup_path_rejects_traversal() -> None:
+    with pytest.raises(OSError, match="path_invalid"):
+        linux_cgroup._cgroup_path("/../../tmp")
+
+
+def test_show_parses_properties_without_assuming_systemd_output_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+
+    def completed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            ["systemctl"],
+            0,
+            "MainPID=77\nControlGroup=/user.slice/torq.service\nActiveState=active\n",
+            "",
+        )
+
+    monkeypatch.setattr(linux_cgroup.subprocess, "run", completed)
+    assert owner._show() == ("active", 77, "/user.slice/torq.service")
+
+
+def test_kill_targets_every_cgroup_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+    captured: list[tuple[str, ...]] = []
+
+    def completed(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        captured.append(command)
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(linux_cgroup.subprocess, "run", completed)
+    owner._kill_unit()
+    assert "--kill-who=all" in captured[0]
+    assert "--signal=KILL" in captured[0]
+
+
+def test_hung_systemd_control_calls_fail_with_bounded_stable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+    captured_timeouts: list[float] = []
+
+    def hung(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, float)
+        captured_timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(linux_cgroup.subprocess, "run", hung)
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        owner._show(timeout=0.01)
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        owner._kill_unit(timeout=0.02)
+    monkeypatch.setattr(owner, "active_processes", lambda: 0)
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        owner.close()
+    with pytest.raises(OSError, match="systemd_control_timeout"):
+        linux_cgroup._filesystem_type(Path("/sys/fs/cgroup"), "/usr/bin/stat")
+    assert captured_timeouts == [
+        0.01,
+        0.02,
+        linux_cgroup._CONTROL_TIMEOUT,
+        linux_cgroup._CONTROL_TIMEOUT,
+    ]
+
+
+def test_control_timeout_cannot_be_projected_as_known_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _bare_owner(tmp_path)
+    process = object.__new__(OwnedProcess)
+    process._job = owner
+    monkeypatch.setattr(
+        owner,
+        "active_processes",
+        lambda: (_ for _ in ()).throw(OSError("owned_process_systemd_control_timeout")),
+    )
+
+    assert process._containment() == (ContainmentState.UNKNOWN, None)
+
+
+def test_control_binary_resolution_rejects_relative_or_untrusted_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(linux_cgroup.shutil, "which", lambda name, path=None: "relative")
+    with pytest.raises(OSError, match="systemd_unavailable"):
+        linux_cgroup._trusted_system_tool("systemd-run")
+
+    attacker = tmp_path / "systemctl"
+    attacker.write_text("attacker", encoding="utf-8")
+    monkeypatch.setattr(
+        linux_cgroup.shutil, "which", lambda name, path=None: str(attacker.resolve())
+    )
+    with pytest.raises(OSError, match="systemd_unavailable"):
+        linux_cgroup._trusted_system_tool("systemctl")
+
+
+@pytest.mark.parametrize(
+    ("platform", "systemd", "systemctl", "filesystem", "message"),
+    (
+        ("darwin", "/bin/systemd-run", "/bin/systemctl", "cgroup2fs", "strong"),
+        ("linux", None, "/bin/systemctl", "cgroup2fs", "systemd"),
+        ("linux", "/bin/systemd-run", "/bin/systemctl", "tmpfs", "cgroup_v2"),
+    ),
+)
+def test_feature_detection_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    systemd: str | None,
+    systemctl: str | None,
+    filesystem: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(linux_cgroup.sys, "platform", platform)
+    monkeypatch.setattr(
+        linux_cgroup.shutil,
+        "which",
+        lambda command, path=None: systemd if command == "systemd-run" else systemctl,
+    )
+    monkeypatch.setattr(linux_cgroup, "_trusted_system_tool", lambda name: f"/usr/bin/{name}")
+    if systemd is None:
+        monkeypatch.setattr(
+            linux_cgroup,
+            "_trusted_system_tool",
+            lambda name: (_ for _ in ()).throw(OSError("owned_process_systemd_unavailable")),
+        )
+    monkeypatch.setattr(linux_cgroup, "_filesystem_type", lambda path, stat: filesystem)
+    with pytest.raises(OSError, match=message):
+        LinuxSystemdCgroup()

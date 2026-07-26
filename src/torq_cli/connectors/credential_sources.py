@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
@@ -11,6 +13,11 @@ from torq_cli.connectors.native_credentials import (
     ConfiguredNativeVault,
     native_store_for_current_platform,
 )
+from torq_cli.connectors.headless_credentials import (
+    ConfiguredHeadlessVault,
+    HeadlessEncryptedFileStore,
+)
+from torq_cli.safety.receipts import signing_file_permissions_are_restricted
 
 
 MAX_CREDENTIAL_SOURCE_BYTES = 65_536
@@ -34,6 +41,12 @@ _PROVIDER_BASE_URL_KEYS: Mapping[str, tuple[str, ...]] = {
 # The Token Plan is regional. This is the documented default host; an operator
 # entitled to another region names it in their credential source and it wins.
 _TOKEN_PLAN_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
+_TOKEN_PLAN_URL = re.compile(
+    r"https://token-plan\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"\.maas\.aliyuncs\.com(?::443)?/apps/anthropic\Z"
+)
+_BINARY = getattr(os, "O_BINARY", 0)
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _SAFE_CHILD_KEYS = frozenset({
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
     "LANG", "LC_ALL", "HOME", "USERPROFILE",
@@ -61,6 +74,8 @@ class CredentialSourceError(ValueError):
 
 class CredentialVault(Protocol):
     def get(self, provider: str) -> str | None: ...
+
+    def base_url(self, provider: str) -> str | None: ...
 
 
 def _unquote(value: str) -> str:
@@ -91,22 +106,54 @@ def _parse_env(payload: bytes) -> dict[str, str]:
     return parsed
 
 
+def _valid_token_plan_base_url(value: str) -> bool:
+    return _TOKEN_PLAN_URL.fullmatch(value) is not None
+
+
 class ExplicitEnvVault:
     """Read a bounded, explicit external env file without copying it into TORQ."""
 
     def __init__(self, source: Path) -> None:
         if not source.is_absolute():
             raise CredentialSourceError("credential_source_absolute_required")
+        descriptor = -1
         try:
-            if source.is_symlink() or not source.is_file():
+            descriptor = os.open(source, os.O_RDONLY | _BINARY | _NOFOLLOW)
+            before = os.fstat(descriptor)
+            if source.is_symlink() or not stat.S_ISREG(before.st_mode):
                 raise CredentialSourceError("credential_source_regular_file_required")
-            if source.stat().st_size > MAX_CREDENTIAL_SOURCE_BYTES:
+            if not signing_file_permissions_are_restricted(source):
+                raise CredentialSourceError("credential_source_permissions_unsafe")
+            path_before = source.stat(follow_symlinks=False)
+            if not os.path.samestat(before, path_before):
+                raise CredentialSourceError("credential_source_changed")
+            if before.st_size > MAX_CREDENTIAL_SOURCE_BYTES:
                 raise CredentialSourceError("credential_source_too_large")
-            payload = source.read_bytes()
+            chunks: list[bytes] = []
+            remaining = MAX_CREDENTIAL_SOURCE_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(16_384, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            after = os.fstat(descriptor)
+            path_after = source.stat(follow_symlinks=False)
+            if (
+                not os.path.samestat(before, after)
+                or not os.path.samestat(after, path_after)
+                or before.st_size != after.st_size
+                or not signing_file_permissions_are_restricted(source)
+            ):
+                raise CredentialSourceError("credential_source_changed")
         except CredentialSourceError:
             raise
         except OSError as exc:
             raise CredentialSourceError("credential_source_unreadable") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         if len(payload) > MAX_CREDENTIAL_SOURCE_BYTES:
             raise CredentialSourceError("credential_source_too_large")
         self._values = _parse_env(payload)
@@ -132,6 +179,45 @@ class ExplicitEnvVault:
         return None
 
 
+def credential_vault_from_config(config: Mapping[str, object]) -> CredentialVault:
+    """Resolve one explicit credential source without consulting ambient secrets."""
+    source = config.get("credential_source")
+    if not isinstance(source, Mapping):
+        raise CredentialSourceError("credential_source_missing")
+    if source.get("kind") == "external_env" and set(source) == {"kind", "path"}:
+        path = source.get("path")
+        if not isinstance(path, str):
+            raise CredentialSourceError("credential_source_invalid")
+        return ExplicitEnvVault(Path(path))
+    kind = source.get("kind")
+    if kind in {"platform_keychain", "headless_encrypted_file"}:
+        expected_keys = {"kind"} if kind == "platform_keychain" else {"kind", "path"}
+        if set(source) != expected_keys:
+            raise CredentialSourceError("credential_source_invalid")
+        connectors = config.get("connectors")
+        if not isinstance(connectors, Mapping):
+            raise CredentialSourceError("credential_source_invalid")
+        references: dict[str, str] = {}
+        for raw in connectors.values():
+            if not isinstance(raw, Mapping):
+                continue
+            provider_id = raw.get("provider_id")
+            credential_ref = raw.get("credential_ref")
+            if isinstance(provider_id, str) and isinstance(credential_ref, str):
+                if provider_id in references and references[provider_id] != credential_ref:
+                    raise CredentialSourceError("credential_source_invalid")
+                references[provider_id] = credential_ref
+        if kind == "platform_keychain":
+            return ConfiguredNativeVault(native_store_for_current_platform(), references)
+        raw_path = source.get("path")
+        if not isinstance(raw_path, str):
+            raise CredentialSourceError("credential_source_invalid")
+        return ConfiguredHeadlessVault(
+            HeadlessEncryptedFileStore(Path(raw_path)), references
+        )
+    raise CredentialSourceError("credential_source_invalid")
+
+
 def claude_compatible_environment(
     provider: str,
     vault: CredentialVault,
@@ -154,7 +240,7 @@ def claude_compatible_environment(
         reader = getattr(vault, "base_url", None)
         declared = reader(normalized) if callable(reader) else None
         if declared is not None:
-            if not isinstance(declared, str) or not declared.startswith("https://"):
+            if not isinstance(declared, str) or not _valid_token_plan_base_url(declared):
                 raise CredentialSourceError("provider_base_url_invalid")
             base_url = declared
     child = safe_child_environment(base_environment)
@@ -206,31 +292,7 @@ def provider_environment_from_config(
     base_environment: Mapping[str, str],
 ) -> dict[str, str]:
     """Resolve the saved source and build one production child environment."""
-    source = config.get("credential_source")
-    if not isinstance(source, Mapping):
-        raise CredentialSourceError("credential_source_missing")
-    if source.get("kind") == "external_env" and set(source) == {"kind", "path"}:
-        path = source.get("path")
-        if not isinstance(path, str):
-            raise CredentialSourceError("credential_source_invalid")
-        vault: CredentialVault = ExplicitEnvVault(Path(path))
-    elif source.get("kind") == "platform_keychain" and set(source) == {"kind"}:
-        connectors = config.get("connectors")
-        if not isinstance(connectors, Mapping):
-            raise CredentialSourceError("credential_source_invalid")
-        references: dict[str, str] = {}
-        for raw in connectors.values():
-            if not isinstance(raw, Mapping):
-                continue
-            provider_id = raw.get("provider_id")
-            credential_ref = raw.get("credential_ref")
-            if isinstance(provider_id, str) and isinstance(credential_ref, str):
-                if provider_id in references and references[provider_id] != credential_ref:
-                    raise CredentialSourceError("credential_source_invalid")
-                references[provider_id] = credential_ref
-        vault = ConfiguredNativeVault(native_store_for_current_platform(), references)
-    else:
-        raise CredentialSourceError("credential_source_invalid")
+    vault = credential_vault_from_config(config)
     if provider.casefold() == "codex":
         return openai_compatible_environment(provider, vault, base_environment)
     return claude_compatible_environment(provider, vault, base_environment)
@@ -242,6 +304,7 @@ __all__ = [
     "ExplicitEnvVault",
     "MAX_CREDENTIAL_SOURCE_BYTES",
     "claude_compatible_environment",
+    "credential_vault_from_config",
     "openai_compatible_environment",
     "provider_environment_from_config",
     "safe_child_environment",

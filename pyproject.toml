@@ -4,10 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torq-cli"
-version = "0.1.0"
-description = "Offline TORQ governance profile validator"
+version = "0.2.0"
+description = "Governed multi-provider agent runner and evidence-backed Fleet control surface"
 requires-python = ">=3.11"
-dependencies = ["cryptography>=42.0", "keyring>=25.7,<26", "PyYAML>=6.0"]
+dependencies = [
+    "cryptography>=44.0",
+    "keyring>=25.7,<26",
+    "PyNaCl>=1.5,<2",
+    "PyYAML>=6.0",
+]
 
 [project.optional-dependencies]
 dev = [

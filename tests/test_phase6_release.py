@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import tomllib
 
+from torq_cli import __version__
 from torq_cli.application.e2e import run_governed_fixture
 from torq_cli.interfaces.cli import main
 from torq_cli.safety.receipts import verify_receipt_store
@@ -35,7 +37,7 @@ def test_audit_security_install_and_release_documents_cover_contracts() -> None:
     assert "vendor SDKs/CLIs may contact" in security
     install = Path("docs/install.md").read_text(encoding="utf-8")
     assert "Windows" in install and "macOS" in install and "Linux" in install
-    notes = Path("docs/releases/torq-cli-v0.1.0.md").read_text(encoding="utf-8")
+    notes = Path("docs/releases/torq-cli-v0.2.0.md").read_text(encoding="utf-8")
     assert "SECURITY.md" in notes and "production-readiness audit" in notes and "Non-goals" in notes
 
 
@@ -45,5 +47,11 @@ def test_version_cli_uses_distribution_source_of_truth(capsys) -> None:
     except SystemExit as exc:
         code = int(exc.code or 0)
     assert code == 0
-    assert capsys.readouterr().out.strip() == "torq 0.1.0"
+    assert capsys.readouterr().out.strip() == "torq 0.2.0"
 
+
+def test_release_version_metadata_and_candidate_notes_agree() -> None:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["version"] == __version__ == "0.2.0"
+    assert Path("docs/releases/torq-cli-v0.2.0.md").is_file()
+    assert "0.2.0" in Path("docs/install.md").read_text(encoding="utf-8")

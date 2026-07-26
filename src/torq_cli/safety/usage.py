@@ -40,6 +40,7 @@ def summarize_usage(receipts: Sequence[dict[str, Any]], *, budget_usd: float) ->
     agents: dict[str, dict[str, Any]] = {}
     consumed = Decimal(0)
     billed = Decimal(0)
+    billed_known = True
     metered = Decimal(0)
     plan_roles: set[str] = set()
     metered_roles: set[str] = set()
@@ -50,8 +51,15 @@ def summarize_usage(receipts: Sequence[dict[str, Any]], *, budget_usd: float) ->
         cost = _money(raw_cost)
         consumed += cost
         raw_billed = receipt.get("billed_usd", raw_cost)
+        if (
+            "billed_usd" not in receipt
+            and str(receipt.get("cost_basis", "")).startswith("configured_worst_case")
+        ):
+            raw_billed = None
         if raw_billed is not None:
             billed += _money(raw_billed)
+        else:
+            billed_known = False
         raw_metered = receipt.get("metered_usd")
         if raw_metered is not None:
             metered += _money(raw_metered)
@@ -88,7 +96,8 @@ def summarize_usage(receipts: Sequence[dict[str, Any]], *, budget_usd: float) ->
             "remaining_usd": _money_text(max(Decimal(0), budget - consumed)),
         },
         "settlement": {
-            "billed_usd": _money_text(billed),
+            "billed_usd": _money_text(billed) if billed_known else None,
+            "billed_status": "complete" if billed_known else "incomplete",
             "metered_equivalent_usd": _money_text(metered),
             "plan_covered_roles": sorted(plan_roles),
             "metered_roles": sorted(metered_roles),

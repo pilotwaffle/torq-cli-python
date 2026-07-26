@@ -23,7 +23,7 @@ def test_console_import_fixture_is_declared_for_source_distribution() -> None:
     assert "include tests/fixtures/torq-console-v5-config.yaml" in manifest.read_text(encoding="utf-8")
 
 
-def test_ci_declares_exact_four_required_jobs() -> None:
+def test_ci_declares_required_quality_and_headless_jobs() -> None:
     workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text()
 
     for job in (
