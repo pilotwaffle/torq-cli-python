@@ -114,6 +114,6 @@ other local accounts, not a process already executing as the operator.
 ## Out of scope
 
 This release does not provide multiple simultaneous turns, browser-held API
-keys, optimistic cancellation, editing already signed messages, or a claim of
-strong containment on macOS or POSIX platforms without the Linux systemd and
-cgroup-v2 boundary described above.
+keys, optimistic cancellation, editing already signed messages, or production
+strong-containment claims on Linux or macOS. The Linux systemd/cgroup-v2 path
+described above is experimental evidence only.

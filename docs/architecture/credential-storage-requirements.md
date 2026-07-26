@@ -25,9 +25,9 @@ credential storage and resolution remain separate connector-layer capabilities.
 
 ## Required backend boundary
 
-Future backend targets are Windows Credential Manager, macOS Keychain, and
-Linux Secret Service. A future attended-only headless Linux encrypted fallback
-is a separate target. Backend selection is explicit: there is no automatic
+Implemented backends are Windows Credential Manager, macOS Keychain, Linux
+Secret Service, and an attended-only headless encrypted-file store. Backend
+selection is explicit: there is no automatic
 backend substitution, fallback, downgrade, escrow, or provider-side
 substitution when a selected backend is unavailable.
 

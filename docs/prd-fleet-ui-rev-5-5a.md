@@ -1,7 +1,7 @@
 # TORQ Fleet UI PRD — Rev 5.5A implementation status
 
-Status: **implemented on `agent/rev55a-fleet-ui`; pending protected-main merge
-and CI at the time of this document commit.**
+Status: **implemented and merged before this v0.2.0 candidate.** Fresh v0.2.0
+protected-main CI and release evidence remain pending and are not claimed here.
 
 This document is the status delta for
 [`prd-fleet-ui.md`](prd-fleet-ui.md). It supersedes conflicting historical
@@ -91,5 +91,6 @@ The merge gate requires all of the following after documentation reconciliation:
 - parallel security, maintainability, and styling audits; and
 - protected-main GitHub CI.
 
-Final command counts and the protected-main merge reference are recorded in the
-pull request and release handoff rather than forecast here.
+The historical implementation commits above record the feature delivery. Fresh
+v0.2.0 command counts, protected-main CI, tag, signature, and published-artifact
+evidence must be recorded in the release handoff after those actions occur.

@@ -13,8 +13,11 @@ torq setup `
 ```
 
 The parser is UTF-8, bounded to 64 KiB, rejects duplicate or malformed keys,
-and refuses relative paths, symlinks, and non-regular files. Values remain in
-memory and are neither printed nor written to generated configuration.
+and refuses relative paths, symlinks, non-regular files, and permissive
+permissions. The file must already be owner-only: POSIX mode `0600` or a
+Windows DACL containing only the owner. TORQ refuses rather than repairs a
+permissive operator-owned file. Values remain in memory and are neither printed
+nor written to generated configuration.
 
 ## Provider mapping
 
@@ -39,8 +42,16 @@ and make the entitlement ledger wrong. `QWEN_TOKEN_PLAN_BASE_URL` governs both
 lanes when present; sources that declare no region — the native keychain, which
 holds secrets only — keep the documented default
 `https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic`. A declared
-value that is not an `https://` URL fails closed rather than falling back.
+value must match the canonical
+`https://token-plan.<region>.maas.aliyuncs.com/apps/anthropic` shape. Userinfo,
+query strings, fragments, other hosts, and other paths fail closed rather than
+falling back.
 
 Each direct-provider child receives only the selected credential plus the
 small safe operating-system environment allowlist. Credentials for the other
 providers are excluded.
+
+Process-backed Claude-compatible live stages use `OwnedProcess` and are
+production-enabled only on Windows. Linux and macOS refuse before provider
+execution until their production brokers exist. OpenAI direct HTTPS remains a
+direct adapter and does not inherit ambient proxy configuration.

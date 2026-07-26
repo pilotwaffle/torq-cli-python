@@ -59,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
                     print(result.stdout)
                     print(result.stderr)
                     return result.returncode
+            version = _run([str(torq), "--version"], root)
+            if version.returncode != 0 or version.stdout.strip() != "torq 0.2.0":
+                print(version.stdout)
+                print(version.stderr)
+                return 1
             require = _run([str(torq), "status", "--offline", "--config", str(fixture), "--require-effective"], root)
             if require.returncode != 4:
                 print(require.stdout)

@@ -21,7 +21,8 @@ Date: 2026-07-23
 
 ## Tags and release identity
 
-A standalone repository uses signed tag `v0.1.0`. If the product is ever moved
+A standalone repository used signed tag `v0.1.0` for the first release. The
+next SemVer feature release candidate is `v0.2.0`. If the product is ever moved
 inside TORQ-CONSOLE, the tag must be namespaced `torq-cli-v0.1.0` because the
 Console already has its own version line. Release tooling must refuse an
 unnamespaced CLI tag inside the Console repository.
