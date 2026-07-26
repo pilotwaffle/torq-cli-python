@@ -8,6 +8,19 @@ import threading
 from typing import Any
 
 
+def _last_error() -> int:
+    getter: Any = getattr(ctypes, "get_last_error", None)
+    return 0 if getter is None else int(getter())
+
+
+def _win_error(code: int) -> OSError:
+    factory: Any = getattr(ctypes, "WinError", None)
+    if factory is None:
+        return OSError(code, "windows_api_call_failed")
+    error = factory(code)
+    return error if isinstance(error, OSError) else OSError(code, str(error))
+
+
 class _JobObjectAccounting(ctypes.Structure):
     _fields_ = [
         ("TotalUserTime", ctypes.c_longlong),
@@ -68,6 +81,10 @@ class WindowsJob:
     _BASIC_ACCOUNTING = 1
     _EXTENDED_LIMIT = 9
     _KILL_ON_JOB_CLOSE = 0x00002000
+    _lock: threading.RLock
+    _kernel32: Any
+    _ntdll: Any
+    _handle: int | None
 
     def __init__(self) -> None:
         """Create and configure an empty kill-on-close Job Object.
@@ -79,14 +96,17 @@ class WindowsJob:
             raise OSError("windows_job_unsupported_platform")
 
         self._lock = threading.RLock()
-        kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
+        loader: Any = getattr(ctypes, "WinDLL", None)
+        if loader is None:
+            raise OSError("windows_job_unsupported_platform")
+        kernel32: Any = loader("kernel32", use_last_error=True)
         self._kernel32 = kernel32
-        self._ntdll: Any = ctypes.WinDLL("ntdll", use_last_error=True)
+        self._ntdll = loader("ntdll", use_last_error=True)
         self._configure_api()
 
         raw_handle = kernel32.CreateJobObjectW(None, None)
         if not raw_handle:
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _win_error(_last_error())
         self._handle: int | None = int(raw_handle)
 
         limits = _JobObjectExtendedLimit()
@@ -97,12 +117,12 @@ class WindowsJob:
             ctypes.byref(limits),
             ctypes.sizeof(limits),
         ):
-            error = ctypes.get_last_error()
+            error = _last_error()
             try:
                 kernel32.CloseHandle(ctypes.c_void_p(self._handle))
             finally:
                 self._handle = None
-            raise ctypes.WinError(error)
+            raise _win_error(error)
 
     def _configure_api(self) -> None:
         kernel32 = self._kernel32
@@ -145,7 +165,7 @@ class WindowsJob:
             if not self._kernel32.AssignProcessToJobObject(
                 ctypes.c_void_p(job_handle), ctypes.c_void_p(handle)
             ):
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise _win_error(_last_error())
 
     def terminate(self, exit_code: int = 1) -> None:
         """Force every process in the job to exit, or do nothing if closed.
@@ -161,7 +181,7 @@ class WindowsJob:
             if not self._kernel32.TerminateJobObject(
                 ctypes.c_void_p(self._handle), ctypes.c_uint32(exit_code)
             ):
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise _win_error(_last_error())
 
     def active_processes(self) -> int:
         """Return the number of processes Windows currently accounts as active.
@@ -180,7 +200,7 @@ class WindowsJob:
                 ctypes.sizeof(accounting),
                 None,
             ):
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise _win_error(_last_error())
             return int(accounting.ActiveProcesses)
 
     def resume_process_handle(self, handle: int) -> None:
@@ -200,7 +220,7 @@ class WindowsJob:
                 return
             handle = self._handle
             if not self._kernel32.CloseHandle(ctypes.c_void_p(handle)):
-                raise ctypes.WinError(ctypes.get_last_error())
+                raise _win_error(_last_error())
             self._handle = None
 
     def _require_open(self) -> int:
