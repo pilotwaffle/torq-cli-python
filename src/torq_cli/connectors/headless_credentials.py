@@ -469,11 +469,6 @@ class ConfiguredHeadlessVault:
         return None if reference is None else self._store.resolve(provider_id, reference)
 
     def base_url(self, provider: str) -> None:
-        """Headless stores contain secrets only; provider regions use defaults."""
-        _provider(provider)
-        return None
-
-    def base_url(self, provider: str) -> None:
         """Encrypted stores contain secrets only, never routing metadata."""
         _provider(provider)
         return None
