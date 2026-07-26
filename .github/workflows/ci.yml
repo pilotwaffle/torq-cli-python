@@ -8,6 +8,40 @@ on:
   pull_request:
 
 jobs:
+  linux-owned-process-evidence:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: {python-version: "3.11"}
+      - run: python -m pip install -e ".[dev]"
+      - name: Establish genuine user systemd manager and run kernel ownership gate
+        shell: bash
+        run: |
+          set -uo pipefail
+          uid="$(id -u)"
+          bootstrap_status=0
+          if [ "$(cat /proc/1/comm 2>/dev/null || true)" != "systemd" ]; then
+            bootstrap_status=1
+          elif ! sudo /usr/bin/systemctl start "user-runtime-dir@${uid}.service" "user@${uid}.service"; then
+            bootstrap_status=1
+          fi
+          export XDG_RUNTIME_DIR="/run/user/${uid}"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+          python scripts/run_linux_ownership_evidence.py \
+            --bootstrap-status "$bootstrap_status" \
+            --junit "$RUNNER_TEMP/linux-owned-process/junit.xml" \
+            --report "$RUNNER_TEMP/linux-owned-process/evidence.json"
+      - name: Upload Linux ownership evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-owned-process-evidence
+          path: ${{ runner.temp }}/linux-owned-process/
+          if-no-files-found: error
+
   quality-windows-py311:
     runs-on: windows-latest
     steps:

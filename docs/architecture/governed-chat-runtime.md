@@ -76,8 +76,24 @@ unsupported until it provisions those primitives explicitly.
 macOS remains unsupported. A process group cannot prevent `setsid()` escape,
 and no weaker containment path is advertised as ownership.
 
-The Linux release gate is intentionally opt-in because hosted CI commonly has
-no user systemd session. On a clean cgroup-v2 login host, run:
+The Linux release gate remains opt-in outside CI. The
+`linux-owned-process-evidence` CI job starts the runner account's real user
+manager through the host's PID-1 systemd manager, then requires its
+owner-protected runtime directory and D-Bus socket, unified cgroup-v2 control
+group, and a protected transient-service
+preflight before enabling the tests. Missing prerequisites refuse the job; a
+pytest success containing any skip also fails the gate. The workflow does not
+use a container or a process-group substitute for the host kernel boundary.
+
+The job uploads `evidence.json` and `junit.xml` as the
+`linux-owned-process-evidence` workflow artifact. The JSON identifies itself as
+machine-generated host-kernel evidence and records the source commit, workflow
+run/attempt, hosted-runner image, kernel, observed manager cgroup, and exact test
+summary. These values are generated at execution time and are not copied into
+the repository as an attestation. The workflow definition alone is not evidence
+that the remote gate ran; the GitHub job and artifact are the provenance.
+
+On a clean cgroup-v2 login host with an already-running user manager, run:
 
 ```bash
 TORQ_TEST_LINUX_SYSTEMD_CGROUP=1 python -m pytest -q \
