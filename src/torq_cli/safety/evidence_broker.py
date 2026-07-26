@@ -289,8 +289,8 @@ def _connection_peer_pid(connection: Connection) -> int:
             # <sys/un.h>: SOL_LOCAL=0 and LOCAL_PEERPID=0x002.
             sol_local = 0
             local_peer_pid = 0x002
-            process_id = ctypes.c_int()
-            option_length = ctypes.c_uint32(ctypes.sizeof(process_id))
+            darwin_process_id = ctypes.c_int()
+            option_length = ctypes.c_uint32(ctypes.sizeof(darwin_process_id))
             libc = ctypes.CDLL(None, use_errno=True)
             function = libc.getsockopt
             function.argtypes = (
@@ -305,17 +305,17 @@ def _connection_peer_pid(connection: Connection) -> int:
                 duplicate.fileno(),
                 sol_local,
                 local_peer_pid,
-                ctypes.byref(process_id),
+                ctypes.byref(darwin_process_id),
                 ctypes.byref(option_length),
             )
             if result != 0:
                 raise OSError(ctypes.get_errno(), "broker_peer_identity_failed")
             if (
-                option_length.value != ctypes.sizeof(process_id)
-                or process_id.value <= 0
+                option_length.value != ctypes.sizeof(darwin_process_id)
+                or darwin_process_id.value <= 0
             ):
                 raise OSError("broker_peer_identity_invalid")
-            return int(process_id.value)
+            return int(darwin_process_id.value)
         if hasattr(socket, "SO_PEERCRED"):
             credentials = duplicate.getsockopt(
                 socket.SOL_SOCKET,
