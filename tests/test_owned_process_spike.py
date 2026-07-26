@@ -252,7 +252,20 @@ def test_uncertain_stop_can_be_retried_to_confirmation(
     assert second.confirmed
     assert second.active_processes == 0
     assert second.forced
+    assert owned.wait(timeout=1).forced
     owned.close()
+
+
+def test_wait_after_confirmed_force_stop_preserves_forced_history(tmp_path: Path) -> None:
+    with OwnedProcess(_command("parent"), cwd=str(tmp_path), env=_python_environment()) as owned:
+        _collect_ready_pids(owned, expected=3)
+        stopped = owned.force_stop(timeout=5)
+        assert stopped.confirmed
+        assert stopped.forced
+        waited = owned.wait(timeout=1)
+        assert waited.confirmed
+        assert waited.forced
+        assert waited.returncode == stopped.returncode
 
 
 def test_close_waits_for_inflight_uncertain_stop_retry(

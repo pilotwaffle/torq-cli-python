@@ -271,11 +271,13 @@ class OwnedProcess:
             self._process.wait(timeout=timeout)
             state, active = self._containment()
             output_complete = self._join_drainers(time.monotonic() + 1.0)
+            with self._lifecycle:
+                forced = self._force_requested
             return ExitObservation(
                 self._process.returncode,
                 state is ContainmentState.KNOWN_EMPTY,
                 active,
-                False,
+                forced,
                 output_complete,
                 state,
             )
