@@ -5,11 +5,12 @@ import os
 import stat
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from test_phase5_cli_experience import _answers
-from torq_cli.application.setup import SetupService
+from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.connectors import headless_credentials as vault_module
 from torq_cli.connectors.headless_credentials import (
     HeadlessCredentialError,
@@ -19,6 +20,8 @@ from torq_cli.connectors.headless_credentials import (
 )
 from torq_cli.domain.config_schema import validate_config
 from torq_cli.domain.registry_schema import load_registry
+from torq_cli.interfaces import cli as cli_module
+from torq_cli.interfaces.cli import main
 from torq_cli.safety.receipts import signing_file_permissions_are_restricted
 
 
@@ -39,6 +42,32 @@ def _store(tmp_path: Path, **kwargs: object) -> HeadlessEncryptedFileStore:
 
 def _path(store: HeadlessEncryptedFileStore) -> Path:
     return store.root / f"{REF}.tqcv"
+
+
+def _structural_record() -> dict[str, Any]:
+    return {
+        "aead": {
+            "algorithm": "xchacha20poly1305-ietf",
+            "nonce_b64": vault_module._b64(b"n" * 24),
+        },
+        "ciphertext_b64": vault_module._b64(b"c" * 17),
+        "format": "torq-credential-vault",
+        "kdf": {
+            "algorithm": "argon2id",
+            "memory_kib": 65_536,
+            "parallelism": 1,
+            "salt_b64": vault_module._b64(b"s" * 16),
+            "time_cost": 3,
+            "version": 19,
+        },
+        "metadata": {
+            "backend": "headless_encrypted_file",
+            "credential_ref": REF,
+            "generation": 1,
+            "provider_id": "deepseek",
+        },
+        "version": 1,
+    }
 
 
 def test_create_resolve_and_canonical_envelope_contract(tmp_path: Path) -> None:
@@ -129,6 +158,119 @@ def test_malformed_noncanonical_records_fail_with_one_outcome(
         store.resolve("deepseek", REF)
 
 
+def test_boolean_version_is_not_accepted_as_integer_one(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.store("deepseek", REF, "test-secret")
+    path = _path(store)
+    record = json.loads(path.read_bytes())
+    record["version"] = True
+    path.write_bytes(vault_module._canonical(record))
+    vault_module._restrict(path)
+
+    with pytest.raises(OpaqueUnlockError, match="^credential_unlock_failed$"):
+        store.resolve("deepseek", REF)
+
+
+def test_parser_pins_raw_and_ciphertext_size_boundaries() -> None:
+    with pytest.raises(ValueError):
+        vault_module._parse(b"x" * 98_305)
+
+    for size in (17, 16_400):
+        record = _structural_record()
+        record["ciphertext_b64"] = vault_module._b64(b"c" * size)
+        assert vault_module._parse(vault_module._canonical(record))["version"] == 1
+
+    for size in (16, 16_401):
+        record = _structural_record()
+        record["ciphertext_b64"] = vault_module._b64(b"c" * size)
+        with pytest.raises(ValueError):
+            vault_module._parse(vault_module._canonical(record))
+
+
+def test_parser_rejects_noncanonical_base64_classes() -> None:
+    whitespace = _structural_record()
+    whitespace["aead"]["nonce_b64"] += "\n"
+
+    urlsafe = _structural_record()
+    urlsafe["aead"]["nonce_b64"] = vault_module._b64(b"\xfb" * 24).replace(
+        "+", "-"
+    )
+
+    unpadded = _structural_record()
+    unpadded["kdf"]["salt_b64"] = str(unpadded["kdf"]["salt_b64"]).rstrip("=")
+
+    extra_padding = _structural_record()
+    extra_padding["aead"]["nonce_b64"] += "="
+
+    for record in (whitespace, urlsafe, unpadded, extra_padding):
+        with pytest.raises(ValueError):
+            vault_module._parse(vault_module._canonical(record))
+
+
+def test_parser_rejects_generation_and_nested_schema_mutations() -> None:
+    maximum = _structural_record()
+    maximum["metadata"]["generation"] = 9_007_199_254_740_991
+    assert vault_module._parse(vault_module._canonical(maximum))["metadata"] == maximum["metadata"]
+
+    cases: list[dict[str, object]] = []
+    for generation in (0, 9_007_199_254_740_992, True):
+        record = _structural_record()
+        record["metadata"]["generation"] = generation
+        cases.append(record)
+    for key, value in (
+        ("backend", "platform_keychain"),
+        ("credential_ref", "credref_invalid"),
+        ("provider_id", "unknown"),
+    ):
+        record = _structural_record()
+        record["metadata"][key] = value
+        cases.append(record)
+    for container, key, value in (
+        ("aead", "algorithm", "xchacha20poly1305"),
+        ("aead", "unknown", "x"),
+        ("kdf", "algorithm", "argon2i"),
+        ("kdf", "memory_kib", True),
+        ("kdf", "parallelism", True),
+        ("kdf", "time_cost", True),
+        ("kdf", "version", True),
+        ("kdf", "unknown", 1),
+        ("metadata", "unknown", "x"),
+    ):
+        record = _structural_record()
+        record[container][key] = value
+        cases.append(record)
+
+    for record in cases:
+        with pytest.raises(ValueError):
+            vault_module._parse(vault_module._canonical(record))
+
+    valid = vault_module._canonical(_structural_record())
+    nested_duplicate = valid.replace(
+        b'"algorithm":"xchacha20poly1305-ietf",',
+        b'"algorithm":"xchacha20poly1305-ietf","algorithm":"xchacha20poly1305-ietf",',
+        1,
+    )
+    with pytest.raises(ValueError):
+        vault_module._parse(nested_duplicate)
+
+
+@pytest.mark.parametrize(
+    ("container", "field", "sizes"),
+    [
+        ("aead", "nonce_b64", (23, 25)),
+        ("kdf", "salt_b64", (15, 17)),
+    ],
+)
+def test_parser_rejects_nonce_and_salt_size_bounds(
+    container: str, field: str, sizes: tuple[int, int]
+) -> None:
+    for size in sizes:
+        record = _structural_record()
+        record[container][field] = vault_module._b64(b"x" * size)
+        with pytest.raises(ValueError):
+            vault_module._parse(vault_module._canonical(record))
+
+
 def test_rotation_increments_generation_and_revocation_is_deletion(tmp_path: Path) -> None:
     store = _store(tmp_path)
     assert store.contains("deepseek", REF) is False
@@ -144,6 +286,31 @@ def test_rotation_increments_generation_and_revocation_is_deletion(tmp_path: Pat
     assert store.revoke("deepseek", REF) is False
     with pytest.raises(HeadlessCredentialError, match="credential_absent"):
         store.rotate("deepseek", OTHER_REF, "value")
+
+
+def test_revocation_authenticates_provider_passphrase_and_record(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.store("deepseek", REF, "secret")
+    path = _path(store)
+    original = path.read_bytes()
+
+    with pytest.raises(OpaqueUnlockError, match="^credential_unlock_failed$"):
+        store.revoke("qwen", REF)
+    assert path.read_bytes() == original
+
+    wrong = HeadlessEncryptedFileStore(store.root, passphrase_reader=_reader("wrong"))
+    with pytest.raises(OpaqueUnlockError, match="^credential_unlock_failed$"):
+        wrong.revoke("deepseek", REF)
+    assert path.read_bytes() == original
+
+    record = json.loads(original)
+    record["metadata"]["provider_id"] = "qwen"
+    path.write_bytes(vault_module._canonical(record))
+    vault_module._restrict(path)
+    tampered = path.read_bytes()
+    with pytest.raises(OpaqueUnlockError, match="^credential_unlock_failed$"):
+        store.revoke("deepseek", REF)
+    assert path.read_bytes() == tampered
 
 
 def test_rotation_rechecks_existence_inside_its_exclusive_lock(tmp_path: Path) -> None:
@@ -205,6 +372,89 @@ def test_existing_lock_times_out_without_reading_passphrase(tmp_path: Path) -> N
     assert calls == 0
 
 
+def test_filesystem_failures_are_secret_free_backend_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_file = tmp_path / "sensitive-root-name"
+    root_file.write_text("not a directory", encoding="utf-8")
+    invalid = HeadlessEncryptedFileStore(root_file.resolve(), passphrase_reader=_reader())
+    with pytest.raises(HeadlessCredentialError) as caught:
+        invalid.store("deepseek", REF, "secret")
+    assert str(caught.value) == "credential_store_failed"
+    assert str(root_file) not in str(caught.value)
+
+    store = _store(tmp_path)
+    store.store("deepseek", REF, "prior")
+    prior = _path(store).read_bytes()
+
+    def deny_replace(_source: object, _target: object) -> None:
+        raise PermissionError(f"denied: {tmp_path / 'private-location'}")
+
+    monkeypatch.setattr(vault_module.os, "replace", deny_replace)
+    with pytest.raises(HeadlessCredentialError) as replacement:
+        store.rotate("deepseek", REF, "replacement")
+    assert str(replacement.value) == "credential_store_failed"
+    assert str(tmp_path) not in str(replacement.value)
+    assert _path(store).read_bytes() == prior
+    assert not list(store.root.glob("*.tmp"))
+
+
+def test_cli_rejects_relative_store_root_before_filesystem_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    code = main([
+        "auth", "verify-access", "--provider", "deepseek", "--credential-ref", REF,
+        "--backend", "headless_encrypted_file", "--store-root", "relative-vault",
+    ])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert report == {
+        "finding": "credential_store_absolute_required", "status": "blocked",
+    }
+    assert not (tmp_path / "relative-vault").exists()
+
+
+def test_cli_filesystem_failure_discloses_neither_traceback_nor_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root_file = tmp_path / "private-vault-location"
+    root_file.write_text("not a directory", encoding="utf-8")
+    real_store = HeadlessEncryptedFileStore
+    monkeypatch.setattr(
+        cli_module,
+        "HeadlessEncryptedFileStore",
+        lambda root: real_store(root, passphrase_reader=_reader()),
+    )
+    monkeypatch.setattr(cli_module, "_read_attended_secret", lambda: "secret")
+
+    code = main([
+        "auth", "store", "--provider", "deepseek", "--credential-ref", REF,
+        "--backend", "headless_encrypted_file", "--store-root", str(root_file.resolve()),
+    ])
+    output = capsys.readouterr()
+    assert code == 3
+    assert json.loads(output.out) == {"finding": "credential_store_failed", "status": "blocked"}
+    assert str(root_file) not in output.out
+    assert output.err == ""
+
+
+def test_cli_headless_verify_access_reports_presence_not_validity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = (tmp_path / "vault").resolve()
+    store = HeadlessEncryptedFileStore(root, passphrase_reader=_reader())
+    store.store("deepseek", REF, "secret")
+
+    code = main([
+        "auth", "verify-access", "--provider", "deepseek", "--credential-ref", REF,
+        "--backend", "headless_encrypted_file", "--store-root", str(root),
+    ])
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert report == {"backend": "headless_encrypted_file", "status": "present"}
+
+
 def test_bounds_and_invalid_inputs_write_nothing(tmp_path: Path) -> None:
     store = _store(tmp_path)
     for secret in ("", "x" * 16_385, "has\x00nul"):
@@ -230,6 +480,15 @@ def test_passphrase_normalization_and_bounds(tmp_path: Path) -> None:
         )
         with pytest.raises(HeadlessCredentialError, match="attended_unlock_failed"):
             rejected.store("deepseek", REF, "secret")
+
+
+def test_maximum_plaintext_and_passphrase_bounds_are_accepted(tmp_path: Path) -> None:
+    store = HeadlessEncryptedFileStore(
+        (tmp_path / "vault").resolve(), passphrase_reader=_reader("p" * 1024),
+    )
+    secret = "s" * 16_384
+    store.store("deepseek", REF, secret)
+    assert store.resolve("deepseek", REF) == secret
 
 
 def test_attended_reader_rejects_redirected_input_and_ci(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -275,6 +534,31 @@ def test_config_schema_requires_explicit_absolute_headless_path() -> None:
         f for f in validate_config(invalid, load_registry())
         if f.path == "/credential_source/path"
     ]
+    nul_path = {
+        **base,
+        "credential_source": {"kind": "headless_encrypted_file", "path": "/v\x00ault"},
+    }
+    assert [
+        f for f in validate_config(nul_path, load_registry())
+        if f.path == "/credential_source/path"
+    ]
+
+
+def test_store_root_nul_is_rejected_before_filesystem_access(tmp_path: Path) -> None:
+    root = str(tmp_path.resolve()) + "\x00vault"
+    with pytest.raises(HeadlessCredentialError, match="^credential_store_path_invalid$"):
+        HeadlessEncryptedFileStore(Path(root), passphrase_reader=_reader())
+
+    answers = _answers()
+    answers["credential_refs"] = {
+        "deepseek": REF,
+        "kimi": "credref_11111111111111111111111111111111",
+        "zai": "credref_22222222222222222222222222222222",
+    }
+    answers["credential_backend"] = "headless_encrypted_file"
+    answers["credential_store_root"] = root
+    with pytest.raises(SetupError, match="^credential_store_root_invalid$"):
+        SetupService().configure(tmp_path / "config.yaml", answers)
 
 
 def test_setup_persists_explicit_headless_backend_without_secret(tmp_path: Path) -> None:

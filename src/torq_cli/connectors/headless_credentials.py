@@ -176,7 +176,11 @@ def _parse(payload: bytes) -> dict[str, Any]:
         raise ValueError
     if set(record) != {"aead", "ciphertext_b64", "format", "kdf", "metadata", "version"}:
         raise ValueError
-    if record["format"] != "torq-credential-vault" or record["version"] != 1:
+    if (
+        record["format"] != "torq-credential-vault"
+        or type(record["version"]) is not int
+        or record["version"] != 1
+    ):
         raise ValueError
     aead, kdf, metadata = record["aead"], record["kdf"], record["metadata"]
     if not isinstance(aead, dict) or set(aead) != {"algorithm", "nonce_b64"}:
@@ -238,6 +242,8 @@ class HeadlessEncryptedFileStore:
     def __init__(self, root: Path, *, passphrase_reader: PassphraseReader = attended_passphrase,
                  lock_seconds: float = _LOCK_SECONDS,
                  commit_observer: CommitObserver | None = None) -> None:
+        if "\x00" in str(root):
+            raise HeadlessCredentialError("credential_store_path_invalid")
         if not root.is_absolute():
             raise HeadlessCredentialError("credential_store_absolute_required")
         self.root = root
@@ -279,7 +285,12 @@ class HeadlessEncryptedFileStore:
                 pass
 
     def store(self, provider: str, credential_ref: str, secret: str) -> None:
-        self._store(provider, credential_ref, secret, require_existing=False)
+        try:
+            self._store(provider, credential_ref, secret, require_existing=False)
+        except HeadlessCredentialError:
+            raise
+        except OSError as exc:
+            raise HeadlessCredentialError("credential_store_failed") from exc
 
     def _store(self, provider: str, credential_ref: str, secret: str, *,
                require_existing: bool) -> None:
@@ -311,55 +322,85 @@ class HeadlessEncryptedFileStore:
             self._atomic_write(path, payload)
 
     def rotate(self, provider: str, credential_ref: str, secret: str) -> None:
-        self._store(provider, credential_ref, secret, require_existing=True)
+        try:
+            self._store(provider, credential_ref, secret, require_existing=True)
+        except HeadlessCredentialError:
+            raise
+        except OSError as exc:
+            raise HeadlessCredentialError("credential_store_failed") from exc
 
     def resolve(self, provider: str, credential_ref: str) -> str | None:
-        provider_id = _provider(provider)
-        path = self._path(credential_ref)
-        if not path.exists():
-            return None
-        with self._lock(credential_ref):
-            try:
-                passphrase = _passphrase_bytes(self._reader)
-            except HeadlessCredentialError as exc:
-                raise OpaqueUnlockError("credential_unlock_failed") from exc
-            secret, _generation = self._unlock(
-                path, provider_id, credential_ref, passphrase,
-            )
         try:
-            return secret.decode("utf-8", errors="strict")
-        except UnicodeError as exc:
-            raise OpaqueUnlockError("credential_unlock_failed") from exc
+            provider_id = _provider(provider)
+            path = self._path(credential_ref)
+            if not path.exists():
+                return None
+            with self._lock(credential_ref):
+                try:
+                    passphrase = _passphrase_bytes(self._reader)
+                except HeadlessCredentialError as exc:
+                    raise OpaqueUnlockError("credential_unlock_failed") from exc
+                secret, _generation = self._unlock(
+                    path, provider_id, credential_ref, passphrase,
+                )
+            try:
+                return secret.decode("utf-8", errors="strict")
+            except UnicodeError as exc:
+                raise OpaqueUnlockError("credential_unlock_failed") from exc
+        except HeadlessCredentialError:
+            raise
+        except OSError as exc:
+            raise HeadlessCredentialError("credential_store_failed") from exc
 
     def contains(self, provider: str, credential_ref: str) -> bool:
         # Presence is intentionally coarse and never decrypts or implies validity.
-        _provider(provider)
-        return self._path(credential_ref).is_file()
+        try:
+            _provider(provider)
+            return self._path(credential_ref).is_file()
+        except HeadlessCredentialError:
+            raise
+        except OSError as exc:
+            raise HeadlessCredentialError("credential_store_failed") from exc
 
     def revoke(self, provider: str, credential_ref: str) -> bool:
-        _provider(provider)
-        path = self._path(credential_ref)
-        with self._lock(credential_ref):
-            if not path.exists():
-                return False
-            path.unlink()
-            _fsync_directory(self.root)
-            return True
+        try:
+            _provider(provider)
+            path = self._path(credential_ref)
+            with self._lock(credential_ref):
+                if not path.exists():
+                    return False
+                try:
+                    passphrase = _passphrase_bytes(self._reader)
+                except HeadlessCredentialError as exc:
+                    raise OpaqueUnlockError("credential_unlock_failed") from exc
+                self._unlock(path, _provider(provider), credential_ref, passphrase)
+                path.unlink()
+                _fsync_directory(self.root)
+                return True
+        except HeadlessCredentialError:
+            raise
+        except OSError as exc:
+            raise HeadlessCredentialError("credential_revoke_failed") from exc
 
     def generation(self, provider: str, credential_ref: str) -> int | None:
-        provider_id = _provider(provider)
-        path = self._path(credential_ref)
-        if not path.exists():
-            return None
-        with self._lock(credential_ref):
-            try:
-                passphrase = _passphrase_bytes(self._reader)
-            except HeadlessCredentialError as exc:
-                raise OpaqueUnlockError("credential_unlock_failed") from exc
-            _secret, generation = self._unlock(
-                path, provider_id, credential_ref, passphrase,
-            )
-        return generation
+        try:
+            provider_id = _provider(provider)
+            path = self._path(credential_ref)
+            if not path.exists():
+                return None
+            with self._lock(credential_ref):
+                try:
+                    passphrase = _passphrase_bytes(self._reader)
+                except HeadlessCredentialError as exc:
+                    raise OpaqueUnlockError("credential_unlock_failed") from exc
+                _secret, generation = self._unlock(
+                    path, provider_id, credential_ref, passphrase,
+                )
+            return generation
+        except HeadlessCredentialError:
+            raise
+        except OSError as exc:
+            raise HeadlessCredentialError("credential_store_failed") from exc
 
     def _unlock(self, path: Path, provider: str, credential_ref: str,
                 passphrase: bytes) -> tuple[bytes, int]:

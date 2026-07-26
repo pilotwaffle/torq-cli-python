@@ -454,7 +454,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.backend == "headless_encrypted_file":
                 if not isinstance(args.store_root, str):
                     raise HeadlessCredentialError("credential_store_root_required")
-                store = HeadlessEncryptedFileStore(Path(args.store_root).resolve())
+                store_root = Path(args.store_root)
+                if not store_root.is_absolute():
+                    raise HeadlessCredentialError("credential_store_absolute_required")
+                store = HeadlessEncryptedFileStore(store_root)
             else:
                 if args.store_root is not None:
                     raise NativeCredentialError("credential_backend_selection_invalid")
@@ -469,8 +472,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 code = 0
             elif args.auth_command == "verify-access":
                 present = store.contains(args.provider, args.credential_ref)
+                present_status = (
+                    "present"
+                    if store.backend == "headless_encrypted_file"
+                    else "access_verified"
+                )
                 report = {
-                    "status": "access_verified" if present else "absent",
+                    "status": present_status if present else "absent",
                     "backend": store.backend,
                 }
                 code = 0 if present else 3

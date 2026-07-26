@@ -305,6 +305,7 @@ def validate_config_shape(config: Mapping[str, Any], registry: Registry) -> tupl
                 if (
                     not isinstance(source_path, str)
                     or not source_path
+                    or "\x00" in source_path
                     or not (source_path.startswith("/") or _WINDOWS_ABSOLUTE.match(source_path))
                 ):
                     findings.append(FindingCatalog.make("config_schema_invalid", path="/credential_source/path"))

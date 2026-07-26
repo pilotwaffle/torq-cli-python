@@ -105,7 +105,10 @@ class SetupService:
             elif raw_credential_backend == "headless_encrypted_file":
                 if raw_credential_store_root is None:
                     raise SetupError("credential_store_root_required")
-                store_root = Path(str(raw_credential_store_root))
+                store_root_text = str(raw_credential_store_root)
+                if "\x00" in store_root_text:
+                    raise SetupError("credential_store_root_invalid")
+                store_root = Path(store_root_text)
                 if not store_root.is_absolute():
                     raise SetupError("credential_store_root_absolute_required")
                 credential_source = {

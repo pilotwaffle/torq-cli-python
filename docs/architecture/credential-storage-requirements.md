@@ -20,10 +20,8 @@ The Foundation has exactly two credential-related findings:
 
 Those findings establish syntax and configuration hygiene only. A valid
 `credential_ref` proves neither that a credential exists nor that it is valid,
-entitled, resolvable, or usable. The Foundation never looks up the reference.
-There is currently no backend, plaintext or encrypted secret store, secret
-input mechanism, crypto implementation, provider integration, migration path,
-or credential API.
+entitled, resolvable, or usable. The Foundation never looks up the reference;
+credential storage and resolution remain separate connector-layer capabilities.
 
 ## Required backend boundary
 
