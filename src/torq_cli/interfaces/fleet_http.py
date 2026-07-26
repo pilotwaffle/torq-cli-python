@@ -4,21 +4,26 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import ipaddress
 import json
+import re
 import secrets
+import socket
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from importlib.resources import files
-from threading import RLock
+from threading import BoundedSemaphore, RLock
 from pathlib import Path
-from typing import Any, Callable, Protocol
-from urllib.parse import parse_qs, urlsplit
+from typing import Any, Callable, Protocol, cast
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.fleet_controls import FleetControlService
 from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.core.redaction import RedactionBlocked
 
@@ -38,6 +43,30 @@ def _load_fleet_assets() -> dict[str, tuple[bytes, str]]:
     }
 
 
+def _fleet_event_id(envelope: Mapping[str, Any]) -> str:
+    """Hash only state-bearing fields, excluding the sliding session expiry."""
+    session = envelope["session"]
+    if not isinstance(session, Mapping):
+        raise ValueError("fleet_session_invalid")
+    event_identity = {
+        "snapshot": envelope["snapshot"],
+        "annotations": envelope["annotations"],
+        "eligibility": envelope["eligibility"],
+        "pending": envelope["pending"],
+        "session": {
+            "write_capable": session["write_capable"],
+            "read_only_reason": session["read_only_reason"],
+        },
+    }
+    encoded = json.dumps(
+        event_identity,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:32]
+
+
 class ContextInjector(Protocol):
     @property
     def root(self) -> Path: ...
@@ -50,6 +79,7 @@ class ContextInjector(Protocol):
         media_type: str = "text/plain",
         source_name: str | None = None,
         confirm_direct: bool = False,
+        command_id: str | None = None,
     ) -> Mapping[str, Any]: ...
 
     def inject_artifact(
@@ -60,6 +90,32 @@ class ContextInjector(Protocol):
         media_type: str,
         source_name: str,
         confirm_direct: bool = False,
+        command_id: str | None = None,
+    ) -> Mapping[str, Any]: ...
+
+
+class ActionResolver(Protocol):
+    @property
+    def root(self) -> Path: ...
+
+    def resolve_action(
+        self,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]: ...
+
+
+class RecoveryController(Protocol):
+    @property
+    def root(self) -> Path: ...
+
+    def abandon(
+        self,
+        attempt_ids: list[str],
+        last_sequence: int,
+        manifest_generation: int,
     ) -> Mapping[str, Any]: ...
 
 
@@ -78,10 +134,12 @@ class FleetSessionManager:
         self,
         *,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
         idle_seconds: float = 900,
         absolute_seconds: float = 14_400,
     ) -> None:
         self._clock = clock
+        self._wall_clock = wall_clock
         self._idle_seconds = idle_seconds
         self._absolute_seconds = absolute_seconds
         self.bootstrap_nonce = secrets.token_urlsafe(32)
@@ -102,7 +160,9 @@ class FleetSessionManager:
             self._sessions[token] = _Session(token, now, now)
             return token
 
-    def authenticate(self, cookie_header: str | None) -> _Session | None:
+    def authenticate(
+        self, cookie_header: str | None, *, touch: bool = True
+    ) -> _Session | None:
         if not cookie_header:
             return None
         cookie = SimpleCookie()
@@ -124,12 +184,33 @@ class FleetSessionManager:
             ):
                 self._sessions.pop(session.token, None)
                 return None
-            session.last_seen = now
+            if touch:
+                session.last_seen = now
             return session
 
     def downgrade(self, session: _Session) -> None:
         with self._lock:
             session.read_only = True
+
+    def expires_at(self, session: _Session) -> str:
+        """Return the effective idle/absolute expiry as an RFC 3339 timestamp."""
+        with self._lock:
+            now = self._clock()
+            remaining = max(
+                0.0,
+                min(
+                    self._idle_seconds - (now - session.last_seen),
+                    self._absolute_seconds - (now - session.issued_at),
+                ),
+            )
+            return (
+                datetime.fromtimestamp(
+                    self._wall_clock() + remaining,
+                    timezone.utc,
+                )
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
 
     def rotate(self, session: _Session) -> str:
         with self._lock:
@@ -199,19 +280,96 @@ def create_fleet_server(
     host: str = "127.0.0.1",
     port: int = 8765,
     context_injector: ContextInjector | None = None,
+    action_resolver: ActionResolver | None = None,
+    recovery_controller: RecoveryController | None = None,
     sessions: FleetSessionManager | None = None,
+    control_service: FleetControlService | None = None,
+    operational_state_provider: Callable[[], Mapping[str, Any]] | None = None,
 ) -> ThreadingHTTPServer:
     if not _loopback_host(host):
         raise ValueError("fleet_loopback_required")
     if not 0 <= port <= 65535:
         raise ValueError("fleet_port_invalid")
+    resolved_action_resolver = action_resolver
+    if resolved_action_resolver is None and context_injector is not None and hasattr(
+        context_injector, "resolve_action"
+    ):
+        resolved_action_resolver = cast(ActionResolver, context_injector)
     if (
         context_injector is not None
         and context_injector.root.resolve() != projector.run_root.resolve()
     ):
         raise ValueError("fleet_control_run_mismatch")
+    for controller in (resolved_action_resolver, recovery_controller):
+        if (
+            controller is not None
+            and controller.root.resolve() != projector.run_root.resolve()
+        ):
+            raise ValueError("fleet_control_run_mismatch")
     session_manager = sessions or FleetSessionManager()
     fleet_assets = _load_fleet_assets()
+
+    def operational_annotations() -> list[dict[str, str]]:
+        raw_operational = (
+            operational_state_provider()
+            if operational_state_provider is not None
+            else projector.operational_state
+        )
+        if not isinstance(raw_operational, Mapping):
+            return []
+        observed_at = raw_operational.get("heartbeat_at")
+        raw_orphans = raw_operational.get("orphaned_roles", ())
+        if (
+            not isinstance(observed_at, str)
+            or not isinstance(
+            raw_orphans, (list, tuple)
+            )
+            or raw_operational.get("worker_pid") is not None
+            or raw_operational.get("lifecycle") != "recovery_required"
+        ):
+            return []
+        annotations = [
+            {
+                "kind": "orphaned",
+                "scope": str(role),
+                "observed_at": observed_at,
+                "source": "supervisor",
+            }
+            for role in raw_orphans
+        ]
+        if raw_orphans:
+            annotations.append(
+                {
+                    "kind": "recovery_required",
+                    "scope": "run",
+                    "observed_at": observed_at,
+                    "source": "supervisor",
+                }
+            )
+        return annotations
+
+    controls = control_service or FleetControlService(
+        context_available=context_injector is not None,
+        action_available=resolved_action_resolver is not None,
+        recovery_available=recovery_controller is not None,
+        annotation_provider=operational_annotations,
+    )
+    sse_slots = BoundedSemaphore(4)
+
+    def fleet_envelope(session: _Session) -> dict[str, Any]:
+        snapshot = projector.snapshot()
+        run = snapshot.get("run")
+        if isinstance(run, Mapping) and run.get("workflow_state") in {
+            "closed",
+            "abandoned",
+        }:
+            session_manager.downgrade(session)
+        return controls.envelope(
+            snapshot,
+            session_write_capable=not session.read_only,
+            expires_at=session_manager.expires_at(session),
+            read_only_reason=("session_read_only" if session.read_only else None),
+        )
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "TORQFleet/1"
@@ -245,7 +403,7 @@ def create_fleet_server(
                     "Set-Cookie",
                     "torq_fleet_session="
                     + token
-                    + "; HttpOnly; SameSite=Strict; Path=/api/v1",
+                    + "; HttpOnly; SameSite=Strict; Path=/",
                 )
                 self._security_headers()
                 self.send_header("Content-Length", "0")
@@ -255,32 +413,100 @@ def create_fleet_server(
             if session is None:
                 self._json(401, {"status": "blocked", "finding": "fleet_session_required"})
                 return
+            if parsed.path == "/api/v1/fleet/events":
+                self._events(session)
+                return
             if parsed.path == "/api/v1/fleet":
-                snapshot = projector.snapshot()
-                run = snapshot.get("run")
-                verification = snapshot.get("verification")
-                mutable = (
-                    context_injector is not None
-                    and isinstance(run, Mapping)
-                    and run.get("workflow_state") not in {"closed", "abandoned"}
-                    and isinstance(verification, Mapping)
-                    and verification.get("status") == "verified"
-                )
-                snapshot["controls"] = {"context_mutation": mutable}
-                if isinstance(run, Mapping) and run.get("workflow_state") in {
-                    "closed",
-                    "abandoned",
-                }:
-                    session_manager.downgrade(session)
-                self._json(200, snapshot)
+                self._json(200, fleet_envelope(session))
                 return
             self._json(404, {"status": "not_found"})
+
+        def _events(self, session: _Session) -> None:
+            if not sse_slots.acquire(blocking=False):
+                self._json(
+                    503,
+                    {"status": "blocked", "finding": "fleet_sse_capacity_exceeded"},
+                )
+                return
+            cookie = self.headers.get("Cookie")
+            last_id = self.headers.get("Last-Event-ID", "")
+            if len(last_id) > 128 or any(ord(char) < 0x20 for char in last_id):
+                last_id = ""
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "keep-alive")
+                self._security_headers()
+                self.end_headers()
+                self.connection.settimeout(5)
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline:
+                    authenticated = session_manager.authenticate(cookie, touch=False)
+                    if authenticated is None:
+                        break
+                    session = authenticated
+                    envelope = fleet_envelope(session)
+                    encoded = json.dumps(
+                        envelope,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    event_id = _fleet_event_id(envelope)
+                    if event_id != last_id:
+                        frame = (
+                            f"id: {event_id}\n"
+                            "event: fleet\n"
+                            f"data: {encoded.decode('utf-8')}\n\n"
+                        ).encode("utf-8")
+                        self.wfile.write(frame)
+                        self.wfile.flush()
+                        last_id = event_id
+                    run = envelope["snapshot"].get("run")
+                    if isinstance(run, Mapping) and run.get("workflow_state") in {
+                        "closed",
+                        "abandoned",
+                    }:
+                        break
+                    time.sleep(3)
+            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                pass
+            finally:
+                sse_slots.release()
 
         def do_POST(self) -> None:  # noqa: N802
             if not self._host_allowed():
                 self._json(421, {"status": "blocked", "finding": "fleet_host_denied"})
                 return
-            if self.path != "/api/v1/context" or context_injector is None:
+            parsed = urlsplit(self.path)
+            if parsed.query or parsed.fragment:
+                self._json(404, {"status": "not_found"})
+                return
+            try:
+                path = unquote(parsed.path, encoding="utf-8", errors="strict")
+            except (UnicodeDecodeError, ValueError):
+                self._json(404, {"status": "not_found"})
+                return
+            action_match = re.fullmatch(
+                r"/api/v1/fleet/actions/([A-Za-z0-9][A-Za-z0-9:._-]{0,127})/resolve",
+                path,
+            )
+            if path in {"/api/v1/context", "/api/v1/fleet/context"}:
+                operation = "context"
+                service_present = context_injector is not None
+            elif action_match is not None:
+                operation = "resolve_action"
+                service_present = resolved_action_resolver is not None
+            elif path in {
+                "/api/v1/fleet/recover/confirm",
+                "/api/v1/fleet/recover",
+            }:
+                operation = "recover_run"
+                service_present = recovery_controller is not None
+            else:
+                operation = "unknown"
+                service_present = False
+            if not service_present:
                 self._json(405, {"status": "read_only"})
                 return
             session = session_manager.claim_mutation(self.headers.get("Cookie"))
@@ -292,23 +518,6 @@ def create_fleet_server(
                 self._json(
                     409,
                     {"status": "blocked", "finding": "fleet_session_read_only"},
-                    session_token=token,
-                )
-                return
-            snapshot = projector.snapshot()
-            verification = snapshot.get("verification")
-            run = snapshot.get("run")
-            if (
-                not isinstance(verification, Mapping)
-                or verification.get("status") != "verified"
-                or not isinstance(run, Mapping)
-                or run.get("workflow_state") in {"closed", "abandoned"}
-            ):
-                session.read_only = True
-                token = session_manager.rotate(session)
-                self._json(
-                    409,
-                    {"status": "blocked", "finding": "fleet_run_not_mutable"},
                     session_token=token,
                 )
                 return
@@ -331,6 +540,41 @@ def create_fleet_server(
                     session_token=token,
                 )
                 return
+            snapshot = projector.snapshot()
+            envelope = controls.envelope(
+                snapshot,
+                session_write_capable=True,
+                expires_at=session_manager.expires_at(session),
+            )
+            if operation == "resolve_action":
+                assert action_match is not None
+                action_id = action_match.group(1)
+                eligibility = envelope["eligibility"]["resolve_action"].get(
+                    action_id,
+                    {"eligible": False, "reason": "action_not_open"},
+                )
+            else:
+                eligibility = envelope["eligibility"][operation]
+            if not eligibility["eligible"]:
+                token = session_manager.rotate(session)
+                self._json(
+                    409,
+                    {
+                        "status": "blocked",
+                        "finding": eligibility["reason"],
+                    },
+                    session_token=token,
+                )
+                return
+            if operation != "context":
+                self._control_post(
+                    parsed.path,
+                    action_match.group(1) if action_match is not None else None,
+                    session,
+                    snapshot,
+                )
+                return
+            context_correlation: str | None = None
             try:
                 content_types = self.headers.get_all("Content-Type", failobj=[])
                 if len(content_types) != 1 or content_types[0].casefold() not in {
@@ -362,9 +606,23 @@ def create_fleet_server(
                     "media_type",
                     "source_name",
                     "confirm_direct",
+                    "correlation_id",
                 }
                 if set(payload) - allowed:
                     raise ValueError("context_request_invalid")
+                raw_correlation = payload.get("correlation_id")
+                if raw_correlation is None and parsed.path == "/api/v1/context":
+                    raw_correlation = "legacy-" + secrets.token_hex(16)
+                if (
+                    not isinstance(raw_correlation, str)
+                    or re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", raw_correlation
+                    )
+                    is None
+                ):
+                    raise ValueError("fleet_correlation_invalid")
+                context_correlation = raw_correlation
+                controls.begin(context_correlation, "context")
                 target_role = payload.get("target_role")
                 confirm_direct = payload.get("confirm_direct", False)
                 source_name = payload.get("source_name")
@@ -384,12 +642,14 @@ def create_fleet_server(
                     media_type = payload.get("media_type", "text/plain")
                     if not isinstance(media_type, str):
                         raise ValueError("context_request_invalid")
+                    assert context_injector is not None
                     result = context_injector.inject(
                         content,
                         target_role=target_role,
                         media_type=media_type,
                         source_name=source_name,
                         confirm_direct=confirm_direct,
+                        command_id=context_correlation,
                     )
                 elif input_kind == "file":
                     encoded = payload.get("content_base64")
@@ -407,16 +667,20 @@ def create_fleet_server(
                         raise ValueError("context_base64_invalid") from exc
                     if base64.b64encode(decoded).decode("ascii") != encoded:
                         raise ValueError("context_base64_invalid")
+                    assert context_injector is not None
                     result = context_injector.inject_artifact(
                         decoded,
                         target_role=target_role,
                         media_type=media_type,
                         source_name=source_name,
                         confirm_direct=confirm_direct,
+                        command_id=context_correlation,
                     )
                 else:
                     raise ValueError("context_request_invalid")
             except RedactionBlocked as exc:
+                if context_correlation is not None:
+                    controls.failed(context_correlation)
                 token = session_manager.rotate(session)
                 self._json(
                     400,
@@ -425,6 +689,8 @@ def create_fleet_server(
                 )
                 return
             except OrchestrationBlocked as exc:
+                if context_correlation is not None:
+                    controls.failed(context_correlation)
                 token = session_manager.rotate(session)
                 self._json(
                     400,
@@ -433,18 +699,202 @@ def create_fleet_server(
                 )
                 return
             except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                if context_correlation is not None:
+                    controls.failed(context_correlation)
                 token = session_manager.rotate(session)
                 self._json(400, {
                     "status": "blocked",
                     "finding": "context_request_invalid",
                 }, session_token=token)
                 return
+            expected_sequence = result.get("sequence")
+            if not isinstance(expected_sequence, int) or context_correlation is None:
+                if context_correlation is not None:
+                    controls.failed(context_correlation)
+                token = session_manager.rotate(session)
+                self._json(
+                    500,
+                    {"status": "internal_error", "finding": "context_result_invalid"},
+                    session_token=token,
+                )
+                return
+            controls.committed(context_correlation, expected_sequence)
             rotated = session_manager.rotate(session)
             self._json(
                 202,
-                {"status": "accepted", "context": result},
+                {
+                    "status": "accepted",
+                    "correlation_id": context_correlation,
+                    "context": result,
+                },
                 session_token=rotated,
             )
+
+        def _read_control_payload(self) -> Mapping[str, Any]:
+            content_types = self.headers.get_all("Content-Type", failobj=[])
+            if len(content_types) != 1 or content_types[0].casefold() not in {
+                "application/json",
+                "application/json; charset=utf-8",
+            }:
+                raise ValueError("fleet_control_content_type_invalid")
+            if self.headers.get_all("Transfer-Encoding", failobj=[]):
+                raise ValueError("fleet_control_transfer_encoding_denied")
+            lengths = self.headers.get_all("Content-Length", failobj=[])
+            if len(lengths) != 1 or not lengths[0].isdigit():
+                raise ValueError("fleet_control_size_invalid")
+            length = int(lengths[0])
+            if length <= 0 or length > 16_384:
+                raise ValueError("fleet_control_size_invalid")
+            payload = json.loads(
+                self.rfile.read(length),
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+            if not isinstance(payload, Mapping):
+                raise ValueError("fleet_control_request_invalid")
+            return payload
+
+        def _control_post(
+            self,
+            path: str,
+            action_id: str | None,
+            session: _Session,
+            snapshot: Mapping[str, Any],
+        ) -> None:
+            correlation_id: str | None = None
+            try:
+                payload = self._read_control_payload()
+                correlation_id = payload.get("correlation_id")
+                if (
+                    not isinstance(correlation_id, str)
+                    or re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}",
+                        correlation_id,
+                    )
+                    is None
+                ):
+                    raise ValueError("fleet_correlation_invalid")
+                if path == "/api/v1/fleet/recover/confirm":
+                    if set(payload) != {"correlation_id"}:
+                        raise ValueError("recovery_confirmation_request_invalid")
+                    confirmation = controls.issue_recovery_confirmation(
+                        snapshot,
+                        correlation_id=correlation_id,
+                        session_write_capable=True,
+                        expires_at=session_manager.expires_at(session),
+                    )
+                    rotated = session_manager.rotate(session)
+                    self._json(
+                        200,
+                        {
+                            "status": "confirmation_required",
+                            "correlation_id": correlation_id,
+                            "confirmation_token": confirmation,
+                            "effect": "Permanently abandon this governed run",
+                        },
+                        session_token=rotated,
+                    )
+                    return
+                if path == "/api/v1/fleet/recover":
+                    if set(payload) != {"correlation_id", "confirmation_token"}:
+                        raise ValueError("recovery_request_invalid")
+                    confirmation_token = payload.get("confirmation_token")
+                    if (
+                        not isinstance(confirmation_token, str)
+                        or len(confirmation_token) > 256
+                    ):
+                        raise ValueError("recovery_confirmation_invalid")
+                    controls.consume_recovery_confirmation(
+                        confirmation_token,
+                        snapshot,
+                        correlation_id=correlation_id,
+                    )
+                    assert recovery_controller is not None
+                    verification = snapshot.get("verification")
+                    lanes = snapshot.get("lanes")
+                    if not isinstance(verification, Mapping) or not isinstance(
+                        lanes, list
+                    ):
+                        raise ValueError("recovery_snapshot_invalid")
+                    covered = verification.get("covered_sequence")
+                    manifest_generation = verification.get("manifest_generation")
+                    if not isinstance(covered, int) or not isinstance(
+                        manifest_generation, int
+                    ):
+                        raise ValueError("recovery_snapshot_invalid")
+                    attempt_ids = [
+                        str(attempt["attempt_id"])
+                        for lane in lanes
+                        if isinstance(lane, Mapping)
+                        for attempt in lane.get("attempts", [])
+                        if isinstance(attempt, Mapping)
+                        and attempt.get("terminal_sequence") is None
+                        and isinstance(attempt.get("attempt_id"), str)
+                    ]
+                    controls.begin(correlation_id, "recover_run")
+                    result = recovery_controller.abandon(
+                        attempt_ids,
+                        covered,
+                        manifest_generation,
+                    )
+                    expected = result.get("sequence")
+                    if not isinstance(expected, int):
+                        raise ValueError("recovery_result_invalid")
+                    controls.committed(correlation_id, expected)
+                else:
+                    if action_id is None or set(payload) != {
+                        "correlation_id",
+                        "resolution",
+                    }:
+                        raise ValueError("action_resolution_request_invalid")
+                    resolution = payload.get("resolution")
+                    if (
+                        not isinstance(resolution, str)
+                        or re.fullmatch(
+                            r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", resolution
+                        )
+                        is None
+                    ):
+                        raise ValueError("action_resolution_request_invalid")
+                    assert resolved_action_resolver is not None
+                    controls.begin(correlation_id, "resolve_action")
+                    result = resolved_action_resolver.resolve_action(
+                        action_id=action_id,
+                        resolution=resolution,
+                        resolver_identity="operator:local-session",
+                    )
+                    expected = result.get("run_decision_sequence")
+                    if not isinstance(expected, int):
+                        raise ValueError("action_resolution_result_invalid")
+                    controls.committed(correlation_id, expected)
+                rotated = session_manager.rotate(session)
+                self._json(
+                    202,
+                    {
+                        "status": "accepted",
+                        "correlation_id": correlation_id,
+                        "result": dict(result),
+                    },
+                    session_token=rotated,
+                )
+            except OSError:
+                if correlation_id is not None:
+                    controls.failed(correlation_id)
+                token = session_manager.rotate(session)
+                self._json(
+                    500,
+                    {"status": "internal_error", "finding": "fleet_control_io_error"},
+                    session_token=token,
+                )
+            except (ValueError, OrchestrationBlocked, PermissionError) as exc:
+                if correlation_id is not None:
+                    controls.failed(correlation_id)
+                token = session_manager.rotate(session)
+                self._json(
+                    409,
+                    {"status": "blocked", "finding": str(exc)},
+                    session_token=token,
+                )
 
         def log_message(self, format: str, *args: object) -> None:
             del format, args
@@ -478,7 +928,7 @@ def create_fleet_server(
                     "Set-Cookie",
                     "torq_fleet_session="
                     + session_token
-                    + "; HttpOnly; SameSite=Strict; Path=/api/v1",
+                    + "; HttpOnly; SameSite=Strict; Path=/",
                 )
             self._security_headers()
             self.end_headers()

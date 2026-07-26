@@ -12,12 +12,12 @@ class TransitionRule:
     transition: str
     evidence_basis: str
     precondition: str
+    decision_value: str | None = None
     terminal: bool = False
-    permitted_statuses: frozenset[str] | None = None
 
 
 TRANSITION_RULES: tuple[TransitionRule, ...] = (
-    TransitionRule("orchestrator", "run_planned", "derived", "run_not_planned"),
+    TransitionRule("orchestrator", "run_planned", "observed", "run_not_planned"),
     TransitionRule(
         "orchestrator", "stage_attempt_created", "observed", "lane_available"
     ),
@@ -25,42 +25,52 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         "orchestrator", "stage_dispatch_started", "observed", "attempt_open"
     ),
     TransitionRule(
-        "orchestrator", "stage_blocked", "observed", "attempt_open_undispatched", True
+        "orchestrator", "stage_blocked", "observed", "attempt_open_undispatched",
+        terminal=True,
     ),
     TransitionRule(
-        "orchestrator", "stage_completed", "observed", "attempt_open_dispatched", True
+        "orchestrator", "stage_rejected", "observed",
+        "attempt_open_dispatched_review_verdict_reject",
+        terminal=True,
     ),
     TransitionRule(
-        "orchestrator", "stage_failed", "observed", "attempt_open", True
+        "orchestrator", "stage_completed", "observed", "attempt_open_dispatched",
+        terminal=True,
+    ),
+    TransitionRule(
+        "orchestrator", "stage_failed", "observed", "attempt_open", terminal=True
     ),
     TransitionRule(
         "orchestrator", "repair_routed", "derived", "qualifying_defect"
     ),
     TransitionRule("orchestrator", "action_opened", "derived", "action_new"),
     TransitionRule(
-        "orchestrator",
-        "run_decision",
-        "derived",
-        "decision_valid",
-        True,
-        frozenset({
-            "awaiting_approval",
-            "blocked",
-            "execution_complete_action_open",
-            "terminating",
-            "workflow_closed",
-        }),
+        "orchestrator", "terminalization_started", "derived", "commands_pending"
     ),
     TransitionRule(
-        "supervisor", "stage_interrupted", "derived", "attempt_open", True
+        "orchestrator", "run_decision", "derived", "required_lanes_completed",
+        "completed", True,
+    ),
+    TransitionRule(
+        "orchestrator", "run_decision", "derived", "required_lane_blocked",
+        "blocked", True,
+    ),
+    TransitionRule(
+        "orchestrator", "run_decision", "derived", "required_lane_failed",
+        "failed", True,
+    ),
+    TransitionRule(
+        "orchestrator", "run_decision", "derived", "action_open",
+        "awaiting_approval", False,
+    ),
+    TransitionRule(
+        "supervisor", "stage_interrupted", "observed", "attempt_open", None, True
     ),
     TransitionRule(
         "supervisor",
         "run_decision",
         "derived",
-        "interruption_linked",
-        True,
-        frozenset({"workflow_failed"}),
+        "interruption_linked", "failed", True,
     ),
     TransitionRule(
         "operator_gateway", "command_accepted", "submitted", "command_new"
@@ -87,24 +97,44 @@ TRANSITION_RULES: tuple[TransitionRule, ...] = (
         "operator_gateway",
         "run_decision",
         "derived",
-        "last_action_resolved",
-        True,
-        frozenset({"workflow_closed"}),
+        "last_action_resolved", "completed", True,
     ),
     TransitionRule(
-        "recovery", "run_abandoned", "submitted", "open_attempts_enumerated", True
+        "operator_gateway", "run_decision", "derived", "last_action_resolved",
+        "blocked", True,
+    ),
+    TransitionRule(
+        "operator_gateway", "run_decision", "derived", "last_action_resolved",
+        "failed", True,
+    ),
+    TransitionRule(
+        "recovery", "run_abandoned", "submitted", "open_attempts_enumerated",
+        terminal=True,
     ),
 )
 
 _RULE_INDEX = {
-    (rule.writer_role, rule.transition): rule for rule in TRANSITION_RULES
+    (rule.writer_role, rule.transition, rule.decision_value): rule
+    for rule in TRANSITION_RULES
 }
+if len(_RULE_INDEX) != len(TRANSITION_RULES):
+    raise RuntimeError("transition_rule_duplicate")
+if any(
+    (rule.transition == "run_decision") != (rule.decision_value is not None)
+    for rule in TRANSITION_RULES
+):
+    raise RuntimeError("transition_rule_decision_discriminator_invalid")
 _GOVERNED_TRANSITIONS = frozenset(rule.transition for rule in TRANSITION_RULES)
 
 
-def transition_rule(writer_role: str, transition: str) -> TransitionRule | None:
+def transition_rule(
+    writer_role: str,
+    transition: str,
+    decision_value: object = None,
+) -> TransitionRule | None:
     """Return the one authority rule for a governed transition."""
-    return _RULE_INDEX.get((writer_role, transition))
+    normalized = decision_value if isinstance(decision_value, str) else None
+    return _RULE_INDEX.get((writer_role, transition, normalized))
 
 
 def transition_authority_finding(
@@ -112,12 +142,28 @@ def transition_authority_finding(
     transition: object,
     evidence_basis: object,
     payload: Mapping[str, object],
+    *,
+    legacy: bool = False,
 ) -> str | None:
     """Validate role and basis using the shared machine-readable matrix."""
     if not isinstance(writer_role, str) or not isinstance(transition, str):
         return "receipt_writer_unauthorized"
-    rule = transition_rule(writer_role, transition)
+    if legacy:
+        return _legacy_authority_finding(
+            writer_role,
+            transition,
+            evidence_basis,
+            payload,
+        )
+    decision_value = payload.get("decision") if transition == "run_decision" else None
+    rule = transition_rule(writer_role, transition, decision_value)
     if rule is None:
+        if transition == "run_decision" and any(
+            candidate.writer_role == writer_role
+            and candidate.transition == transition
+            for candidate in TRANSITION_RULES
+        ):
+            return "run_decision_value_unauthorized"
         # Pre-v2 generic audit events remain readable while governed lifecycle
         # transitions are closed. New governed rows must be declared above.
         if (
@@ -129,12 +175,61 @@ def transition_authority_finding(
         return "receipt_writer_unauthorized"
     if evidence_basis != rule.evidence_basis:
         return "receipt_writer_unauthorized"
-    if (
-        rule.permitted_statuses is not None
-        and payload.get("status") not in rule.permitted_statuses
-    ):
-        return "run_decision_status_unauthorized"
     return None
+
+
+_LEGACY_BASES = {
+    ("orchestrator", "run_planned"): "derived",
+    ("orchestrator", "stage_attempt_created"): "observed",
+    ("orchestrator", "stage_dispatch_started"): "observed",
+    ("orchestrator", "stage_blocked"): "observed",
+    ("orchestrator", "stage_completed"): "observed",
+    ("orchestrator", "stage_failed"): "observed",
+    ("orchestrator", "repair_routed"): "derived",
+    ("orchestrator", "action_opened"): "derived",
+    ("supervisor", "stage_interrupted"): "derived",
+    ("operator_gateway", "command_accepted"): "submitted",
+    ("operator_gateway", "command_rejected"): "submitted",
+    ("operator_gateway", "context_injected"): "submitted",
+    ("orchestrator", "context_injected"): "derived",
+    ("orchestrator", "command_unapplied"): "derived",
+    ("orchestrator", "run_replanned"): "derived",
+    ("operator_gateway", "action_resolved"): "submitted",
+    ("recovery", "run_abandoned"): "submitted",
+}
+_LEGACY_STATUSES = {
+    "orchestrator": frozenset({
+        "awaiting_approval", "blocked", "execution_complete_action_open",
+        "terminating", "workflow_closed",
+    }),
+    "supervisor": frozenset({"workflow_failed"}),
+    "operator_gateway": frozenset({"workflow_closed"}),
+}
+
+
+def _legacy_authority_finding(
+    writer_role: str,
+    transition: str,
+    evidence_basis: object,
+    payload: Mapping[str, object],
+) -> str | None:
+    if transition == "run_decision":
+        if (
+            evidence_basis != "derived"
+            or payload.get("status") not in _LEGACY_STATUSES.get(writer_role, ())
+        ):
+            return "receipt_writer_unauthorized"
+        return None
+    expected = _LEGACY_BASES.get((writer_role, transition))
+    if expected is None:
+        if (
+            transition not in _GOVERNED_TRANSITIONS
+            and writer_role == "orchestrator"
+            and evidence_basis != "submitted"
+        ):
+            return None
+        return "receipt_writer_unauthorized"
+    return None if evidence_basis == expected else "receipt_writer_unauthorized"
 
 
 __all__ = [

@@ -18,7 +18,11 @@ from torq_cli.safety.accounting_registry import (
 )
 from torq_cli.safety.entitlements import PlanWindow
 from torq_cli.safety.pricing import RateTable
-from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain
+from torq_cli.safety.receipts import (
+    FileRunKeyStore,
+    ReceiptChain,
+    restrict_receipt_trust_anchor,
+)
 
 
 _RESET = "2030-01-01T00:00:00Z"
@@ -182,6 +186,16 @@ def test_rotated_root_counts_only_when_explicitly_trusted_as_legacy(
     current_root = tmp_path / "current"
     _sealed_run(legacy_root, "run-legacy")
     shutil.copytree(legacy_root / "run-legacy", current_root / "run-legacy")
+    current_keys = FileRunKeyStore(current_root)
+    current_keys.get_or_create_run_keys("run-legacy")
+    source_anchor = next(
+        (legacy_root / ".torq-run-identities").glob("*/manifest-head.v1.json")
+    )
+    target_anchor = next(
+        (current_root / ".torq-run-identities").glob("*/manifest.key")
+    ).with_name("manifest-head.v1.json")
+    target_anchor.write_bytes(source_anchor.read_bytes())
+    restrict_receipt_trust_anchor(target_anchor)
     legacy_public = bytes.fromhex(
         (legacy_root / ".torq-receipt-signing-key.pub")
         .read_text(encoding="ascii")

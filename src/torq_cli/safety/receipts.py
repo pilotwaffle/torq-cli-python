@@ -22,7 +22,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 from torq_cli.core.redaction import PatternRegistry
 from torq_cli.core.canonical_json import canonical_json
-from torq_cli.domain.evidence_transitions import transition_authority_finding
+from torq_cli.domain.evidence_transitions import (
+    transition_authority_finding,
+    transition_rule,
+)
 from torq_cli.domain.run_evidence import (
     validate_receipt_payload,
     validate_v2_receipt_contract,
@@ -34,6 +37,11 @@ _PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
 _LEGACY_RECEIPT_SCHEMA_VERSION = "1.0.0"
 _AUTHORITY_RECEIPT_SCHEMA_VERSION = "1.1.0"
 _RECEIPT_SCHEMA_VERSION = "2.0.0"
+_LEGACY_CERTIFICATE_SCHEMA_VERSION = "1.0.0"
+_ANCHORLESS_CERTIFICATE_SCHEMA_VERSION = "2.0.0"
+_CERTIFICATE_SCHEMA_VERSION = "3.0.0"
+_MANIFEST_ANCHOR_SCHEMA_VERSION = "1.0.0"
+_MANIFEST_ROLLBACK_POLICY = "external-signed-head-v1"
 _RECEIPT_AUTHORITIES = frozenset({"worker", "supervisor_derived"})
 _SUPERVISOR_TRANSITIONS = frozenset({"stage_interrupted", "run_decision"})
 _WRITER_ROLES = frozenset(
@@ -44,6 +52,22 @@ _RUN_CERTIFICATE_NAME = "run-certificate.json"
 _RUN_IDENTITIES_DIR = ".torq-run-identities"
 _ARTIFACT_FORMAT = b"TORQAEAD1"
 _BINARY = getattr(os, "O_BINARY", 0)
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul", "clock$"}
+    | {f"com{index}" for index in range(1, 10)}
+    | {f"lpt{index}" for index in range(1, 10)}
+)
+
+
+def _valid_run_id(run_id: str) -> bool:
+    stem = run_id.split(".", 1)[0].casefold()
+    return (
+        _RUN_ID.fullmatch(run_id) is not None
+        and run_id not in {".", ".."}
+        and not run_id.endswith(".")
+        and stem not in _WINDOWS_DEVICE_NAMES
+    )
 
 
 def _receipt_authority_finding(
@@ -67,6 +91,8 @@ def _writer_contract_finding(
     evidence_basis: object,
     transition: object,
     payload: object,
+    *,
+    legacy: bool = False,
 ) -> str | None:
     if writer_role not in _WRITER_ROLES:
         return "receipt_writer_role_invalid"
@@ -79,6 +105,7 @@ def _writer_contract_finding(
         transition,
         evidence_basis,
         payload,
+        legacy=legacy,
     )
     if authority_finding is not None:
         return authority_finding
@@ -86,6 +113,7 @@ def _writer_contract_finding(
         transition,
         payload,
         writer_role=str(writer_role),
+        legacy=legacy,
     )
 
 
@@ -167,6 +195,7 @@ def _atomic_write(
     *,
     mode: int = 0o600,
     observer: Callable[[str], None] | None = None,
+    restrict: Callable[[Path], None] | None = None,
 ) -> None:
     """Write, flush, replace, and directory-flush one security artifact."""
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
@@ -186,10 +215,14 @@ def _atomic_write(
         os.close(descriptor)
     try:
         os.chmod(temporary, mode)
+        if restrict is not None:
+            restrict(temporary)
         if observer is not None:
             observer("temporary_fsynced")
         os.replace(temporary, path)
         os.chmod(path, mode)
+        if restrict is not None:
+            restrict(path)
         if observer is not None:
             observer("replaced")
         _fsync_directory(path.parent)
@@ -570,6 +603,63 @@ def restrict_receipt_trust_anchor(path: Path) -> None:
     _restrict_trust_anchor(path)
 
 
+def _manifest_identity_directory(evidence_root: Path, run_id: str) -> Path:
+    identity = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    return evidence_root / _RUN_IDENTITIES_DIR / identity
+
+
+def _manifest_anchor_path(evidence_root: Path, run_id: str) -> Path:
+    return _manifest_identity_directory(evidence_root, run_id) / "manifest-head.v1.json"
+
+
+def _manifest_bytes_hash(payload: bytes) -> str:
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _read_manifest_anchor(
+    evidence_root: Path,
+    run_id: str,
+    trusted_public_key: bytes,
+) -> dict[str, Any]:
+    directory = _manifest_identity_directory(evidence_root, run_id)
+    path = _manifest_anchor_path(evidence_root, run_id)
+    for candidate in (directory, path):
+        metadata = candidate.stat(follow_symlinks=False)
+        type_safe = (
+            stat.S_ISDIR(metadata.st_mode)
+            if candidate == directory
+            else stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+        )
+        if not type_safe:
+            raise PermissionError("manifest_anchor_unsafe")
+        if not signing_file_permissions_are_restricted(candidate):
+            raise PermissionError("manifest_anchor_unsafe")
+    encoded = path.read_bytes()
+    value = json.loads(encoded)
+    if not isinstance(value, dict) or encoded != _canonical(value):
+        raise ValueError("manifest_anchor_invalid")
+    body = dict(value)
+    try:
+        signature = bytes.fromhex(str(body.pop("root_signature")))
+        Ed25519PublicKey.from_public_bytes(trusted_public_key).verify(
+            signature,
+            _canonical(body),
+        )
+    except (InvalidSignature, KeyError, ValueError) as exc:
+        raise ValueError("manifest_anchor_invalid") from exc
+    generation = body.get("manifest_generation")
+    if (
+        body.get("anchor_schema_version") != _MANIFEST_ANCHOR_SCHEMA_VERSION
+        or body.get("run_id") != run_id
+        or not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 0
+        or body.get("root_key_id") != _key_id(trusted_public_key)
+    ):
+        raise ValueError("manifest_anchor_invalid")
+    return value
+
+
 @dataclass(frozen=True)
 class RunKeys:
     manifest: bytes
@@ -621,9 +711,19 @@ class ReceiptWriter(Protocol):
         *,
         writer_role: str = "orchestrator",
         evidence_basis: str | None = None,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]: ...
 
     def seal(self) -> Path: ...
+
+    def resolve_action(
+        self,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]: ...
 
     @staticmethod
     def hash_file(path: Path) -> str: ...
@@ -788,8 +888,12 @@ class ReceiptChain:
         policy_version: str,
         commit_observer: Callable[[str], None] | None = None,
     ) -> None:
+        if not _valid_run_id(run_id):
+            raise ValueError("run_id_invalid")
         self.run_id = run_id
         self.root = evidence_root / run_id
+        if self.root.resolve(strict=False).parent != evidence_root.resolve(strict=False):
+            raise ValueError("run_id_invalid")
         self.root.mkdir(parents=True, exist_ok=True)
         self.receipts_path = self.root / "receipts.jsonl"
         self.key = keys.get_or_create(run_id)
@@ -804,6 +908,17 @@ class ReceiptChain:
         self._sequence = 0
         self._previous: str | None = None
         self._sealed = False
+        self._manifest_generation = 0
+        certificate = json.loads(self.certificate_path.read_text(encoding="utf-8"))
+        self._rollback_protected = (
+            isinstance(certificate, Mapping)
+            and certificate.get("certificate_schema_version")
+            == _CERTIFICATE_SCHEMA_VERSION
+            and certificate.get("manifest_rollback_policy")
+            == _MANIFEST_ROLLBACK_POLICY
+        )
+        if self._rollback_protected:
+            self._initialize_or_resume_anchored_store()
 
     def _pin_signing_identity(self, evidence_root: Path) -> None:
         public_key = Ed25519PrivateKey.from_private_bytes(self.key).public_key().public_bytes_raw()
@@ -854,8 +969,9 @@ class ReceiptChain:
             .public_bytes_raw()
         )
         body = {
-            "certificate_schema_version": "1.0.0",
+            "certificate_schema_version": _CERTIFICATE_SCHEMA_VERSION,
             "run_id": self.run_id,
+            "manifest_rollback_policy": _MANIFEST_ROLLBACK_POLICY,
             "manifest_key": {
                 "key_id": _key_id(manifest_public),
                 "public_key": manifest_public.hex(),
@@ -873,11 +989,133 @@ class ReceiptChain:
         target = self.root / _RUN_CERTIFICATE_NAME
         encoded = _canonical(signed)
         if target.exists():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError("run_certificate_invalid") from exc
+            if (
+                isinstance(existing, Mapping)
+                and existing.get("certificate_schema_version")
+                == _LEGACY_CERTIFICATE_SCHEMA_VERSION
+            ):
+                raise ValueError("run_certificate_legacy_read_only")
+            if (
+                isinstance(existing, Mapping)
+                and existing.get("certificate_schema_version")
+                == _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION
+            ):
+                return target
             if not hmac.compare_digest(target.read_bytes(), encoded):
                 raise ValueError("run_certificate_mismatch")
             return target
         _atomic_write(target, encoded)
         return target
+
+    def _anchor_body(
+        self,
+        manifest: Mapping[str, Any] | None,
+        manifest_bytes: bytes | None,
+    ) -> dict[str, Any]:
+        manifest_public = (
+            Ed25519PrivateKey.from_private_bytes(self.run_keys.manifest)
+            .public_key()
+            .public_bytes_raw()
+        )
+        return {
+            "anchor_schema_version": _MANIFEST_ANCHOR_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "certificate_hash": self.hash_file(self.certificate_path),
+            "manifest_key_id": _key_id(manifest_public),
+            "manifest_generation": (
+                int(manifest["manifest_generation"]) if manifest is not None else 0
+            ),
+            "manifest_hash": (
+                _manifest_bytes_hash(manifest_bytes)
+                if manifest_bytes is not None
+                else None
+            ),
+            "receipt_count": int(manifest["receipt_count"]) if manifest else 0,
+            "terminal_receipt_hash": (
+                manifest.get("terminal_receipt_hash") if manifest else None
+            ),
+            "sealed": bool(manifest.get("sealed")) if manifest else False,
+            "root_key_id": _key_id(
+                Ed25519PrivateKey.from_private_bytes(self.key)
+                .public_key()
+                .public_bytes_raw()
+            ),
+        }
+
+    def _write_manifest_anchor(
+        self,
+        manifest: Mapping[str, Any] | None,
+        manifest_bytes: bytes | None,
+    ) -> None:
+        directory = _manifest_identity_directory(self.root.parent, self.run_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        _restrict_signing_directory(directory, "manifest_anchor_unsafe")
+        body = self._anchor_body(manifest, manifest_bytes)
+        signed = {
+            **body,
+            "root_signature": Ed25519PrivateKey.from_private_bytes(self.key)
+            .sign(_canonical(body))
+            .hex(),
+        }
+        commit_observer = self._commit_observer
+        anchor_observer = (
+            (lambda stage: commit_observer("anchor_" + stage))
+            if commit_observer is not None
+            else None
+        )
+        _atomic_write(
+            _manifest_anchor_path(self.root.parent, self.run_id),
+            _canonical(signed),
+            observer=anchor_observer,
+            restrict=_restrict_trust_anchor,
+        )
+
+    def _initialize_or_resume_anchored_store(self) -> None:
+        anchor_path = _manifest_anchor_path(self.root.parent, self.run_id)
+        manifest_path = self.root / "terminal-manifest.json"
+        trusted = (
+            Ed25519PrivateKey.from_private_bytes(self.key)
+            .public_key()
+            .public_bytes_raw()
+        )
+        if not anchor_path.exists():
+            if manifest_path.exists() or self.receipts_path.exists():
+                raise ValueError("manifest_anchor_missing")
+            self._write_manifest_anchor(None, None)
+            return
+        verification = verify_receipt_store(
+            self.root,
+            trusted_public_key=trusted,
+        ) if manifest_path.exists() or self.receipts_path.exists() else None
+        if (
+            verification is not None
+            and verification.status == "incomplete"
+            and verification.finding == "manifest_anchor_update_pending"
+        ):
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
+            if not isinstance(manifest, Mapping):
+                raise ValueError("manifest_anchor_update_invalid")
+            self._write_manifest_anchor(manifest, manifest_bytes)
+            verification = verify_receipt_store(
+                self.root,
+                trusted_public_key=trusted,
+            )
+        if verification is not None:
+            if verification.status != "verified":
+                raise ValueError(
+                    "receipt_store_not_writable:"
+                    + str(verification.finding or verification.status)
+                )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self._sequence = int(manifest["receipt_count"])
+            self._previous = manifest.get("terminal_receipt_hash")
+            self._sealed = bool(manifest.get("sealed"))
+            self._manifest_generation = int(manifest["manifest_generation"])
 
     @staticmethod
     def hash_file(path: Path) -> str:
@@ -896,6 +1134,8 @@ class ReceiptChain:
         manifest = self.root / "terminal-manifest.json"
         if not self.receipts_path.exists() and not manifest.exists():
             return
+        if not self._rollback_protected:
+            raise ValueError("receipt_store_legacy_read_only")
         trusted = (
             Ed25519PrivateKey.from_private_bytes(self.key)
             .public_key()
@@ -937,12 +1177,9 @@ class ReceiptChain:
         if self._sealed:
             raise ValueError("receipt_after_terminal_decision")
         if evidence_basis is None:
-            evidence_basis = (
-                "derived"
-                if transition
-                in {"run_planned", "run_decision", "repair_routed", "action_opened"}
-                else "observed"
-            )
+            decision = payload.get("decision") if transition == "run_decision" else None
+            rule = transition_rule(writer_role, transition, decision)
+            evidence_basis = rule.evidence_basis if rule is not None else "observed"
         writer_finding = _writer_contract_finding(
             writer_role,
             evidence_basis,
@@ -970,6 +1207,7 @@ class ReceiptChain:
             )
             receipt = {
                 "schema_version": self.schema_version,
+                "run_id": self.run_id,
                 "profile_version": self.profile_version,
                 "policy_version": self.policy_version,
                 "sequence": self._sequence,
@@ -1013,6 +1251,76 @@ class ReceiptChain:
             self._write_manifest(sealed=False)
             return envelope
 
+    def resolve_action(
+        self,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]:
+        """Atomically resolve one sealed action contract and close the run."""
+        if not action_id or not resolution or not resolver_identity:
+            raise ValueError("action_resolution_invalid")
+        with self._lock:
+            self._assert_store_writable()
+            opened_sequence: int | None = None
+            outcome_map: dict[str, str] | None = None
+            already_resolved = False
+            for receipt in self.covered_receipts():
+                payload = receipt.get("payload", {})
+                if (
+                    not isinstance(payload, Mapping)
+                    or payload.get("action_id") != action_id
+                ):
+                    continue
+                if receipt.get("transition") == "action_opened":
+                    opened_sequence = int(receipt["sequence"])
+                    candidate_map = payload.get("outcome_map")
+                    if isinstance(candidate_map, Mapping):
+                        outcome_map = {
+                            str(key): str(value)
+                            for key, value in candidate_map.items()
+                        }
+                elif receipt.get("transition") == "action_resolved":
+                    already_resolved = True
+            if opened_sequence is None:
+                raise ValueError("action_open_missing")
+            if already_resolved:
+                raise ValueError("action_already_resolved")
+            if outcome_map is None or resolution not in outcome_map:
+                raise ValueError("action_resolution_unauthorized")
+            resolved = self.append(
+                "action_resolved",
+                {
+                    "action_id": action_id,
+                    "resolution": resolution,
+                    "resolver_identity": resolver_identity,
+                    "opened_sequence": opened_sequence,
+                    "provider_dispatch": False,
+                },
+                writer_role="operator_gateway",
+                evidence_basis="submitted",
+            )
+            decision = self.terminalize(
+                "run_decision",
+                {
+                    "decision": outcome_map[resolution],
+                    "outcome": resolution,
+                    "action_id": action_id,
+                    "action_resolved_sequence": resolved["sequence"],
+                    "provider_dispatch": False,
+                },
+                writer_role="operator_gateway",
+                evidence_basis="derived",
+            )
+            self.seal()
+            return {
+                "action_id": action_id,
+                "action_resolved_sequence": resolved["sequence"],
+                "run_decision_sequence": decision["sequence"],
+                "status": outcome_map[resolution],
+            }
+
     def write_artifact(self, name: str, content: str) -> Path:
         with self._lock:
             if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name) is None:
@@ -1042,11 +1350,23 @@ class ReceiptChain:
         *,
         writer_role: str = "orchestrator",
         evidence_basis: str | None = None,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]:
         """Atomically close command admission, finalize pending input, and decide."""
         if transition not in {"run_decision", "run_abandoned"}:
             raise ValueError("terminal_transition_invalid")
         with self._lock:
+            sequence_changed = (
+                expected_sequence is not None
+                and expected_sequence != self._sequence
+            )
+            generation_changed = (
+                expected_manifest_generation is not None
+                and expected_manifest_generation != self._manifest_generation
+            )
+            if sequence_changed or generation_changed:
+                raise ValueError("recovery_confirmation_stale")
             receipts = self.covered_receipts()
             finalized = {
                 str(receipt.get("payload", {}).get("command_id"))
@@ -1063,10 +1383,9 @@ class ReceiptChain:
             ]
             if pending:
                 self.append(
-                    "run_decision",
+                    "terminalization_started",
                     {
-                        "status": "terminating",
-                        "outcome": "pending_commands_unapplied",
+                        "reason": "pending_commands",
                         "provider_dispatch": False,
                     },
                     writer_role="orchestrator",
@@ -1089,7 +1408,7 @@ class ReceiptChain:
                         evidence_basis="derived",
                     )
             final_payload = dict(payload)
-            if transition == "run_abandoned":
+            if transition == "run_abandoned" and "last_covered_sequence" not in final_payload:
                 final_payload["last_covered_sequence"] = self.sequence
             return self.append(
                 transition,
@@ -1132,9 +1451,16 @@ class ReceiptChain:
             return tuple(json.loads(line) for line in lines[:count])
 
     def _write_manifest(self, *, sealed: bool) -> Path:
+        target = self.root / "terminal-manifest.json"
+        previous_manifest_hash = (
+            _manifest_bytes_hash(target.read_bytes()) if target.exists() else None
+        )
+        next_generation = self._manifest_generation + 1
         manifest = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
+            "manifest_generation": next_generation,
+            "previous_manifest_hash": previous_manifest_hash,
             "terminal_receipt_hash": self._previous,
             "receipt_count": self._sequence,
             "sealed": sealed,
@@ -1150,8 +1476,10 @@ class ReceiptChain:
             **manifest,
             "signature": private.sign(_canonical(manifest)).hex(),
         }
-        target = self.root / "terminal-manifest.json"
-        _atomic_write(target, _canonical(signed), observer=self._commit_observer)
+        encoded = _canonical(signed)
+        _atomic_write(target, encoded, observer=self._commit_observer)
+        self._write_manifest_anchor(signed, encoded)
+        self._manifest_generation = next_generation
         return target
 
     def seal(self) -> Path:
@@ -1315,9 +1643,12 @@ def verify_receipt_store(
             certificate_path = root / _RUN_CERTIFICATE_NAME
             if not certificate_path.exists():
                 return StoreVerification("incomplete", "run_certificate_missing")
-            certificate = json.loads(certificate_path.read_text(encoding="utf-8"))
+            certificate_bytes = certificate_path.read_bytes()
+            certificate = json.loads(certificate_bytes)
             if not isinstance(certificate, dict):
                 return StoreVerification("unreadable", "run_certificate_invalid")
+            certificate_file_hash = ReceiptChain.hash_file(certificate_path)
+            full_certificate = dict(certificate)
             root_signature = bytes.fromhex(str(certificate.pop("root_signature")))
             try:
                 Ed25519PublicKey.from_public_bytes(trusted_public_key).verify(
@@ -1326,15 +1657,38 @@ def verify_receipt_store(
                 )
             except InvalidSignature:
                 return StoreVerification("tampered", "run_certificate_signature_invalid")
+            certificate_schema_version = certificate.get(
+                "certificate_schema_version"
+            )
             if (
-                certificate.get("certificate_schema_version") != "1.0.0"
+                certificate_schema_version not in {
+                    _LEGACY_CERTIFICATE_SCHEMA_VERSION,
+                    _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION,
+                    _CERTIFICATE_SCHEMA_VERSION,
+                }
                 or certificate.get("run_id") != signed.get("run_id")
                 or certificate.get("run_id") != root.name
                 or signed.get("schema_version") != _RECEIPT_SCHEMA_VERSION
                 or signed.get("certificate_hash")
-                != ReceiptChain.hash_file(certificate_path)
+                != certificate_file_hash
             ):
                 return StoreVerification("tampered", "run_certificate_invalid")
+            if (
+                certificate_schema_version != _CERTIFICATE_SCHEMA_VERSION
+                and _manifest_anchor_path(
+                    root.parent,
+                    str(certificate.get("run_id")),
+                ).exists()
+            ):
+                return StoreVerification("tampered", "run_certificate_rollback_detected")
+            if (
+                certificate_schema_version in {
+                    _ANCHORLESS_CERTIFICATE_SCHEMA_VERSION,
+                    _CERTIFICATE_SCHEMA_VERSION,
+                }
+                and certificate_bytes != _canonical(full_certificate)
+            ):
+                return StoreVerification("tampered", "run_certificate_noncanonical")
             manifest_key = certificate.get("manifest_key")
             writers = certificate.get("writers")
             if not isinstance(manifest_key, dict) or not isinstance(writers, dict):
@@ -1352,6 +1706,63 @@ def verify_receipt_store(
                 )
             except InvalidSignature:
                 return StoreVerification("tampered", "manifest_signature_invalid")
+            if certificate_schema_version == _CERTIFICATE_SCHEMA_VERSION:
+                if (
+                    certificate.get("manifest_rollback_policy")
+                    != _MANIFEST_ROLLBACK_POLICY
+                    or manifest_bytes != _canonical(signed_preview)
+                ):
+                    return StoreVerification("tampered", "manifest_anchor_invalid")
+                generation = signed.get("manifest_generation")
+                if (
+                    not isinstance(generation, int)
+                    or isinstance(generation, bool)
+                    or generation <= 0
+                ):
+                    return StoreVerification("tampered", "manifest_generation_invalid")
+                try:
+                    anchor = _read_manifest_anchor(
+                        root.parent,
+                        str(signed.get("run_id")),
+                        trusted_public_key,
+                    )
+                except FileNotFoundError:
+                    return StoreVerification("tampered", "manifest_anchor_missing")
+                except PermissionError:
+                    return StoreVerification("tampered", "manifest_anchor_unsafe")
+                except (OSError, ValueError, json.JSONDecodeError):
+                    return StoreVerification("tampered", "manifest_anchor_invalid")
+                anchor_body = dict(anchor)
+                anchor_body.pop("root_signature", None)
+                manifest_hash = _manifest_bytes_hash(manifest_bytes)
+                binding_matches = (
+                    anchor_body.get("certificate_hash") == certificate_file_hash
+                    and anchor_body.get("manifest_key_id")
+                    == manifest_key.get("key_id")
+                )
+                exact_head = (
+                    anchor_body.get("manifest_generation") == generation
+                    and anchor_body.get("manifest_hash") == manifest_hash
+                    and anchor_body.get("receipt_count") == signed.get("receipt_count")
+                    and anchor_body.get("terminal_receipt_hash")
+                    == signed.get("terminal_receipt_hash")
+                    and anchor_body.get("sealed") == bool(signed.get("sealed"))
+                )
+                if not binding_matches:
+                    return StoreVerification("tampered", "manifest_anchor_invalid")
+                if not exact_head:
+                    pending = (
+                        generation
+                        == int(anchor_body.get("manifest_generation", -2)) + 1
+                        and signed.get("previous_manifest_hash")
+                        == anchor_body.get("manifest_hash")
+                    )
+                    if pending:
+                        return StoreVerification(
+                            "incomplete",
+                            "manifest_anchor_update_pending",
+                        )
+                    return StoreVerification("tampered", "manifest_rollback_detected")
             if set(writers) != _WRITER_ROLES:
                 return StoreVerification("tampered", "run_certificate_invalid")
             certified_key_ids = {str(manifest_key.get("key_id"))}
@@ -1368,6 +1779,11 @@ def verify_receipt_store(
             ):
                 return StoreVerification("tampered", "run_certificate_invalid")
             for receipt in receipts:
+                if (
+                    certificate_schema_version == _CERTIFICATE_SCHEMA_VERSION
+                    and receipt.get("run_id") != certificate.get("run_id")
+                ):
+                    return StoreVerification("tampered", "receipt_run_id_mismatch")
                 writer_role = receipt.get("writer_role")
                 evidence_basis = receipt.get("evidence_basis")
                 writer_finding = _writer_contract_finding(
@@ -1375,6 +1791,10 @@ def verify_receipt_store(
                     evidence_basis,
                     receipt.get("transition"),
                     receipt.get("payload"),
+                    legacy=(
+                        certificate_schema_version
+                        == _LEGACY_CERTIFICATE_SCHEMA_VERSION
+                    ),
                 )
                 if writer_finding is not None:
                     return StoreVerification("tampered", writer_finding)
@@ -1400,6 +1820,10 @@ def verify_receipt_store(
             lifecycle_finding = validate_v2_receipt_contract(
                 receipts,
                 sealed=bool(signed.get("sealed")),
+                legacy=(
+                    certificate_schema_version
+                    == _LEGACY_CERTIFICATE_SCHEMA_VERSION
+                ),
             )
             if lifecycle_finding is not None:
                 return StoreVerification("tampered", lifecycle_finding)

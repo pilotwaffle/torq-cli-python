@@ -12,6 +12,8 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.domain.evidence_transitions import transition_authority_finding
+from torq_cli.domain.run_evidence import LANE_ORDER, validate_receipt_payload
 from torq_cli.safety.receipts import (
     FileRunKeyStore,
     ReceiptChain,
@@ -41,6 +43,44 @@ def _chain(evidence_root: Path, name: str) -> ReceiptChain:
         FileRunKeyStore(evidence_root),
         profile_version="1.0.0",
         policy_version="3.1.3",
+    )
+
+
+def _plan_with_required(chain: ReceiptChain, required: set[str]) -> None:
+    chain.append(
+        "run_planned",
+        {
+            "mode": "live",
+            "profile_id": "test-profile",
+            "strategy_id": "test-strategy",
+            "planned_roles": list(LANE_ORDER),
+            "lane_catalog": [
+                {"role": role, "required": role in required}
+                for role in LANE_ORDER
+            ],
+        },
+    )
+
+
+def _append_rejected_attempt(
+    chain: ReceiptChain, *, ordinal: int = 1, role: str = "g1r"
+) -> None:
+    attempt = {
+        "role": role,
+        "attempt_id": f"attempt-{role}-{ordinal}",
+        "attempt_ordinal": ordinal,
+        "repair_cycle": 0,
+    }
+    chain.append("stage_attempt_created", {**attempt, "provider_dispatch": False})
+    chain.append("stage_dispatch_started", {**attempt, "provider_dispatch": True})
+    chain.append(
+        "stage_rejected",
+        {
+            **attempt,
+            "provider_dispatch": True,
+            "verdict": "reject",
+            "reason": "design_rejected" if role == "g1r" else "audit_rejected",
+        },
     )
 
 
@@ -123,6 +163,44 @@ def _convert_to_legacy(chain: ReceiptChain) -> None:
     )
 
 
+def _convert_certificate_to_v1(chain: ReceiptChain) -> None:
+    certificate = json.loads(chain.certificate_path.read_text(encoding="utf-8"))
+    certificate.pop("root_signature")
+    certificate["certificate_schema_version"] = "1.0.0"
+    signed_certificate = {
+        **certificate,
+        "root_signature": Ed25519PrivateKey.from_private_bytes(chain.key)
+        .sign(_canonical(certificate))
+        .hex(),
+    }
+    chain.certificate_path.write_text(
+        json.dumps(signed_certificate, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    manifest["certificate_hash"] = ReceiptChain.hash_file(chain.certificate_path)
+    signed_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(_canonical(manifest))
+        .hex(),
+    }
+    manifest_path.write_text(
+        json.dumps(signed_manifest, sort_keys=True),
+        encoding="utf-8",
+    )
+    identity = hashlib.sha256(chain.run_id.encode("utf-8")).hexdigest()
+    anchor = (
+        chain.root.parent
+        / ".torq-run-identities"
+        / identity
+        / "manifest-head.v1.json"
+    )
+    anchor.unlink()
+
+
 def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
     tmp_path: Path,
 ) -> None:
@@ -138,6 +216,8 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
     )
 
     assert receipt["schema_version"] == "2.0.0"
+    assert certificate["certificate_schema_version"] == "3.0.0"
+    assert certificate["manifest_rollback_policy"] == "external-signed-head-v1"
     assert receipt["writer_role"] == "orchestrator"
     assert receipt["evidence_basis"] == "observed"
     assert "writer_signature" in receipt
@@ -170,6 +250,226 @@ def test_schema_v2_uses_root_certified_per_run_keys_and_separate_artifact_key(
             assert stat.S_IMODE(private_file.stat().st_mode) == 0o600
 
 
+def test_certificate_v1_is_verified_but_cannot_be_reopened_for_append(
+    tmp_path: Path,
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    chain = _chain(evidence_root, "legacy-v2-run")
+    chain.append("run_attested", {"mode": "live"})
+    opened = chain.append(
+        "action_opened",
+        {
+            "action_id": "action-legacy",
+            "type": "approval_required",
+            "scope": "run",
+            "target": "operator",
+            "summary": "Review the proposal.",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
+            "caused_by_sequence": 1,
+            "provider_dispatch": False,
+        },
+    )
+    chain.append(
+        "run_decision",
+        {
+            "decision": "awaiting_approval",
+            "outcome": "awaiting_approval",
+            "action_id": "action-legacy",
+            "action_opened_sequence": opened["sequence"],
+            "provider_dispatch": False,
+        },
+    )
+    resolved = chain.append(
+        "action_resolved",
+        {
+            "action_id": "action-legacy",
+            "resolution": "approved",
+            "resolver_identity": "operator:test",
+            "opened_sequence": opened["sequence"],
+            "provider_dispatch": False,
+        },
+        writer_role="operator_gateway",
+        evidence_basis="submitted",
+    )
+    chain.append(
+        "run_decision",
+        {
+            "decision": "completed",
+            "outcome": "approved",
+            "action_id": "action-legacy",
+            "action_resolved_sequence": resolved["sequence"],
+            "provider_dispatch": False,
+        },
+        writer_role="operator_gateway",
+        evidence_basis="derived",
+    )
+    chain.seal()
+    long_resolution = "approved-" + "x" * 600
+    def make_pre_change(row: dict[str, Any]) -> None:
+        row.pop("run_id", None)
+        if row["transition"] == "action_resolved":
+            row["payload"].update({
+                "resolution": long_resolution,
+                "legacy_extension": "accepted-before-h1",
+            })
+        if row["transition"] == "run_decision":
+            decision = row["payload"].pop("decision")
+            row["payload"]["status"] = (
+                "execution_complete_action_open"
+                if decision == "awaiting_approval"
+                else "workflow_closed"
+            )
+
+    _rewrite_v2_and_resign(
+        chain,
+        make_pre_change,
+    )
+
+    assert verify_receipt_store(chain.root).status == "tampered"
+    _convert_certificate_to_v1(chain)
+
+    assert verify_receipt_store(chain.root).status == "verified"
+    with pytest.raises(ValueError, match="run_certificate_legacy_read_only"):
+        _chain(evidence_root, "legacy-v2-run")
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "../escape",
+        "..\\escape",
+        "/absolute",
+        "C:\\absolute",
+        "CON",
+        "nul.txt",
+        "COM1.log",
+        "LPT9",
+        "trailing.",
+        "unicode-\N{FULLWIDTH SOLIDUS}-alias",
+    ],
+)
+def test_run_id_rejects_cross_platform_unsafe_names(
+    tmp_path: Path, run_id: str
+) -> None:
+    evidence_root = tmp_path / "evidence"
+    with pytest.raises(ValueError, match="run_id_invalid"):
+        _chain(evidence_root, run_id)
+    assert not evidence_root.exists()
+
+
+def test_stage_rejected_is_a_dispatched_review_terminal_not_a_preflight_block(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "review-rejected")
+    _plan_with_required(chain, {"g1d", "g1r", "builder", "g2a"})
+    _append_rejected_attempt(chain)
+    chain.append(
+        "run_decision",
+        {"decision": "blocked", "provider_dispatch": True},
+    )
+    chain.seal()
+    assert verify_receipt_store(chain.root).status == "verified"
+    with pytest.raises(ValueError, match="receipt_after_terminal_decision"):
+        _append_rejected_attempt(chain, ordinal=2)
+
+    for role, verdict, reason in (
+        ("builder", "reject", "design_rejected"),
+        ("g1r", "approve", "design_rejected"),
+        ("g1r", "reject", "audit_rejected"),
+    ):
+        finding = validate_receipt_payload(
+            "stage_rejected",
+            {
+                "role": role,
+                "attempt_id": f"attempt-{role}-1",
+                "attempt_ordinal": 1,
+                "repair_cycle": 0,
+                "provider_dispatch": True,
+                "verdict": verdict,
+                "reason": reason,
+            },
+            writer_role="orchestrator",
+        )
+        assert finding == "stage_rejected_invalid"
+
+    finding = validate_receipt_payload(
+        "stage_rejected",
+        {
+            "role": "g1r",
+            "attempt_id": "attempt-g1r-1",
+            "attempt_ordinal": 1,
+            "repair_cycle": 0,
+            "provider_dispatch": False,
+            "verdict": "reject",
+            "reason": "design_rejected",
+        },
+        writer_role="orchestrator",
+    )
+    assert finding == "attempt_dispatch_invalid"
+    valid_payload = {
+        "role": "g1r",
+        "attempt_id": "attempt-g1r-1",
+        "attempt_ordinal": 1,
+        "repair_cycle": 0,
+        "provider_dispatch": True,
+        "verdict": "reject",
+        "reason": "design_rejected",
+    }
+    assert (
+        transition_authority_finding(
+            "supervisor", "stage_rejected", "observed", valid_payload
+        )
+        == "receipt_writer_unauthorized"
+    )
+    assert (
+        transition_authority_finding(
+            "orchestrator", "stage_rejected", "derived", valid_payload
+        )
+        == "receipt_writer_unauthorized"
+    )
+
+
+def test_stage_rejected_requires_prior_dispatch_and_is_not_added_to_cert_v1(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "missing-dispatch")
+    _plan_with_required(chain, {"g1d", "g1r", "builder", "g2a"})
+    attempt = {
+        "role": "g1r",
+        "attempt_id": "attempt-g1r-1",
+        "attempt_ordinal": 1,
+        "repair_cycle": 0,
+    }
+    chain.append("stage_attempt_created", {**attempt, "provider_dispatch": False})
+    with pytest.raises(ValueError, match="attempt_rejected_without_dispatch"):
+        chain.append(
+            "stage_rejected",
+            {
+                **attempt,
+                "provider_dispatch": True,
+                "verdict": "reject",
+                "reason": "design_rejected",
+            },
+        )
+
+    valid = _chain(tmp_path / "evidence", "cert1-reject")
+    _plan_with_required(valid, {"g1d", "g1r", "builder", "g2a"})
+    _append_rejected_attempt(valid)
+    valid.append("run_decision", {"decision": "blocked"})
+    valid.seal()
+    _rewrite_v2_and_resign(
+        valid,
+        lambda row: row.update(evidence_basis="derived")
+        if row["transition"] == "run_planned"
+        else None,
+    )
+    _convert_certificate_to_v1(valid)
+    converted = verify_receipt_store(valid.root)
+    assert converted.status == "tampered"
+    assert converted.finding == "receipt_writer_unauthorized"
+
+
 def test_writer_permissions_allow_only_certified_role_basis_transitions(
     tmp_path: Path,
 ) -> None:
@@ -186,9 +486,13 @@ def test_writer_permissions_allow_only_certified_role_basis_transitions(
     )
     interrupted = chain.append(
         "stage_interrupted",
-        {**attempt, "provider_dispatch": "unknown"},
+        {
+            **attempt,
+            "provider_dispatch": "unknown",
+            "observation_source": "worker_exit",
+        },
         writer_role="supervisor",
-        evidence_basis="derived",
+        evidence_basis="observed",
     )
     opened = chain.append(
         "action_opened",
@@ -199,12 +503,14 @@ def test_writer_permissions_allow_only_certified_role_basis_transitions(
             "target": "operator",
             "caused_by_sequence": interrupted["sequence"],
             "summary": "Review interruption",
+            "allowed_resolutions": ["approved", "rejected"],
+            "outcome_map": {"approved": "completed", "rejected": "blocked"},
         },
     )
     chain.append(
         "run_decision",
         {
-            "status": "execution_complete_action_open",
+            "decision": "awaiting_approval",
             "action_id": "approve-1",
             "action_opened_sequence": opened["sequence"],
         },
@@ -223,7 +529,7 @@ def test_writer_permissions_allow_only_certified_role_basis_transitions(
     chain.append(
         "run_decision",
         {
-            "status": "workflow_closed",
+            "decision": "blocked",
             "action_id": "approve-1",
             "action_resolved_sequence": resolved["sequence"],
         },

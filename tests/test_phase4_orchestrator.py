@@ -306,7 +306,12 @@ def test_high_bug_routes_to_refine_bug_and_targeted_reaudit(tmp_path: Path) -> N
         receipt["transition"] == "stage_completed"
         and receipt["payload"]["role"] == "g2a"
         for receipt in receipts
-    ) == 2
+    ) == 1
+    assert sum(
+        receipt["transition"] == "stage_rejected"
+        and receipt["payload"]["role"] == "g2a"
+        for receipt in receipts
+    ) == 1
     g2a_created = [
         receipt["payload"]
         for receipt in receipts
@@ -616,5 +621,5 @@ def test_blocked_preflight_seals_an_auditable_refusal(tmp_path: Path) -> None:
     assert blocked["provider_dispatch"] is False
     assert blocked["usage"]["output_tokens"] == 0
     decision = next(r["payload"] for r in receipts if r["transition"] == "run_decision")
-    assert decision["status"] == "blocked"
+    assert decision["decision"] == "blocked"
     assert decision["provider_dispatch"] is False

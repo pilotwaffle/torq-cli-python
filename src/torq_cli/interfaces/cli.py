@@ -290,9 +290,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         snapshot = projector.snapshot()
         print(json.dumps(snapshot, sort_keys=True))
-        return {"verified": 0, "tampered": 3, "incomplete": 4}[
-            str(snapshot["verification"]["status"])
-        ]
+        return {
+            "sealed_verified": 0,
+            "live_verified": 0,
+            "live_catching_up": 0,
+            "tampered": 3,
+            "incomplete": 4,
+            "unreadable": 4,
+        }[str(snapshot["verification"]["state"])]
     if args.command == "evidence":
         result = verify_receipt_store(
             Path(args.run_root), trusted_public_key=trusted_public_key

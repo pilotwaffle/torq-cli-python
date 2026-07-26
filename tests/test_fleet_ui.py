@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import re
 import threading
 from html.parser import HTMLParser
 from pathlib import Path
@@ -122,6 +123,89 @@ def test_fleet_ui_assets_are_local_no_store_and_host_guarded(tmp_path: Path) -> 
     assert b"fleet_host_denied" in rebound_body
 
 
+def _contrast(first: str, second: str) -> float:
+    def luminance(value: str) -> float:
+        channels = [int(value[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [
+            channel / 12.92
+            if channel <= 0.04045
+            else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        ]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    bright, dark = sorted((luminance(first), luminance(second)), reverse=True)
+    return (bright + 0.05) / (dark + 0.05)
+
+
+def test_fleet_ui_pins_complete_accessible_nine_state_visual_system() -> None:
+    css = (
+        Path("src/torq_cli/data/fleet/fleet.css")
+        .read_text(encoding="utf-8")
+        .casefold()
+    )
+    matches = re.findall(
+        r"--state-(dormant|queued|running|sealed|blocked|needs_you|failed|interrupted|abandoned)-(fg|bg|border):\s*(#[0-9a-f]{6})",
+        css,
+    )
+    assert len(matches) == 54
+    values: dict[tuple[str, str], list[str]] = {}
+    for state, role, value in matches:
+        values.setdefault((state, role), []).append(value)
+    for state in (
+        "dormant", "queued", "running", "sealed", "blocked",
+        "needs_you", "failed", "interrupted", "abandoned",
+    ):
+        assert len(values[(state, "fg")]) == 2
+        assert len(values[(state, "bg")]) == 2
+        assert len(values[(state, "border")]) == 2
+        for foreground, background in zip(
+            values[(state, "fg")], values[(state, "bg")], strict=True
+        ):
+            assert _contrast(foreground, background) >= 4.5
+    assert "@media (max-width: 48rem)" in css
+    assert "min-width: 320px" in css
+    assert "min-height: 2.75rem" in css
+    assert "prefers-reduced-motion: reduce" in css
+    assert '[data-state="abandoned"]' in css
+
+
+def test_fleet_ui_consumes_v3_controls_accessibly_and_keeps_secrets_ephemeral() -> None:
+    html = Path("src/torq_cli/data/fleet/index.html").read_text(encoding="utf-8")
+    javascript = Path("src/torq_cli/data/fleet/fleet.js").read_text(encoding="utf-8")
+
+    assert 'id="live-announcer"' in html
+    assert 'role="list"' in html
+    assert 'role="region" aria-live="off" tabindex="0"' in html
+    assert 'id="recovery-control"' in html
+    assert 'id="theme-control"' in html
+    for field in ("snapshot", "annotations", "session", "eligibility", "pending"):
+        assert f"envelope.{field}" in javascript
+    assert 'tabIndex = index === rovingIndex ? 0 : -1' in javascript
+    assert 'event.key === "ArrowDown"' in javascript
+    assert 'event.key === "Home"' in javascript
+    assert 'event.key === "Escape"' in javascript
+    assert 'history.tabIndex = open ? -1 : 0' in javascript
+    assert 'aria-busy' in javascript
+    assert "/api/v1/fleet/actions/" in javascript
+    assert '"/api/v1/fleet/recover/confirm"' in javascript
+    assert '"/api/v1/fleet/recover"' in javascript
+    assert "recoverySecret = null" in javascript
+    assert "confirmation_token: token" in javascript
+    assert 'card.setAttribute("aria-describedby", warningId)' in javascript
+    assert 'value.target === "recovery"' in javascript
+    assert "serverMutationPending" in javascript
+    assert "covered > mutation.baseSequence" in javascript
+    assert 'setControlStatus("Verified evidence reconciled.")' in javascript
+    assert 'annotation.kind === "broker_unavailable" ? "alert" : "status"' in javascript
+    assert 'card.setAttribute("role", "status")' in javascript
+    assert "localStorage.setItem(SEEN_ACTIONS_KEY" in javascript
+    assert "torq.fleet.notified-actions.v2" in javascript
+    assert "`${runId}:${String(action.action_id" in javascript
+    assert ".slice(-200)" not in javascript
+    assert "innerHTML" not in javascript
+
+
 def test_fleet_bootstrap_lands_on_ui_without_exposing_session_in_url(
     tmp_path: Path,
 ) -> None:
@@ -146,6 +230,6 @@ def test_fleet_bootstrap_lands_on_ui_without_exposing_session_in_url(
     assert "torq_fleet_session=" in cookie
     assert "HttpOnly" in cookie
     assert "SameSite=Strict" in cookie
-    assert "Path=/api/v1" in cookie
+    assert "Path=/" in cookie
     assert "nonce" not in str(location)
     assert "torq_fleet_session" not in str(location)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -149,9 +150,13 @@ class GovernedOrchestrator:
         media_type: str = "text/plain",
         source_name: str | None = None,
         confirm_direct: bool = False,
+        command_id: str | None = None,
     ) -> Mapping[str, Any]:
         """Durably acknowledge sanitized operator context and queue it."""
-        command_id = "cmd-" + secrets.token_hex(12)
+        command_id = command_id or "cmd-" + secrets.token_hex(12)
+        existing = self._existing_command(chain, command_id)
+        if existing is not None:
+            return existing
         target = target_role or "lead"
         encoded = b""
         safe_source_name: str | None = None
@@ -262,9 +267,13 @@ class GovernedOrchestrator:
         source_name: str,
         target_role: str | None = None,
         confirm_direct: bool = False,
+        command_id: str | None = None,
     ) -> Mapping[str, Any]:
         """Extract, sanitize, encrypt, and durably acknowledge a supported file."""
-        command_id = "cmd-" + secrets.token_hex(12)
+        command_id = command_id or "cmd-" + secrets.token_hex(12)
+        existing = self._existing_command(chain, command_id)
+        if existing is not None:
+            return existing
         target = target_role or "lead"
         safe_source_name: str | None = None
         try:
@@ -344,54 +353,40 @@ class GovernedOrchestrator:
         resolver_identity: str,
     ) -> Mapping[str, Any]:
         """Resolve one open action and seal its linked workflow closure."""
-        if not action_id or not resolution or not resolver_identity:
-            raise OrchestrationBlocked("action_resolution_invalid")
-        opened_sequence: int | None = None
-        already_resolved = False
-        for line in chain.receipts_path.read_text(encoding="utf-8").splitlines():
-            receipt = json.loads(line)
-            payload = receipt.get("payload", {})
-            if not isinstance(payload, Mapping) or payload.get("action_id") != action_id:
+        try:
+            return chain.resolve_action(
+                action_id=action_id,
+                resolution=resolution,
+                resolver_identity=resolver_identity,
+            )
+        except ValueError as exc:
+            raise OrchestrationBlocked(str(exc)) from exc
+
+    @staticmethod
+    def _existing_command(
+        chain: ReceiptWriter, command_id: str
+    ) -> Mapping[str, Any] | None:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,127}", command_id) is None:
+            raise OrchestrationBlocked("command_id_invalid")
+        if not (chain.root / "terminal-manifest.json").exists():
+            return None
+        for receipt in chain.covered_receipts():
+            payload = receipt.get("payload")
+            if not isinstance(payload, Mapping) or payload.get("command_id") != command_id:
                 continue
-            if receipt.get("transition") == "action_opened":
-                opened_sequence = int(receipt["sequence"])
-            elif receipt.get("transition") == "action_resolved":
-                already_resolved = True
-        if opened_sequence is None:
-            raise OrchestrationBlocked("action_open_missing")
-        if already_resolved:
-            raise OrchestrationBlocked("action_already_resolved")
-        resolved = chain.append(
-            "action_resolved",
-            {
-                "action_id": action_id,
-                "resolution": resolution,
-                "resolver_identity": resolver_identity,
-                "opened_sequence": opened_sequence,
-                "provider_dispatch": False,
-            },
-            writer_role="operator_gateway",
-            evidence_basis="submitted",
-        )
-        decision = chain.terminalize(
-            "run_decision",
-            {
-                "status": "workflow_closed",
-                "outcome": resolution,
-                "action_id": action_id,
-                "action_resolved_sequence": resolved["sequence"],
-                "provider_dispatch": False,
-            },
-            writer_role="operator_gateway",
-            evidence_basis="derived",
-        )
-        chain.seal()
-        return {
-            "action_id": action_id,
-            "action_resolved_sequence": resolved["sequence"],
-            "run_decision_sequence": decision["sequence"],
-            "status": "workflow_closed",
-        }
+            transition = receipt.get("transition")
+            if transition == "command_rejected":
+                raise OrchestrationBlocked(str(payload.get("finding", "command_rejected")))
+            if transition == "command_accepted":
+                return {
+                    **dict(payload),
+                    "status": "accepted",
+                    "accepted_sequence": receipt["sequence"],
+                    "sequence": receipt["sequence"],
+                    "receipt_hash": receipt["receipt_hash"],
+                    "idempotent_replay": True,
+                }
+        return None
 
     def execute(
         self,
@@ -402,7 +397,7 @@ class GovernedOrchestrator:
         chain: ReceiptWriter,
     ) -> OrchestrationResult:
         planned = self._PLANNED_ROLES
-        lane_catalog = self._lane_catalog(profile)
+        lane_catalog = self._lane_catalog(profile, mode=mode)
         initial_plan = initial_plan_body(
             profile_id=profile.profile_id,
             strategy_id=profile.strategy_id,
@@ -431,7 +426,7 @@ class GovernedOrchestrator:
             chain.terminalize(
                 "run_decision",
                 {
-                    "status": "workflow_closed",
+                    "decision": "completed",
                     "outcome": "dry_run_complete",
                     "provider_dispatch": False,
                 },
@@ -468,7 +463,7 @@ class GovernedOrchestrator:
             chain.terminalize(
                 "run_decision",
                 {
-                    "status": "blocked",
+                    "decision": "failed" if dispatched else "blocked",
                     "reason": str(exc),
                     "provider_dispatch": bool(dispatched),
                     "dispatched_roles": tuple(dispatched),
@@ -790,8 +785,14 @@ class GovernedOrchestrator:
                 "usage": usage,
             }
         )
+        rejected = role in {"g1r", "g2a"} and self._verdict(body) != "approve"
+        terminal_transition = (
+            "stage_rejected"
+            if rejected
+            else "stage_completed"
+        )
         chain.append(
-            "stage_completed",
+            terminal_transition,
             {
                 **attempt_evidence,
                 "provider": provenance.provider,
@@ -812,6 +813,16 @@ class GovernedOrchestrator:
                 "artifact": str(artifact.relative_to(chain.root)),
                 "artifact_hash": artifact_hash,
                 "provider_dispatch": True,
+                **(
+                    {
+                        "verdict": "reject",
+                        "reason": (
+                            "design_rejected" if role == "g1r" else "audit_rejected"
+                        ),
+                    }
+                    if rejected
+                    else {}
+                ),
             },
         )
         return body
@@ -1030,7 +1041,11 @@ class GovernedOrchestrator:
         }
 
     @staticmethod
-    def _lane_catalog(profile: ProfileSpec) -> list[dict[str, Any]]:
+    def _lane_catalog(
+        profile: ProfileSpec,
+        *,
+        mode: ExecutionMode = ExecutionMode.LIVE,
+    ) -> list[dict[str, Any]]:
         catalog: list[dict[str, Any]] = []
         for index, role in enumerate(LANE_ORDER):
             binding = profile.bindings[role]
@@ -1039,6 +1054,9 @@ class GovernedOrchestrator:
                     "role": role,
                     "order": index,
                     "kind": "conditional" if role in CONDITIONAL_LANES else "core",
+                    "required": (
+                        mode is ExecutionMode.LIVE and role not in CONDITIONAL_LANES
+                    ),
                     "provider": binding.provider_id,
                     "model": binding.model_id,
                     "prompt_id": binding.prompt_id,
@@ -1227,13 +1245,18 @@ class GovernedOrchestrator:
                         if status == "awaiting_approval"
                         else "Review the audit escalation before closure."
                     ),
+                    "allowed_resolutions": ["approved", "rejected"],
+                    "outcome_map": {
+                        "approved": "completed",
+                        "rejected": "blocked",
+                    },
                     "provider_dispatch": False,
                 },
             )
             chain.append(
                 "run_decision",
                 {
-                    "status": "execution_complete_action_open",
+                    "decision": "awaiting_approval",
                     "outcome": status,
                     "action_id": action_id,
                     "action_opened_sequence": action["sequence"],
@@ -1245,7 +1268,7 @@ class GovernedOrchestrator:
             chain.terminalize(
                 "run_decision",
                 {
-                    "status": "workflow_closed",
+                    "decision": "blocked",
                     "outcome": status,
                     "provider_dispatch": bool(dispatched),
                     "repair_cycles": repair_cycles,

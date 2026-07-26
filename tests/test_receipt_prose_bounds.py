@@ -117,7 +117,7 @@ def test_dispatched_roles_length_is_capped() -> None:
         validate_receipt_payload(
             "run_decision",
             {
-                "status": "blocked",
+                "decision": "blocked",
                 "dispatched_roles": ["g1d"] * 100,
                 "provider_dispatch": False,
             },
@@ -194,7 +194,7 @@ def test_run_decision_rejects_prose_and_undeclared_keys() -> None:
     assert (
         validate_receipt_payload(
             "run_decision",
-            {"status": "blocked", "reason": _OVER_BOUND, "provider_dispatch": False},
+            {"decision": "blocked", "reason": _OVER_BOUND, "provider_dispatch": False},
             writer_role="orchestrator",
         )
         == "run_decision_text_invalid"
@@ -202,7 +202,7 @@ def test_run_decision_rejects_prose_and_undeclared_keys() -> None:
     assert (
         validate_receipt_payload(
             "run_decision",
-            {"status": "blocked", "note": _OVER_BOUND, "provider_dispatch": False},
+            {"decision": "blocked", "note": _OVER_BOUND, "provider_dispatch": False},
             writer_role="orchestrator",
         )
         == "run_decision_text_invalid"
@@ -211,7 +211,7 @@ def test_run_decision_rejects_prose_and_undeclared_keys() -> None:
         validate_receipt_payload(
             "run_decision",
             {
-                "status": "blocked",
+                "decision": "blocked",
                 "reason": "live_dispatcher_required",
                 "dispatched_roles": ["g1d", "g1r"],
                 "provider_dispatch": False,

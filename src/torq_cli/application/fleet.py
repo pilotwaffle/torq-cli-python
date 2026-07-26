@@ -43,10 +43,13 @@ def _dispatch_message(value: object) -> str:
 
 def _unavailable_snapshot(verification: StoreVerification) -> dict[str, Any]:
     return {
-        "schema": "torq-fleet-snapshot-v2",
+        "schema": "torq-fleet-snapshot-v3",
         "verification": {
-            "status": verification.status,
+            "state": verification.status,
             "finding": verification.finding,
+            "covered_sequence": None,
+            "store_sequence": None,
+            "manifest_generation": None,
         },
         "data_status": "unavailable",
         "run": None,
@@ -77,7 +80,8 @@ def reduce_fleet_snapshot(
     manifest: Mapping[str, Any],
     *,
     verification_state: str,
-    operational_state: Mapping[str, Any] | None = None,
+    store_sequence: int | None = None,
+    legacy_certificate: bool = False,
     accounting: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fold one stable receipt snapshot into UI-facing normalized state."""
@@ -114,6 +118,7 @@ def reduce_fleet_snapshot(
                 "prompt_version": None,
                 "contract_id": None,
                 "contract_version": None,
+                "required": False,
                 "active": True,
                 "attempt_ordinal": None,
                 "latest_sequence": None,
@@ -129,7 +134,7 @@ def reduce_fleet_snapshot(
                 "billed_usd": None,
                 "metered_usd": None,
                 "pricing_status": None,
-                "settlement": None,
+                "lane_settlement": None,
                 "entitlement": None,
                 "attempts": [],
             }
@@ -163,6 +168,7 @@ def reduce_fleet_snapshot(
                     for key in (
                         "order",
                         "kind",
+                        "required",
                         "provider",
                         "model",
                         "prompt_id",
@@ -191,7 +197,9 @@ def reduce_fleet_snapshot(
                 replans.append({"sequence": sequence, **dict(payload), **writer})
             continue
         if transition == "run_decision":
-            run_status = str(payload.get("status", "unknown"))
+            run_status = str(
+                payload.get("decision", payload.get("status", "unknown"))
+            )
             raw_outcome = payload.get("outcome")
             run_outcome = str(raw_outcome) if raw_outcome is not None else None
             raw_reason = payload.get("reason")
@@ -226,12 +234,27 @@ def reduce_fleet_snapshot(
         if transition == "action_opened":
             action_id = str(payload.get("action_id", ""))
             action_rows[action_id] = {
-                **dict(payload),
+                "action_id": action_id,
+                "type": payload.get("type"),
+                "scope": payload.get("scope"),
+                "target": payload.get("target"),
+                "caused_by_sequence": payload.get("caused_by_sequence"),
+                "summary": None if legacy_certificate else payload.get("summary"),
+                "allowed_resolutions": (
+                    [] if legacy_certificate else payload.get("allowed_resolutions", [])
+                ),
+                "outcome_map": (
+                    {} if legacy_certificate else payload.get("outcome_map", {})
+                ),
+                "resolution": None,
+                "resolver_identity": None,
                 "opened_sequence": sequence,
                 "resolved_sequence": None,
                 "state": "open",
                 **writer,
             }
+            if legacy_certificate:
+                reduction_errors.append("legacy_operator_fields_suppressed")
             continue
         if transition == "action_resolved":
             action_id = str(payload.get("action_id", ""))
@@ -242,7 +265,11 @@ def reduce_fleet_snapshot(
                 action.update(
                     {
                         "resolution": payload.get("resolution"),
-                        "resolver_identity": payload.get("resolver_identity"),
+                        "resolver_identity": (
+                            None
+                            if legacy_certificate
+                            else payload.get("resolver_identity")
+                        ),
                         "resolved_sequence": sequence,
                         "state": "resolved",
                         **writer,
@@ -317,7 +344,7 @@ def reduce_fleet_snapshot(
         if transition == "stage_dispatch_started":
             row["state"] = "running"
             attempt["state"] = "running"
-            row["settlement"] = payload.get("settlement")
+            row["lane_settlement"] = payload.get("settlement")
             row["entitlement"] = payload.get("entitlement")
         elif transition == "stage_completed":
             row["state"] = "sealed"
@@ -327,10 +354,10 @@ def reduce_fleet_snapshot(
                 "billed_usd",
                 "metered_usd",
                 "pricing_status",
-                "settlement",
                 "entitlement",
             ):
                 row[key] = payload.get(key)
+            row["lane_settlement"] = payload.get("settlement")
             usage_rows.append(
                 {
                     "agent": role_value,
@@ -344,7 +371,7 @@ def reduce_fleet_snapshot(
                     "usage": payload.get("usage", "unreported"),
                 }
             )
-        elif transition == "stage_blocked":
+        elif transition in {"stage_blocked", "stage_rejected"}:
             row["state"] = "blocked"
             attempt["state"] = "blocked"
         elif transition == "stage_failed":
@@ -408,13 +435,13 @@ def reduce_fleet_snapshot(
     last_time = receipts[-1].get("observed_at") if receipts else None
     times_available = isinstance(first_time, str) and isinstance(last_time, str)
     settlement = summarize_usage(usage_rows, budget_usd=0.0)["settlement"]
-    if run_status == "execution_complete_action_open":
+    if run_status in {"awaiting_approval", "execution_complete_action_open"}:
         execution_state, workflow_state = "complete", "action_open"
-    elif run_status == "workflow_closed":
+    elif run_status in {"completed", "workflow_closed"}:
         execution_state, workflow_state = "complete", "closed"
     elif run_status == "workflow_abandoned":
         execution_state, workflow_state = "abandoned", "abandoned"
-    elif run_status == "blocked":
+    elif run_status in {"blocked", "failed", "workflow_failed"}:
         execution_state, workflow_state = "blocked", "closed"
     else:
         execution_state, workflow_state = "running", "open"
@@ -425,22 +452,23 @@ def reduce_fleet_snapshot(
         if verification_state == "verified"
         else verification_state
     )
-    orphaned_roles: list[str] = []
-    if isinstance(operational_state, Mapping):
-        raw_orphans = operational_state.get("orphaned_roles", ())
-        if isinstance(raw_orphans, (list, tuple)):
-            orphaned_roles = [str(value) for value in raw_orphans]
     return {
-        "schema": "torq-fleet-snapshot-v2",
+        "schema": "torq-fleet-snapshot-v3",
         "verification": {
-            "status": verification_state,
-            "normalized_state": normalized_verification,
+            "state": normalized_verification,
             "finding": None,
+            "covered_sequence": manifest.get("receipt_count"),
+            "store_sequence": (
+                store_sequence
+                if store_sequence is not None
+                else manifest.get("receipt_count")
+            ),
+            "manifest_generation": manifest.get("manifest_generation"),
         },
         "data_status": "reduction_error" if reduction_errors else "available",
         "run": {
             "run_id": manifest.get("run_id"),
-            "status": run_status,
+            "decision": run_status,
             "outcome": run_outcome,
             "execution_state": execution_state,
             "workflow_state": workflow_state,
@@ -466,10 +494,6 @@ def reduce_fleet_snapshot(
                 "current_hash": current_plan_hash,
                 "revision": plan_revision,
                 "replans": replans,
-            },
-            "operational_annotations": {
-                "orphaned_roles": orphaned_roles,
-                "recovery_required": bool(orphaned_roles),
             },
         },
         "summary": {
@@ -498,25 +522,65 @@ class FleetProjector:
     ) -> None:
         self.run_root = run_root
         self.trusted_public_key = trusted_public_key
+        # Kept as constructor compatibility only. Operational data belongs in
+        # the Fleet envelope, never in the deterministic snapshot.
         self.operational_state = operational_state
         self.accounting = accounting
 
     def snapshot(self) -> dict[str, Any]:
-        verification = verify_receipt_store(
-            self.run_root,
-            trusted_public_key=self.trusted_public_key,
-        )
+        manifest_path = self.run_root / "terminal-manifest.json"
+        receipts_path = self.run_root / "receipts.jsonl"
+        certificate_path = self.run_root / "run-certificate.json"
+        manifest_bytes: bytes | None = None
+        receipt_bytes: bytes | None = None
+        certificate_bytes: bytes | None = None
+        verification = StoreVerification("incomplete", "evidence_unstable")
+        for _ in range(3):
+            try:
+                before = (
+                    manifest_path.read_bytes(),
+                    receipts_path.read_bytes(),
+                    certificate_path.read_bytes(),
+                )
+            except OSError:
+                break
+            verification = verify_receipt_store(
+                self.run_root,
+                trusted_public_key=self.trusted_public_key,
+            )
+            try:
+                after = (
+                    manifest_path.read_bytes(),
+                    receipts_path.read_bytes(),
+                    certificate_path.read_bytes(),
+                )
+            except OSError:
+                break
+            if before == after:
+                manifest_bytes, receipt_bytes, certificate_bytes = after
+                break
+        if (
+            manifest_bytes is None
+            or receipt_bytes is None
+            or certificate_bytes is None
+        ):
+            return _unavailable_snapshot(
+                StoreVerification("incomplete", "evidence_unstable")
+            )
         if verification.status not in {"verified", "live_catching_up"}:
             return _unavailable_snapshot(verification)
         try:
-            manifest_bytes = (self.run_root / "terminal-manifest.json").read_bytes()
-            receipt_bytes = (self.run_root / "receipts.jsonl").read_bytes()
             manifest = json.loads(manifest_bytes)
             all_lines = receipt_bytes.splitlines()
             count = manifest.get("receipt_count")
             if not isinstance(count, int) or isinstance(count, bool):
                 raise ValueError("manifest_receipt_count_invalid")
             receipts = [json.loads(line) for line in all_lines[:count]]
+            certificate = json.loads(certificate_bytes)
+            legacy_certificate = (
+                isinstance(certificate, Mapping)
+                and certificate.get("certificate_schema_version") == "1.0.0"
+            )
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return _unavailable_snapshot(
                 StoreVerification("incomplete", "evidence_unreadable")
@@ -533,7 +597,8 @@ class FleetProjector:
             receipts,
             manifest,
             verification_state=verification.status,
-            operational_state=self.operational_state,
+            store_sequence=len(all_lines),
+            legacy_certificate=legacy_certificate,
             accounting=self.accounting,
         )
 

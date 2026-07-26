@@ -110,7 +110,8 @@ class EvidenceBroker:
                 raise PermissionError("broker_capability_expired")
             if capability.run_id != self.run_id or capability.process_id != caller:
                 raise PermissionError("broker_capability_binding_invalid")
-            rule = transition_rule(capability.writer_role, transition)
+            decision = payload.get("decision") if transition == "run_decision" else None
+            rule = transition_rule(capability.writer_role, transition, decision)
             if rule is None and not (
                 capability.writer_role == "orchestrator"
             ):
@@ -160,6 +161,9 @@ class EvidenceBroker:
         token: str,
         transition: str,
         payload: Mapping[str, Any],
+        *,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]:
         caller = os.getpid()
         with self._lock:
@@ -174,7 +178,8 @@ class EvidenceBroker:
                 raise PermissionError("broker_capability_expired")
             if capability.run_id != self.run_id or capability.process_id != caller:
                 raise PermissionError("broker_capability_binding_invalid")
-            rule = transition_rule(capability.writer_role, transition)
+            decision = payload.get("decision") if transition == "run_decision" else None
+            rule = transition_rule(capability.writer_role, transition, decision)
             if rule is None:
                 raise PermissionError("broker_transition_unauthorized")
             state.consumed = True
@@ -183,6 +188,39 @@ class EvidenceBroker:
                 payload,
                 writer_role=capability.writer_role,
                 evidence_basis=rule.evidence_basis,
+                expected_sequence=expected_sequence,
+                expected_manifest_generation=expected_manifest_generation,
+            )
+
+    def resolve_action(
+        self,
+        token: str,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]:
+        """Consume one operator capability for the whole action transaction."""
+        caller = os.getpid()
+        with self._lock:
+            state = self._capabilities.get(token)
+            if state is None:
+                raise PermissionError("broker_capability_unknown")
+            capability = state.capability
+            if state.consumed:
+                raise PermissionError("broker_capability_replayed")
+            if self._clock() >= capability.expires_at:
+                state.consumed = True
+                raise PermissionError("broker_capability_expired")
+            if capability.run_id != self.run_id or capability.process_id != caller:
+                raise PermissionError("broker_capability_binding_invalid")
+            if capability.writer_role != "operator_gateway":
+                raise PermissionError("broker_transition_unauthorized")
+            state.consumed = True
+            return self.__chain.resolve_action(
+                action_id=action_id,
+                resolution=resolution,
+                resolver_identity=resolver_identity,
             )
 
     def covered_receipts(self) -> tuple[dict[str, Any], ...]:
@@ -232,7 +270,8 @@ class BrokeredReceiptChain:
     ) -> dict[str, Any]:
         if writer_role != self.__writer_role:
             raise PermissionError("broker_writer_role_unbound")
-        rule = transition_rule(writer_role, transition)
+        decision = payload.get("decision") if transition == "run_decision" else None
+        rule = transition_rule(writer_role, transition, decision)
         if (
             evidence_basis is not None
             and rule is not None
@@ -263,16 +302,25 @@ class BrokeredReceiptChain:
         *,
         writer_role: str = "orchestrator",
         evidence_basis: str | None = None,
+        expected_sequence: int | None = None,
+        expected_manifest_generation: int | None = None,
     ) -> dict[str, Any]:
         if writer_role != self.__writer_role:
             raise PermissionError("broker_writer_role_unbound")
-        rule = transition_rule(writer_role, transition)
+        decision = payload.get("decision") if transition == "run_decision" else None
+        rule = transition_rule(writer_role, transition, decision)
         if rule is None:
             raise PermissionError("broker_transition_unauthorized")
         if evidence_basis is not None and evidence_basis != rule.evidence_basis:
             raise ValueError("receipt_writer_unauthorized")
         capability = self.__broker.issue(writer_role)
-        return self.__broker.terminalize(capability.token, transition, payload)
+        return self.__broker.terminalize(
+            capability.token,
+            transition,
+            payload,
+            expected_sequence=expected_sequence,
+            expected_manifest_generation=expected_manifest_generation,
+        )
 
     def seal(self) -> Path:
         if self.__writer_role != "orchestrator":
@@ -281,6 +329,23 @@ class BrokeredReceiptChain:
         if not isinstance(value, Path):
             raise TypeError("broker_manifest_path_invalid")
         return value
+
+    def resolve_action(
+        self,
+        *,
+        action_id: str,
+        resolution: str,
+        resolver_identity: str,
+    ) -> Mapping[str, Any]:
+        if self.__writer_role != "operator_gateway":
+            raise PermissionError("broker_writer_role_unbound")
+        capability = self.__broker.issue("operator_gateway")
+        return self.__broker.resolve_action(
+            capability.token,
+            action_id=action_id,
+            resolution=resolution,
+            resolver_identity=resolver_identity,
+        )
 
 
 __all__ = ["BrokerCapability", "BrokeredReceiptChain", "EvidenceBroker"]

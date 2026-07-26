@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from importlib.resources import files
@@ -10,8 +11,10 @@ from pathlib import Path
 
 import pytest
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.fleet_controls import FleetControlService
 from torq_cli.application.orchestrator import GovernedOrchestrator
 from torq_cli.application.supervisor import RunSupervisor, SupervisorState
 from torq_cli.domain.evidence_transitions import (
@@ -114,13 +117,14 @@ def test_atomic_binary_write_preserves_ciphertext_newlines(tmp_path: Path) -> No
 
 
 def test_machine_readable_matrix_rejects_every_wrong_basis() -> None:
-    assert len(TRANSITION_RULES) == len(
-        {(rule.writer_role, rule.transition) for rule in TRANSITION_RULES}
-    )
+    assert len(TRANSITION_RULES) == len({
+        (rule.writer_role, rule.transition, rule.decision_value)
+        for rule in TRANSITION_RULES
+    })
     for rule in TRANSITION_RULES:
         payload = (
-            {"status": sorted(rule.permitted_statuses)[0]}
-            if rule.permitted_statuses is not None
+            {"decision": rule.decision_value}
+            if rule.decision_value is not None
             else {}
         )
         assert (
@@ -221,10 +225,14 @@ def test_broker_serializes_concurrent_multi_writer_appends(tmp_path: Path) -> No
     def append_supervisor() -> dict[str, object]:
         capability = broker.issue("supervisor")
         return broker.append(
-            capability.token,
-            "stage_interrupted",
-            {**_attempt(), "provider_dispatch": "unknown"},
-        )
+                capability.token,
+                "stage_interrupted",
+                {
+                    **_attempt(),
+                    "provider_dispatch": "unknown",
+                    "observation_source": "worker_exit",
+                },
+            )
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         rows = list(
@@ -263,8 +271,10 @@ def test_crash_boundaries_never_read_as_tampered(
         chain.append("run_attested", {"ordinal": 2})
 
     result = verify_receipt_store(chain.root)
-    assert result.status in {"verified", "live_catching_up"}
+    assert result.status in {"verified", "live_catching_up", "incomplete"}
     assert result.status != "tampered"
+    if result.status == "incomplete":
+        assert result.finding == "manifest_anchor_update_pending"
 
 
 def test_manifest_covered_prefix_excludes_uncovered_receipt(tmp_path: Path) -> None:
@@ -284,8 +294,170 @@ def test_manifest_covered_prefix_excludes_uncovered_receipt(tmp_path: Path) -> N
     snapshot = FleetProjector(chain.root).snapshot()
 
     assert verification.status == "live_catching_up"
-    assert snapshot["verification"]["status"] == "live_catching_up"
+    assert snapshot["verification"]["state"] == "live_catching_up"
     assert snapshot["run"]["receipt_count"] == 1
+
+
+def test_replaying_an_older_valid_manifest_is_detected_with_matching_receipts(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "run-rollback")
+    chain.append("run_attested", {"ordinal": 1})
+    old_manifest = (chain.root / "terminal-manifest.json").read_bytes()
+    old_receipts = chain.receipts_path.read_bytes()
+    chain.append("run_attested", {"ordinal": 2})
+
+    (chain.root / "terminal-manifest.json").write_bytes(old_manifest)
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_rollback_detected"
+
+    chain.receipts_path.write_bytes(old_receipts)
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_rollback_detected"
+
+
+def test_reopened_chain_hydrates_sequence_and_continues_without_corruption(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    first = _chain(root, "run-reopened")
+    first.append("run_attested", {"ordinal": 1})
+
+    reopened = _chain(root, "run-reopened")
+    second = reopened.append("run_attested", {"ordinal": 2})
+
+    assert second["sequence"] == 2
+    assert reopened.sequence == 2
+    assert verify_receipt_store(reopened.root).status == "verified"
+
+
+def test_manifest_anchor_lag_is_reconciled_once_on_writer_restart(
+    tmp_path: Path,
+) -> None:
+    armed = [False]
+
+    def observer(step: str) -> None:
+        if armed[0] and step == "anchor_temporary_fsynced":
+            raise RuntimeError("simulated_anchor_crash")
+
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-recovery", observer=observer)
+    chain.append("run_attested", {"ordinal": 1})
+    armed[0] = True
+    with pytest.raises(RuntimeError, match="simulated_anchor_crash"):
+        chain.append("run_attested", {"ordinal": 2})
+
+    pending = verify_receipt_store(chain.root)
+    assert pending.status == "incomplete"
+    assert pending.finding == "manifest_anchor_update_pending"
+
+    reopened = _chain(root, "run-anchor-recovery")
+    assert reopened.sequence == 2
+    assert verify_receipt_store(reopened.root).status == "verified"
+
+
+def test_seal_advances_manifest_generation_without_an_extra_receipt(
+    tmp_path: Path,
+) -> None:
+    chain = _chain(tmp_path / "evidence", "run-seal-generation")
+    chain.append("run_attested", {"ordinal": 1})
+    before_bytes = (chain.root / "terminal-manifest.json").read_bytes()
+    before = json.loads(before_bytes)
+
+    chain.seal()
+    after = json.loads(
+        (chain.root / "terminal-manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert after["manifest_generation"] == before["manifest_generation"] + 1
+    assert after["receipt_count"] == before["receipt_count"]
+    assert after["previous_manifest_hash"] == (
+        "sha256:" + hashlib.sha256(before_bytes).hexdigest()
+    )
+
+
+def test_anchor_required_certificate_fails_closed_when_anchor_is_missing(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-missing")
+    chain.append("run_attested", {"ordinal": 1})
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    anchor.unlink()
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_anchor_missing"
+
+
+def test_manifest_anchor_substitution_with_invalid_root_signature_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-substituted")
+    chain.append("run_attested", {"ordinal": 1})
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    substituted = json.loads(anchor.read_text(encoding="utf-8"))
+    substituted["root_signature"] = "00" * 64
+    anchor.write_bytes(_canonical(substituted))
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_anchor_invalid"
+
+
+def test_manifest_anchor_hardlink_is_rejected_as_unsafe(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchor-hardlink")
+    chain.append("run_attested", {"ordinal": 1})
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    os.link(anchor, anchor.with_name("attacker-link.json"))
+
+    result = verify_receipt_store(chain.root)
+    assert result.status == "tampered"
+    assert result.finding == "manifest_anchor_unsafe"
+
+
+def test_anchorless_certificate_v2_remains_readable_but_is_read_only(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-anchorless-v2")
+    chain.append("run_attested", {"ordinal": 1})
+    certificate = json.loads(chain.certificate_path.read_text(encoding="utf-8"))
+    certificate.pop("root_signature")
+    certificate.pop("manifest_rollback_policy")
+    certificate["certificate_schema_version"] = "2.0.0"
+    signed_certificate = {
+        **certificate,
+        "root_signature": Ed25519PrivateKey.from_private_bytes(chain.key)
+        .sign(_canonical(certificate))
+        .hex(),
+    }
+    chain.certificate_path.write_bytes(_canonical(signed_certificate))
+    manifest_path = chain.root / "terminal-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("signature")
+    manifest["certificate_hash"] = ReceiptChain.hash_file(chain.certificate_path)
+    signed_manifest = {
+        **manifest,
+        "signature": Ed25519PrivateKey.from_private_bytes(chain.run_keys.manifest)
+        .sign(_canonical(manifest))
+        .hex(),
+    }
+    manifest_path.write_bytes(_canonical(signed_manifest))
+    downgraded = verify_receipt_store(chain.root)
+    assert downgraded.status == "tampered"
+    assert downgraded.finding == "run_certificate_rollback_detected"
+    anchor = next((root / ".torq-run-identities").glob("*/manifest-head.v1.json"))
+    anchor.unlink()
+
+    assert verify_receipt_store(chain.root).status == "verified"
+    reopened = _chain(root, "run-anchorless-v2")
+    with pytest.raises(ValueError, match="receipt_store_legacy_read_only"):
+        reopened.append("run_attested", {"ordinal": 2})
 
 
 def test_double_death_stays_running_until_recovery_seals_abandonment(
@@ -320,12 +492,42 @@ def test_double_death_stays_running_until_recovery_seals_abandonment(
         operational_state=state.snapshot(),
     ).snapshot()
     assert live["lanes"][0]["state"] == "running"
-    assert live["run"]["operational_annotations"] == {
-        "orphaned_roles": ["g1d"],
-        "recovery_required": True,
-    }
+    operational = state.snapshot()
+    observed_at = str(operational["heartbeat_at"])
+    controls = FleetControlService(
+        recovery_available=True,
+        annotation_provider=lambda: [
+            {
+                "kind": "orphaned",
+                "scope": "g1d",
+                "observed_at": observed_at,
+                "source": "supervisor",
+            },
+            {
+                "kind": "recovery_required",
+                "scope": "run",
+                "observed_at": observed_at,
+                "source": "supervisor",
+            },
+        ],
+    )
+    envelope = controls.envelope(
+        live, session_write_capable=True, expires_at="2099-01-01T00:00:00Z"
+    )
+    assert [item["kind"] for item in envelope["annotations"]] == [
+        "orphaned", "recovery_required"
+    ]
+    assert envelope["eligibility"]["recover_run"]["eligible"] is True
 
-    supervisor.abandon(["attempt-g1d-1"], client.sequence)
+    manifest_generation = FleetProjector(client.root).snapshot()["verification"][
+        "manifest_generation"
+    ]
+    assert isinstance(manifest_generation, int)
+    supervisor.abandon(
+        ["attempt-g1d-1"],
+        client.sequence,
+        manifest_generation,
+    )
     assert verify_receipt_store(client.root).status == "verified"
     abandoned = FleetProjector(client.root).snapshot()
     assert abandoned["lanes"][0]["state"] == "abandoned"
@@ -389,7 +591,10 @@ def test_http_bootstrap_is_single_use_and_all_run_reads_require_session(
         allowed = connection.getresponse()
         assert allowed.status == 200
         assert allowed.getheader("Referrer-Policy") == "no-referrer"
-        assert json.loads(allowed.read())["verification"]["status"] == "verified"
+        assert (
+            json.loads(allowed.read())["snapshot"]["verification"]["state"]
+            == "sealed_verified"
+        )
         connection.close()
     finally:
         server.shutdown()

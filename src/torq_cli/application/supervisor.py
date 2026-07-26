@@ -64,6 +64,10 @@ class RunSupervisor:
         self.broker = broker
         self.state = state
 
+    @property
+    def root(self) -> Path:
+        return self.broker.run_root
+
     def interrupt_attempt(
         self,
         attempt: Mapping[str, Any],
@@ -71,6 +75,8 @@ class RunSupervisor:
         provider_dispatch: bool | str = "unknown",
         reason: str = "worker_terminated",
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if reason not in {"process_exit", "worker_crash", "worker_terminated"}:
+            raise ValueError("supervisor_observation_required")
         capability = self.broker.issue("supervisor")
         interrupted = self.broker.append(
             capability.token,
@@ -79,6 +85,7 @@ class RunSupervisor:
                 **dict(attempt),
                 "provider_dispatch": provider_dispatch,
                 "reason": reason,
+                "observation_source": "worker_exit",
             },
         )
         decision_capability = self.broker.issue("supervisor")
@@ -86,7 +93,7 @@ class RunSupervisor:
             decision_capability.token,
             "run_decision",
             {
-                "status": "workflow_failed",
+                "decision": "failed",
                 "interruption_sequence": interrupted["sequence"],
                 "reason": reason,
             },
@@ -108,16 +115,22 @@ class RunSupervisor:
             orphaned_roles=roles,
         )
 
-    def abandon(self, attempt_ids: list[str], last_sequence: int) -> dict[str, Any]:
+    def abandon(
+        self,
+        attempt_ids: list[str],
+        last_sequence: int,
+        manifest_generation: int,
+    ) -> dict[str, Any]:
         capability = self.broker.issue("recovery")
         receipt = self.broker.terminalize(
             capability.token,
             "run_abandoned",
             {
                 "attempt_ids": attempt_ids,
-                "last_covered_sequence": last_sequence,
                 "operator_assertion": "no_live_worker",
             },
+            expected_sequence=last_sequence,
+            expected_manifest_generation=manifest_generation,
         )
         self.broker.seal()
         self.state.update(

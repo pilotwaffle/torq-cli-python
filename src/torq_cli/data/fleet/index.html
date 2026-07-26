@@ -3,72 +3,71 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <title>TORQ Fleet</title>
   <link rel="stylesheet" href="/assets/fleet.css">
   <script src="/assets/fleet.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#fleet-board">Skip to fleet board</a>
+  <p id="live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></p>
   <div class="shell">
     <header class="topbar">
       <div class="wordmark" aria-label="TORQ Fleet">
         <span class="wordmark-mark" aria-hidden="true">TQ</span>
-        <span><strong>TORQ</strong><small>FLEET READ</small></span>
+        <span><strong>TORQ</strong><small>GOVERNED FLEET</small></span>
       </div>
-      <div class="topbar-facts" aria-label="Run status">
-        <div><span>VERIFY</span><strong id="verify-label">CHECKING</strong></div>
-        <div><span>RUN STATE</span><strong id="run-state">LOADING</strong></div>
-        <div><span>ELAPSED</span><strong id="elapsed">—</strong></div>
-        <div><span>OPEN</span><strong id="open-count">0</strong></div>
+      <div class="topbar-tools">
+        <label class="theme-picker" for="theme-control"><span>Theme</span>
+          <select id="theme-control" aria-label="Color theme">
+            <option value="system">System</option>
+            <option value="dark">Dark</option>
+            <option value="light">Light</option>
+          </select>
+        </label>
+        <div class="topbar-facts" aria-label="Run status">
+          <div><span>VERIFY</span><strong id="verify-label">CHECKING</strong></div>
+          <div><span>RUN STATE</span><strong id="run-state">LOADING</strong></div>
+          <div><span>ELAPSED</span><strong id="elapsed">—</strong></div>
+          <div><span>OPEN</span><strong id="open-count">0</strong></div>
+        </div>
       </div>
     </header>
 
     <section class="governance-rail" aria-labelledby="rail-title">
       <div class="rail-heading">
-        <span id="rail-title">GOVERNANCE RAIL</span>
-        <span id="run-id">Awaiting verified run identity</span>
+        <span id="rail-title">GOVERNANCE SIGNAL RAIL</span>
+        <span id="run-id" class="compact-id" aria-label="Awaiting verified run identity">Awaiting verified run identity</span>
       </div>
       <ol id="lane-pips" class="lane-pips" aria-label="Six governed lanes"></ol>
     </section>
 
-    <div id="system-banner" class="system-banner" role="status" aria-live="polite">
-      Authenticating local evidence…
-    </div>
+    <div id="system-banner" class="system-banner" role="note"></div>
+    <ul id="annotation-list" class="annotation-list" aria-label="Operational annotations"></ul>
 
     <main id="fleet-board" tabindex="-1">
       <section class="command-deck" aria-label="Orchestrator summary">
         <article class="orchestrator-panel">
           <div class="panel-kicker">ORCHESTRATOR / VERIFIED REDUCER</div>
           <div class="orchestrator-grid">
-            <div>
-              <p class="eyebrow">EXECUTION</p>
-              <p id="execution-state" class="big-state">—</p>
-            </div>
-            <div>
-              <p class="eyebrow">WORKFLOW</p>
-              <p id="workflow-state" class="big-state">—</p>
-            </div>
-            <div>
-              <p class="eyebrow">PROFILE</p>
-              <p id="profile-id" class="mono fact-value">—</p>
-            </div>
-            <div>
-              <p class="eyebrow">EVIDENCE</p>
-              <p id="receipt-count" class="mono fact-value">—</p>
-            </div>
+            <div><p class="eyebrow">EXECUTION</p><p id="execution-state" class="big-state">—</p></div>
+            <div><p class="eyebrow">WORKFLOW</p><p id="workflow-state" class="big-state">—</p></div>
+            <div><p class="eyebrow">PROFILE</p><p id="profile-id" class="mono fact-value">—</p></div>
+            <div><p class="eyebrow">EVIDENCE</p><p id="receipt-count" class="mono fact-value">—</p></div>
           </div>
           <dl class="tally-strip" id="tallies" aria-label="Lane state tallies"></dl>
         </article>
 
         <aside class="action-panel" aria-labelledby="action-title">
           <div class="panel-heading">
-            <div><span class="panel-kicker">OPERATOR LEDGER</span><h2 id="action-title">Open actions</h2></div>
+            <div><span class="panel-kicker">OPERATOR LEDGER</span><h2 id="action-title">Controls</h2></div>
             <button id="notify-button" class="quiet-button" type="button">Enable alerts</button>
           </div>
+          <p id="control-status" class="control-status" aria-live="polite"></p>
           <div id="action-list" class="action-list">
-            <p class="empty-copy">No verified actions loaded.</p>
+            <p class="empty-copy">No verified controls loaded.</p>
           </div>
+          <div id="recovery-control" class="recovery-control"></div>
         </aside>
       </section>
 
@@ -80,7 +79,7 @@
         <div class="lane-columns lane-columns-head" aria-hidden="true">
           <span>Lane / model</span><span>State</span><span>Attempt</span><span>Verified seq</span><span>Evidence summary</span><span></span>
         </div>
-        <div id="lane-list" class="lane-list" aria-live="polite" aria-busy="true"></div>
+        <div id="lane-list" class="lane-list" role="list" aria-labelledby="lane-title" aria-busy="true"></div>
       </section>
 
       <section class="settlement-panel" aria-labelledby="settlement-title">
@@ -90,8 +89,8 @@
     </main>
   </div>
 
-  <footer class="mini-monitor" aria-label="Persistent run monitor">
-    <span class="monitor-brand">TQ</span>
+  <footer id="mini-monitor" class="mini-monitor" role="region" aria-live="off" tabindex="0" aria-label="TORQ Fleet monitor: checking; no run loaded">
+    <span class="monitor-brand" aria-hidden="true">TQ</span>
     <span id="monitor-verify" class="monitor-verify">CHECKING</span>
     <span id="monitor-run" class="monitor-run">Waiting for Fleet</span>
     <span id="monitor-pips" class="monitor-pips" aria-hidden="true"></span>
