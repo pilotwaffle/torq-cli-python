@@ -269,7 +269,12 @@ class HeadlessEncryptedFileStore:
             except OSError as exc:
                 # Windows reports sharing/access denial rather than EEXIST for
                 # an owner-only lock currently held by another thread/process.
-                if exc.errno not in {errno.EACCES, errno.EEXIST} or not lock.exists():
+                # Do not re-check ``lock.exists()`` here: the holder may unlink
+                # the lock between the failed open and that second observation,
+                # turning an ordinary acquisition retry into a false storage
+                # failure. The exclusive create below is the only authoritative
+                # observation of lock ownership.
+                if exc.errno not in {errno.EACCES, errno.EEXIST}:
                     raise
                 if time.monotonic() >= deadline:
                     raise HeadlessCredentialError("credential_store_locked") from None
