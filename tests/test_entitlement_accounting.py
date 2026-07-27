@@ -10,15 +10,22 @@ import pytest
 from torq_cli.application.orchestrator import (
     GovernedOrchestrator,
     OrchestrationBlocked,
+    StageBudget,
 )
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
+from torq_cli.domain.registry_schema import BindingSpec
 from torq_cli.domain.config_schema import validate_config
 from torq_cli.safety.entitlements import InMemoryEntitlementLedger, PlanWindow
 from torq_cli.safety.pricing import RateTable
-from torq_cli.safety.receipts import MemoryRunKeyStore, ReceiptChain
+from torq_cli.safety.receipts import (
+    FileRunKeyStore,
+    MemoryRunKeyStore,
+    ReceiptChain,
+    verify_receipt_store,
+)
 from test_phase5_cli_experience import _answers
 
 
@@ -217,6 +224,43 @@ def test_shared_qwen_account_applies_one_window_to_deepseek_and_qwen() -> None:
     assert ledger.window("qwen").used == 1
 
 
+def test_cancel_reservation_restores_in_memory_window() -> None:
+    ledger = _ledger()
+    ledger.reserve("deepseek", calls=2)
+    ledger.cancel("deepseek", calls=2)
+    assert ledger.window("deepseek").used == 0
+    with pytest.raises(ValueError, match="entitlement_reservation_missing"):
+        ledger.cancel("deepseek", calls=2)
+
+
+def test_dispatch_receipt_failure_cancels_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = _ledger()
+    chain = _chain(tmp_path, "dispatch-append-failure")
+    chain.append("run_attested", {"mode": "live"})
+    chain.seal()
+    binding = BindingSpec("g1d", "deepseek", "deepseek-chat", "p", "1", "standard", "chat")
+    orchestrator = GovernedOrchestrator(entitlement_ledger=ledger)
+
+    def fail_append(*_args: object, **_kwargs: object) -> None:
+        raise OSError("append_failed")
+
+    monkeypatch.setattr(chain, "append", fail_append)
+    with pytest.raises(OSError, match="append_failed"):
+        orchestrator._start_dispatch(
+            role="g1d",
+            goal="goal",
+            context={},
+            binding=binding,
+            budget=StageBudget("plan_covered", 0.0, ledger.window("deepseek"), 2),
+            attempt_evidence={"attempt_id": "a"},
+            attempt_created_sequence=1,
+            chain=chain,
+        )
+    assert ledger.window("deepseek").used == 0
+
+
 def test_pricing_uses_split_tokens_and_prices_reasoning_as_output() -> None:
     table = _rates()
 
@@ -242,7 +286,7 @@ def test_plan_lane_dispatches_without_a_cost_ceiling_and_seals_replayable_price(
                 _response(
                     "anthropic",
                     "claude-fable-5",
-                    {"status": "design_complete"},
+                    {"status": "design_complete", "proposal": "safe design"},
                     input_tokens=400,
                     output_tokens=90,
                     reasoning_tokens=10,
@@ -252,7 +296,7 @@ def test_plan_lane_dispatches_without_a_cost_ceiling_and_seals_replayable_price(
                 _response(
                     "anthropic",
                     "claude-opus-4-8",
-                    {"verdict": "reject"},
+                    {"verdict": "reject", "rationale": "revise"},
                 )
             ],
         }
@@ -319,6 +363,52 @@ def test_window_limit_blocks_before_dispatch_and_seals_window_provenance(
     assert blocked["entitlement"]["limit_source"] == "operator_declared"
 
 
+def test_reservation_failure_precedes_dispatch_start_and_closes_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    dispatcher = _Dispatcher({})
+    ledger = _ledger()
+    evidence = tmp_path / "evidence"
+    chain = ReceiptChain(
+        evidence,
+        "reservation-race",
+        FileRunKeyStore(evidence),
+        profile_version=profile.profile_version,
+        policy_version="3.1.3",
+    )
+
+    def fail_reservation(_provider: str, *, calls: int) -> None:
+        assert calls == 1
+        raise ValueError("simulated_reservation_race")
+
+    monkeypatch.setattr(ledger, "reserve", fail_reservation)
+    with pytest.raises(OrchestrationBlocked, match="plan_window_exceeded:g1d"):
+        GovernedOrchestrator(
+            dispatcher,
+            entitlement_ledger=ledger,
+            rate_table=_rates(),
+        ).execute(
+            goal="Do not claim dispatch",
+            profile=profile,
+            mode=ExecutionMode.LIVE,
+            chain=chain,
+        )
+    chain.seal()
+
+    rows = [json.loads(line) for line in chain.receipts_path.read_text().splitlines()]
+    assert dispatcher.calls == []
+    assert not any(row["transition"] == "stage_dispatch_started" for row in rows)
+    failed = next(row for row in rows if row["transition"] == "stage_failed")
+    decision = next(row for row in rows if row["transition"] == "run_decision")
+    assert failed["payload"]["provider_dispatch"] is False
+    assert decision["payload"]["decision"] == "failed"
+    assert decision["payload"]["provider_dispatch"] is False
+    verification = verify_receipt_store(chain.root)
+    assert verification.status == "verified", verification.finding
+
+
 def test_provider_absent_from_account_map_fails_closed(tmp_path: Path) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _Dispatcher({})
@@ -354,9 +444,9 @@ def test_mixed_run_budgets_only_openai_and_reports_both_settlements(tmp_path: Pa
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _Dispatcher(
         {
-            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
-            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve", "rationale": "sound"})],
+            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete", "proposal": "safe build"})],
             "g2a": [_response("openai", "gpt-5.5", {"verdict": "approve", "defects": []})],
         }
     )
@@ -385,9 +475,9 @@ def test_unpriced_metered_call_books_configured_worst_case_ceiling(tmp_path: Pat
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _Dispatcher(
         {
-            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
-            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve", "rationale": "sound"})],
+            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete", "proposal": "safe build"})],
             "g2a": [_response("openai", "gpt-5.5", {"verdict": "approve", "defects": []})],
         }
     )

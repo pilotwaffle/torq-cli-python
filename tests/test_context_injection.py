@@ -7,11 +7,14 @@ import threading
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from torq_cli.application.context import GovernedContextInjector
+from torq_cli.application.artifact_extraction import ArtifactExtractionError
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
 from torq_cli.core.engine import NormalizedResponse, Provenance
@@ -73,8 +76,8 @@ def test_context_is_redacted_encrypted_receipted_and_consumed_by_next_stage(
 ) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _CapturingDispatcher({
-        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject"})],
+        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject", "rationale": "revise"})],
     })
     orchestrator = GovernedOrchestrator(
         dispatcher,
@@ -155,9 +158,9 @@ def test_context_is_redacted_encrypted_receipted_and_consumed_by_next_stage(
 def test_direct_lane_context_waits_for_that_lane(tmp_path: Path) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _CapturingDispatcher({
-        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
-        "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve", "rationale": "sound"})],
+        "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete", "proposal": "safe build"})],
         "g2a": [_response("openai", "gpt-5.5", {"verdict": "approve", "defects": []})],
     })
     orchestrator = GovernedOrchestrator(
@@ -209,8 +212,8 @@ def test_accepted_context_survives_a_fresh_orchestrator_instance(tmp_path: Path)
     chain = _chain(tmp_path, "run-context-reconstructed")
     GovernedOrchestrator().inject_context(chain, "Durable restart constraint")
     dispatcher = _CapturingDispatcher({
-        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject"})],
+        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject", "rationale": "revise"})],
     })
 
     GovernedOrchestrator(
@@ -240,8 +243,8 @@ def test_json_artifact_is_extracted_then_sanitized_and_provenance_bound(
 ) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _CapturingDispatcher({
-        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject"})],
+        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject", "rationale": "revise"})],
     })
     orchestrator = GovernedOrchestrator(
         dispatcher,
@@ -346,8 +349,8 @@ def test_unreachable_context_is_finalized_unapplied_before_terminal(
 ) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _CapturingDispatcher({
-        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject"})],
+        "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject", "rationale": "revise"})],
     })
     orchestrator = GovernedOrchestrator(
         dispatcher,
@@ -416,6 +419,81 @@ def test_context_validation_writes_safe_rejections_before_artifact(tmp_path: Pat
     assert not (chain.root / "artifacts").exists()
 
 
+def test_oversized_media_types_are_durably_rejected_before_artifact(
+    tmp_path: Path,
+) -> None:
+    orchestrator = GovernedOrchestrator()
+    chain = _chain(tmp_path, "run-invalid-media")
+    oversized = "text/" + "x" * 5_000
+
+    with pytest.raises(OrchestrationBlocked, match="context_media_type_invalid"):
+        orchestrator.inject_context(chain, "content", media_type=oversized)
+    with pytest.raises(ArtifactExtractionError, match="artifact_media_type_unsupported"):
+        orchestrator.inject_artifact(
+            chain,
+            b"content",
+            media_type=oversized,
+            source_name="context.txt",
+        )
+
+    rows = [json.loads(line) for line in chain.receipts_path.read_text().splitlines()]
+    assert [row["transition"] for row in rows] == [
+        "command_rejected",
+        "command_rejected",
+    ]
+    assert [row["payload"]["media_type"] for row in rows] == [None, None]
+    assert not (chain.root / "artifacts").exists()
+
+
+@pytest.mark.parametrize('media_type', ['text/plain; charset=utf-8', 'text/markdown; charset=utf-8'])
+def test_parameterized_media_types_are_normalized_in_receipts(tmp_path: Path, media_type: str) -> None:
+    chain = _chain(tmp_path, 'run-normalized-media')
+    accepted = GovernedOrchestrator().inject_context(chain, 'content', media_type=media_type)
+    assert accepted['media_type'] == media_type.split(';', 1)[0]
+    receipt = json.loads(chain.receipts_path.read_text(encoding='utf-8').splitlines()[-1])
+    assert receipt['payload']['media_type'] == accepted['media_type']
+
+
+def test_prompt_redaction_failure_closes_as_failed_without_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = load_registry().profiles["torq-v5-6-live"]
+    dispatcher = _CapturingDispatcher({})
+    orchestrator = GovernedOrchestrator(
+        dispatcher,
+        budget_usd=1.0,
+        cost_ceiling_usd_by_role=_ceilings(),
+    )
+    chain = _chain(tmp_path, "run-prompt-redaction-failure")
+    orchestrator.inject_context(chain, "accepted before prompt construction")
+
+    def block_prompt(_content: str) -> tuple[str, tuple[str, ...]]:
+        raise RedactionBlocked(("PROBE",))
+
+    monkeypatch.setattr(orchestrator.registry, "scan", block_prompt)
+    with pytest.raises(
+        OrchestrationBlocked,
+        match="^unexpected_stage_failure:g1d:RedactionBlocked$",
+    ):
+        orchestrator.execute(
+            goal="must fail before dispatch",
+            profile=profile,
+            mode=ExecutionMode.LIVE,
+            chain=chain,
+        )
+    chain.seal()
+
+    rows = [json.loads(line) for line in chain.receipts_path.read_text().splitlines()]
+    assert not any(row["transition"] == "stage_dispatch_started" for row in rows)
+    failed = next(row for row in rows if row["transition"] == "stage_failed")
+    decision = next(row for row in rows if row["transition"] == "run_decision")
+    assert failed["payload"]["provider_dispatch"] is False
+    assert decision["payload"]["decision"] == "failed"
+    assert decision["payload"]["provider_dispatch"] is False
+    assert verify_receipt_store(chain.root).status == "verified"
+
+
 def test_context_command_id_replay_is_durable_and_writes_nothing(
     tmp_path: Path,
 ) -> None:
@@ -467,6 +545,70 @@ def test_duplicate_command_id_is_rejected_before_append(tmp_path: Path) -> None:
             evidence_basis="submitted",
         )
     assert chain.sequence == 1
+
+
+def test_concurrent_duplicate_artifact_admission_is_atomic_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain = _chain(tmp_path, "run-concurrent-command")
+    orchestrator = GovernedOrchestrator()
+    injector = GovernedContextInjector(orchestrator, chain)
+    original = orchestrator.inject_artifact
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release = threading.Event()
+    entry_lock = threading.Lock()
+    entries = 0
+
+    def delayed_injection(*args: object, **kwargs: object) -> Mapping[str, Any]:
+        nonlocal entries
+        with entry_lock:
+            entries += 1
+            if entries == 1:
+                first_entered.set()
+            else:
+                second_entered.set()
+        assert release.wait(timeout=5)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "inject_artifact", delayed_injection)
+
+    def submit() -> Mapping[str, Any]:
+        return injector.inject_artifact(
+            b'{"constraint":"same command"}',
+            media_type="application/json",
+            source_name="constraint.json",
+            command_id="cmd-concurrent-same",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(submit)
+        assert first_entered.wait(timeout=5)
+        second = pool.submit(submit)
+        try:
+            assert not second_entered.wait(timeout=0.1)
+        finally:
+            release.set()
+        results = (first.result(timeout=5), second.result(timeout=5))
+
+    receipts = [
+        json.loads(line)
+        for line in chain.receipts_path.read_text(encoding="utf-8").splitlines()
+    ]
+    accepted = [
+        row
+        for row in receipts
+        if row["transition"] == "command_accepted"
+        and row["payload"]["command_id"] == "cmd-concurrent-same"
+    ]
+    artifacts = tuple((chain.root / "artifacts").glob("*.enc"))
+
+    assert len(accepted) == 1
+    assert sum(bool(result.get("idempotent_replay")) for result in results) == 1
+    assert results[0]["artifact"] == results[1]["artifact"]
+    assert len(artifacts) == 1
+    assert verify_receipt_store(chain.root).status == "verified"
 
 
 def test_same_origin_http_context_endpoint_is_opt_in_and_receipt_backed(tmp_path: Path) -> None:

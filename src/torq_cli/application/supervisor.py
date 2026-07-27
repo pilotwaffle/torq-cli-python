@@ -24,18 +24,82 @@ class SupervisorState:
         self.path = path
         self.run_id = run_id
         self._lock = RLock()
-        self._state: dict[str, Any] = {
-            "schema": "torq-supervisor-state-v1",
-            "run_id": run_id,
-            "generation": 0,
-            "lifecycle": "registered",
-            "worker_pid": None,
-            "heartbeat_at": None,
-            "last_covered_sequence": 0,
-            "open_actions": [],
-            "orphaned_roles": [],
+        if path.exists():
+            self._state = self._load_existing()
+        else:
+            self._state = {
+                "schema": "torq-supervisor-state-v1",
+                "run_id": run_id,
+                "generation": 0,
+                "lifecycle": "registered",
+                "worker_pid": None,
+                "heartbeat_at": None,
+                "last_covered_sequence": 0,
+                "open_actions": [],
+                "orphaned_roles": [],
+            }
+            self._persist()
+
+    def _load_existing(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("supervisor_state_invalid") from exc
+        required = {
+            "schema",
+            "run_id",
+            "generation",
+            "lifecycle",
+            "worker_pid",
+            "heartbeat_at",
+            "last_covered_sequence",
+            "open_actions",
+            "orphaned_roles",
         }
-        self._persist()
+        if not isinstance(raw, dict) or not required.issubset(raw):
+            raise ValueError("supervisor_state_invalid")
+        if raw.get("run_id") != self.run_id:
+            raise ValueError("supervisor_run_id_mismatch")
+        generation = raw.get("generation")
+        worker_pid = raw.get("worker_pid")
+        last_sequence = raw.get("last_covered_sequence")
+        lifecycle = raw.get("lifecycle")
+        valid_lifecycle = lifecycle in {
+            "registered",
+            "running",
+            "recovery_required",
+            "abandoned",
+            "failed",
+            "workflow_reconciled",
+        }
+        valid_lists = all(
+            isinstance(raw.get(field), list)
+            and all(isinstance(item, str) and item for item in raw[field])
+            for field in ("open_actions", "orphaned_roles")
+        )
+        heartbeat = raw.get("heartbeat_at")
+        if (
+            raw.get("schema") != "torq-supervisor-state-v1"
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 0
+            or not valid_lifecycle
+            or not (
+                worker_pid is None
+                or isinstance(worker_pid, int)
+                and not isinstance(worker_pid, bool)
+                and worker_pid > 0
+            )
+            or lifecycle in {"abandoned", "failed", "workflow_reconciled"}
+            and worker_pid is not None
+            or not (heartbeat is None or isinstance(heartbeat, str) and heartbeat)
+            or not isinstance(last_sequence, int)
+            or isinstance(last_sequence, bool)
+            or last_sequence < 0
+            or not valid_lists
+        ):
+            raise ValueError("supervisor_state_invalid")
+        return dict(raw)
 
     @property
     def reconciliation_path(self) -> Path:

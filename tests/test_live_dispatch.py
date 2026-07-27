@@ -12,6 +12,7 @@ from torq_cli.adapters.owned_stream import ProcessEvent
 from torq_cli.adapters.process import ContainmentState, ExitObservation
 from torq_cli.connectors.credential_sources import ExplicitEnvVault
 from torq_cli.connectors.live_dispatch import LiveStageDispatcher
+from torq_cli.domain import stage_response as stage_response_module
 from torq_cli.safety.receipts import restrict_receipt_trust_anchor
 
 
@@ -316,7 +317,7 @@ def test_live_dispatcher_locally_rejects_off_schema_provider_object(tmp_path: Pa
 def test_contract_matcher_rejects_each_closed_schema_violation(
     value: object, schema: dict[str, object]
 ) -> None:
-    assert not live_provider_module._matches_contract(value, schema)
+    assert not stage_response_module._matches_schema(value, schema)
 
 
 def test_live_dispatcher_bounds_owned_process_output(tmp_path: Path) -> None:

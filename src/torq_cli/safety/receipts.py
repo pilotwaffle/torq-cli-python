@@ -1143,6 +1143,16 @@ class ReceiptChain:
                 self.root,
                 trusted_public_key=trusted,
             )
+        if (
+            verification is not None
+            and verification.status == "live_catching_up"
+            and verification.finding == "manifest_coverage_lag"
+        ):
+            self._recover_authenticated_uncovered_tail()
+            verification = verify_receipt_store(
+                self.root,
+                trusted_public_key=trusted,
+            )
         if verification is not None:
             if verification.status != "verified":
                 raise ValueError(
@@ -1154,6 +1164,119 @@ class ReceiptChain:
             self._previous = manifest.get("terminal_receipt_hash")
             self._sealed = bool(manifest.get("sealed"))
             self._manifest_generation = int(manifest["manifest_generation"])
+
+    def _recover_authenticated_uncovered_tail(self) -> None:
+        """Advance one anchored manifest over an authenticated crash tail."""
+        manifest_path = self.root / "terminal-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, Mapping) or bool(manifest.get("sealed")):
+            raise ValueError("receipt_store_not_writable:uncovered_tail_invalid")
+        covered_count = manifest.get("receipt_count")
+        generation = manifest.get("manifest_generation")
+        if (
+            not isinstance(covered_count, int)
+            or isinstance(covered_count, bool)
+            or covered_count <= 0
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation <= 0
+        ):
+            raise ValueError("receipt_store_not_writable:uncovered_tail_invalid")
+        lines = self.receipts_path.read_text(encoding="utf-8").splitlines()
+        if len(lines) <= covered_count:
+            raise ValueError("receipt_store_not_writable:uncovered_tail_missing")
+
+        try:
+            receipts = [json.loads(line) for line in lines]
+            if not all(isinstance(receipt, dict) for receipt in receipts):
+                raise ValueError("uncovered_tail_invalid")
+            previous = manifest.get("terminal_receipt_hash")
+            for expected_sequence, raw_receipt in enumerate(
+                receipts[covered_count:],
+                start=covered_count + 1,
+            ):
+                receipt = dict(raw_receipt)
+                receipt_hash = receipt.pop("receipt_hash")
+                if (
+                    receipt.get("sequence") != expected_sequence
+                    or receipt.get("previous_receipt_hash") != previous
+                    or receipt.get("run_id") != self.run_id
+                    or receipt.get("schema_version") != self.schema_version
+                    or receipt.get("profile_version") != self.profile_version
+                    or receipt.get("policy_version") != self.policy_version
+                ):
+                    raise ValueError("uncovered_tail_continuity_invalid")
+                verified_hash = "sha256:" + hashlib.sha256(
+                    _canonical_for_verification(receipt)
+                ).hexdigest()
+                if not isinstance(receipt_hash, str) or not hmac.compare_digest(
+                    verified_hash,
+                    receipt_hash,
+                ):
+                    raise ValueError("uncovered_tail_hash_invalid")
+                writer_role = receipt.get("writer_role")
+                evidence_basis = receipt.get("evidence_basis")
+                writer_finding = _writer_contract_finding(
+                    writer_role,
+                    evidence_basis,
+                    receipt.get("transition"),
+                    receipt.get("payload"),
+                )
+                if writer_finding is not None or writer_role not in _WRITER_ROLES:
+                    raise ValueError("uncovered_tail_writer_invalid")
+                writer_private = getattr(self.run_keys, str(writer_role))
+                writer_public = (
+                    Ed25519PrivateKey.from_private_bytes(writer_private)
+                    .public_key()
+                    .public_bytes_raw()
+                )
+                if receipt.get("writer_key_id") != _key_id(writer_public):
+                    raise ValueError("uncovered_tail_writer_invalid")
+                writer_signature = bytes.fromhex(str(receipt.get("writer_signature")))
+                writer_body = dict(receipt)
+                writer_body.pop("writer_signature")
+                Ed25519PublicKey.from_public_bytes(writer_public).verify(
+                    writer_signature,
+                    _canonical_for_verification(writer_body),
+                )
+                payload = receipt.get("payload")
+                if isinstance(payload, Mapping) and "artifact" in payload:
+                    resolved_root = self.root.resolve()
+                    artifact = (
+                        resolved_root / str(payload["artifact"])
+                    ).resolve(strict=False)
+                    if (
+                        not artifact.is_relative_to(resolved_root)
+                        or not artifact.exists()
+                        or self.hash_file(artifact) != payload.get("artifact_hash")
+                    ):
+                        raise ValueError("uncovered_tail_artifact_invalid")
+                previous = receipt_hash
+            lifecycle_finding = validate_v2_receipt_contract(receipts, sealed=False)
+            if lifecycle_finding is not None:
+                raise ValueError(lifecycle_finding)
+        except (InvalidSignature, OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "receipt_store_not_writable:uncovered_tail_invalid"
+            ) from exc
+        except ValueError as exc:
+            raise ValueError(
+                "receipt_store_not_writable:uncovered_tail_invalid"
+            ) from exc
+
+        old_sequence = self._sequence
+        old_previous = self._previous
+        old_generation = self._manifest_generation
+        self._sequence = len(receipts)
+        self._previous = previous
+        self._manifest_generation = generation
+        try:
+            self._write_manifest(sealed=False)
+        except Exception:
+            self._sequence = old_sequence
+            self._previous = old_previous
+            self._manifest_generation = old_generation
+            raise
 
     @staticmethod
     def hash_file(path: Path) -> str:
