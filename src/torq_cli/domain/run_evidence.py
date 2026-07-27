@@ -99,6 +99,11 @@ def _matches(pattern: re.Pattern[str], value: object) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
+def is_bounded_media_type(value: object) -> bool:
+    """Return whether a producer value fits the receipt MIME-token contract."""
+    return _matches(_MEDIA_TYPE, value)
+
+
 #: A label is one line of printable text. Newlines, tabs, and other control
 #: characters are refused so a bounded field cannot carry a formatted document
 #: within its length budget.
@@ -332,7 +337,7 @@ def _command_values_ok(payload: Mapping[str, Any]) -> bool:
         ("command_id", _matches(_OPAQUE_ID, payload.get("command_id"))),
         ("context_id", _matches(_OPAQUE_ID, payload.get("context_id"))),
         ("artifact", artifact_ok),
-        ("media_type", _matches(_MEDIA_TYPE, payload.get("media_type"))),
+        ("media_type", is_bounded_media_type(payload.get("media_type"))),
         ("source_name", source_ok),
         ("redactions", _redaction_names(payload.get("redactions"))),
         ("content_bytes", _bounded_content_bytes(payload.get("content_bytes"))),
@@ -1299,6 +1304,7 @@ __all__ = [
     "ATTEMPT_TRANSITIONS",
     "CONDITIONAL_LANES",
     "CORE_LANES",
+    "is_bounded_media_type",
     "LANE_ORDER",
     "TERMINAL_ATTEMPT_TRANSITIONS",
     "validate_receipt_payload",

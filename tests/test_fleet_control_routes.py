@@ -35,13 +35,13 @@ class _Dispatcher:
         del prompt
         body: Mapping[str, object]
         if role == "g1d":
-            body = {"status": "design_complete"}
+            body = {"status": "design_complete", "proposal": "safe design"}
         elif role == "builder":
-            body = {"status": "build_complete"}
+            body = {"status": "build_complete", "proposal": "safe build"}
         elif role == "g2a":
             body = {"verdict": "approve", "defects": []}
         else:
-            body = {"verdict": "approve"}
+            body = {"verdict": "approve", "rationale": "sound"}
         return NormalizedResponse(
             visible_text=json.dumps(body),
             reasoning_trace="",

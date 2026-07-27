@@ -457,6 +457,157 @@ def test_manifest_covered_prefix_excludes_uncovered_receipt(tmp_path: Path) -> N
     assert snapshot["run"]["receipt_count"] == 1
 
 
+def test_reopen_authenticates_and_commits_valid_uncovered_crash_tail(
+    tmp_path: Path,
+) -> None:
+    armed = [False]
+
+    def observer(step: str) -> None:
+        if armed[0] and step == "receipt_fsynced":
+            raise RuntimeError("simulated_crash")
+
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-tail-recovery", observer=observer)
+    chain.append("run_attested", {"ordinal": 1})
+    anchored_manifest = json.loads(
+        (chain.root / "terminal-manifest.json").read_text(encoding="utf-8")
+    )
+    armed[0] = True
+    with pytest.raises(RuntimeError, match="simulated_crash"):
+        chain.append("run_attested", {"ordinal": 2})
+    assert verify_receipt_store(chain.root).finding == "manifest_coverage_lag"
+
+    reopened = _chain(root, "run-tail-recovery")
+    recovered_manifest = json.loads(
+        (reopened.root / "terminal-manifest.json").read_text(encoding="utf-8")
+    )
+    anchor_path = next(
+        (root / ".torq-run-identities").glob("*/manifest-head.v1.json")
+    )
+    recovered_anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+    continued = reopened.append("run_attested", {"ordinal": 3})
+
+    assert recovered_manifest["receipt_count"] == 2
+    assert recovered_manifest["manifest_generation"] == (
+        anchored_manifest["manifest_generation"] + 1
+    )
+    assert recovered_manifest["previous_manifest_hash"] == (
+        "sha256:"
+        + hashlib.sha256(
+            _canonical(anchored_manifest),
+        ).hexdigest()
+    )
+    assert recovered_anchor["manifest_generation"] == (
+        recovered_manifest["manifest_generation"]
+    )
+    assert recovered_anchor["receipt_count"] == 2
+    assert continued["sequence"] == 3
+    assert verify_receipt_store(reopened.root).status == "verified"
+
+
+def test_first_receipt_crash_stays_closed_without_signed_manifest_head(
+    tmp_path: Path,
+) -> None:
+    def observer(step: str) -> None:
+        if step == "receipt_fsynced":
+            raise RuntimeError("simulated_crash")
+
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-first-tail", observer=observer)
+    with pytest.raises(RuntimeError, match="simulated_crash"):
+        chain.append("run_attested", {"ordinal": 1})
+
+    assert not (chain.root / "terminal-manifest.json").exists()
+    with pytest.raises(
+        ValueError,
+        match="^receipt_store_not_writable:evidence_missing$",
+    ):
+        _chain(root, "run-first-tail")
+
+
+def test_reopen_never_recovers_an_uncovered_tail_after_a_sealed_manifest(
+    tmp_path: Path,
+) -> None:
+    armed = [False]
+
+    def observer(step: str) -> None:
+        if armed[0] and step == "receipt_fsynced":
+            raise RuntimeError("simulated_crash")
+
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-sealed-tail", observer=observer)
+    chain.append("run_attested", {"ordinal": 1})
+    chain.seal()
+    sealed_manifest = (chain.root / "terminal-manifest.json").read_bytes()
+
+    chain._sealed = False
+    armed[0] = True
+    with pytest.raises(RuntimeError, match="simulated_crash"):
+        chain.append("run_attested", {"ordinal": 2})
+
+    verification = verify_receipt_store(chain.root)
+    assert verification.status == "tampered"
+    assert verification.finding == "receipt_after_terminal_decision"
+    with pytest.raises(
+        ValueError,
+        match="^receipt_store_not_writable:receipt_after_terminal_decision$",
+    ):
+        _chain(root, "run-sealed-tail")
+    assert (chain.root / "terminal-manifest.json").read_bytes() == sealed_manifest
+
+
+@pytest.mark.parametrize("tamper", ("hash", "signature", "artifact"))
+def test_reopen_refuses_invalid_uncovered_tail_without_advancing_manifest(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    armed = [False]
+
+    def observer(step: str) -> None:
+        if armed[0] and step == "receipt_fsynced":
+            raise RuntimeError("simulated_crash")
+
+    root = tmp_path / "evidence"
+    chain = _chain(root, "run-tail-invalid", observer=observer)
+    chain.append("run_attested", {"ordinal": 1})
+    manifest_before = (chain.root / "terminal-manifest.json").read_bytes()
+    artifact = chain.write_artifact("tail", "authenticated tail artifact")
+    armed[0] = True
+    with pytest.raises(RuntimeError, match="simulated_crash"):
+        chain.append(
+            "run_attested",
+            {
+                "ordinal": 2,
+                "artifact": str(artifact.relative_to(chain.root)),
+                "artifact_hash": chain.hash_file(artifact),
+            },
+        )
+
+    if tamper == "artifact":
+        artifact.write_bytes(artifact.read_bytes() + b"x")
+    else:
+        lines = chain.receipts_path.read_text(encoding="utf-8").splitlines()
+        tail = json.loads(lines[-1])
+        if tamper == "hash":
+            tail["payload"]["ordinal"] = 99
+        else:
+            tail["writer_signature"] = "00" * 64
+            signed_tail = dict(tail)
+            signed_tail.pop("receipt_hash")
+            tail["receipt_hash"] = (
+                "sha256:" + hashlib.sha256(_canonical(signed_tail)).hexdigest()
+            )
+        lines[-1] = json.dumps(tail, sort_keys=True, separators=(",", ":"))
+        chain.receipts_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="^receipt_store_not_writable:uncovered_tail_invalid$",
+    ):
+        _chain(root, "run-tail-invalid")
+    assert (chain.root / "terminal-manifest.json").read_bytes() == manifest_before
+
+
 def test_replaying_an_older_valid_manifest_is_detected_with_matching_receipts(
     tmp_path: Path,
 ) -> None:
@@ -560,6 +711,60 @@ def test_workflow_reconciliation_is_external_and_leaves_manifest_unchanged(
     assert not state.reconciliation_path.is_relative_to(chain.root)
     assert record["evidence_assertion"] == "none"
     assert state.snapshot()["lifecycle"] == "workflow_reconciled"
+
+
+def test_supervisor_restart_preserves_recovery_required_state(tmp_path: Path) -> None:
+    path = tmp_path / "supervisor.json"
+    state = SupervisorState(path, "run-restart")
+    expected = state.update(
+        lifecycle="recovery_required",
+        worker_pid=None,
+        last_covered_sequence=7,
+        open_actions=["recover"],
+        orphaned_roles=["g1d"],
+    )
+    persisted = path.read_bytes()
+
+    reopened = SupervisorState(path, "run-restart")
+
+    assert reopened.snapshot() == expected
+    assert path.read_bytes() == persisted
+
+
+@pytest.mark.parametrize(
+    "payload, finding",
+    [
+        (b"{not-json", "supervisor_state_invalid"),
+        (
+            json.dumps(
+                {
+                    "schema": "torq-supervisor-state-v1",
+                    "run_id": "different-run",
+                    "generation": 1,
+                    "lifecycle": "recovery_required",
+                    "worker_pid": None,
+                    "heartbeat_at": "2026-01-01T00:00:00Z",
+                    "last_covered_sequence": 1,
+                    "open_actions": [],
+                    "orphaned_roles": ["g1d"],
+                }
+            ).encode("utf-8"),
+            "supervisor_run_id_mismatch",
+        ),
+    ],
+)
+def test_supervisor_restart_rejects_invalid_state_without_overwrite(
+    tmp_path: Path,
+    payload: bytes,
+    finding: str,
+) -> None:
+    path = tmp_path / "supervisor.json"
+    path.write_bytes(payload)
+
+    with pytest.raises(ValueError, match=f"^{finding}$"):
+        SupervisorState(path, "run-restart")
+
+    assert path.read_bytes() == payload
 
 
 

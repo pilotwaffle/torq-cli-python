@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -56,6 +59,22 @@ def _sealed_run(root: Path, run_id: str) -> None:
 def _ledger(root: Path, *, now: datetime | None = None) -> PersistentEntitlementLedger:
     instant = (now or datetime(2029, 1, 1, tzinfo=UTC)).timestamp()
     return PersistentEntitlementLedger(root, _windows(), clock=lambda: instant)
+
+
+def _reserve_in_process(
+    root_value: str,
+    start: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue[str],
+) -> None:
+    ledger = _ledger(Path(root_value))
+    ledger.bind_run("run-process-race")
+    start.wait(timeout=10)
+    try:
+        ledger.reserve("qwen", calls=10)
+    except ValueError as exc:
+        results.put(str(exc))
+    else:
+        results.put("reserved")
 
 
 @pytest.mark.parametrize(("used", "reserved"), [(1, 0), (0, 1)])
@@ -159,6 +178,122 @@ def test_registry_enrollment_is_signed_append_only_and_rollback_detected(
 
     with pytest.raises(RegistryRollbackError, match="registry_rollback_detected"):
         ledger.verify_registry()
+
+
+def test_reserve_capacity_check_and_append_are_atomic_across_threads(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    _sealed_run(root, "run-thread-race")
+    ledger = _ledger(root)
+    ledger.bind_run("run-thread-race")
+    start = threading.Barrier(2)
+
+    def reserve() -> str:
+        start.wait(timeout=10)
+        try:
+            ledger.reserve("qwen", calls=10)
+        except ValueError as exc:
+            return str(exc)
+        return "reserved"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(reserve) for _ in range(2)]
+        outcomes = sorted(future.result(timeout=20) for future in futures)
+
+    assert outcomes == ["entitlement_window_exceeded", "reserved"]
+    assert ledger.window("qwen").reserved == 10
+    ledger.verify_registry()
+
+
+def test_enrollment_check_and_append_are_atomic_across_instances(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    _sealed_run(root, "run-enrollment-race")
+    ledgers = [_ledger(root), _ledger(root)]
+    start = threading.Barrier(2)
+
+    def bind(ledger: PersistentEntitlementLedger) -> None:
+        start.wait(timeout=10)
+        ledger.bind_run("run-enrollment-race")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(bind, ledger) for ledger in ledgers]
+        for future in futures:
+            future.result(timeout=20)
+
+    rows = ledgers[0].verify_registry()
+    assert [row["event"] for row in rows] == ["run_enrolled"]
+
+
+def test_reserve_capacity_check_and_append_are_atomic_across_processes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    _sealed_run(root, "run-process-race")
+    ledger = _ledger(root)
+    ledger.bind_run("run-process-race")
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_reserve_in_process,
+            args=(str(root), start, results),
+        )
+        for _ in range(2)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        start.set()
+        outcomes = sorted(results.get(timeout=20) for _ in processes)
+    finally:
+        for process in processes:
+            process.join(timeout=20)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    assert all(process.exitcode == 0 for process in processes)
+
+    assert outcomes == ["entitlement_window_exceeded", "reserved"]
+    assert _ledger(root).window("qwen").reserved == 10
+    ledger.verify_registry()
+
+
+def test_reconcile_selection_and_append_are_atomic_across_instances(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "evidence"
+    _sealed_run(root, "run-reconcile-race")
+    first = _ledger(root)
+    first.bind_run("run-reconcile-race")
+    first.reserve("qwen", calls=2)
+    second = _ledger(root)
+    second.bind_run("run-reconcile-race")
+    ledgers = [first, second]
+    start = threading.Barrier(2)
+
+    def reconcile(ledger: PersistentEntitlementLedger) -> str:
+        start.wait(timeout=10)
+        try:
+            ledger.reconcile("qwen", calls=1)
+        except ValueError as exc:
+            return str(exc)
+        return "reconciled"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(reconcile, ledger) for ledger in ledgers]
+        outcomes = sorted(future.result(timeout=20) for future in futures)
+
+    assert outcomes == ["entitlement_reservation_missing", "reconciled"]
+    current = first.window("qwen")
+    assert current.used == 1
+    assert current.reserved == 0
 
 
 def test_cross_run_coverage_fails_closed_when_an_enrolled_run_is_missing(

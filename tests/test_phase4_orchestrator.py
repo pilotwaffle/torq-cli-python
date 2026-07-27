@@ -161,12 +161,12 @@ def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approv
             (
                 MockSurface(
                     specs["claude"].primary_surface,
-                    _payload("anthropic", "claude-fable-5", {"status": "design_complete"}),
+                    _payload("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"}),
                     grants={"claude-fable-5"},
                 ),
                 MockSurface(
                     specs["claude"].primary_surface,
-                    _payload("anthropic", "claude-opus-4-8", {"verdict": "approve"}),
+                    _payload("anthropic", "claude-opus-4-8", {"verdict": "approve", "rationale": "sound"}),
                     grants={"claude-opus-4-8"},
                 ),
             ),
@@ -177,7 +177,7 @@ def test_live_orchestrator_dispatches_profile_bound_connectors_and_awaits_approv
             (
                 MockSurface(
                     specs["deepseek"].primary_surface,
-                    _payload("deepseek", "deepseek-v4-pro", {"status": "build_complete"}),
+                    _payload("deepseek", "deepseek-v4-pro", {"status": "build_complete", "proposal": "safe build"}),
                     grants={"deepseek-v4-pro"},
                 ),
             ),
@@ -275,19 +275,19 @@ def test_high_bug_routes_to_refine_bug_and_targeted_reaudit(tmp_path: Path) -> N
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _ScriptedDispatcher(
         {
-            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
-            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve", "rationale": "sound"})],
+            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete", "proposal": "safe build"})],
             "g2a": [
                 _response(
                     "openai",
                     "gpt-5.5",
-                    {"verdict": "reject", "defects": [{"severity": "HIGH", "class": "bug"}]},
+                    {"verdict": "reject", "defects": [{"defect_id": "defect-1", "severity": "HIGH", "class": "bug", "status": "open"}]},
                 ),
                 _response("openai", "gpt-5.5", {"verdict": "approve", "defects": []}),
             ],
             "refine_bug": [
-                _response("moonshot", "k3", {"status": "repair_complete"})
+                _response("moonshot", "k3", {"status": "repair_complete", "proposal": "safe repair"})
             ],
         }
     )
@@ -352,9 +352,9 @@ def test_critical_defect_preempts_earlier_repairable_defect(tmp_path: Path) -> N
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _ScriptedDispatcher(
         {
-            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
-            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
-            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve", "rationale": "sound"})],
+            "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete", "proposal": "safe build"})],
             "g2a": [
                 _response(
                     "openai",
@@ -362,8 +362,8 @@ def test_critical_defect_preempts_earlier_repairable_defect(tmp_path: Path) -> N
                     {
                         "verdict": "reject",
                         "defects": [
-                            {"severity": "HIGH", "class": "bug"},
-                            {"severity": "CRITICAL", "class": "security"},
+                            {"defect_id": "defect-1", "severity": "HIGH", "class": "bug", "status": "open"},
+                            {"defect_id": "defect-2", "severity": "CRITICAL", "class": "security", "status": "open"},
                         ],
                     },
                 )
@@ -392,7 +392,7 @@ def test_critical_defect_preempts_earlier_repairable_defect(tmp_path: Path) -> N
 def test_live_cost_budget_is_checked_before_provider_dispatch(tmp_path: Path) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _ScriptedDispatcher(
-        {"g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})]}
+        {"g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})]}
     )
     chain = ReceiptChain(
         tmp_path / "budget",
@@ -442,19 +442,19 @@ def test_run_controller_rejects_policy_label_mismatch_before_receipts(
 def test_loop_exhaustion_and_off_contract_output_halt_fail_closed(tmp_path: Path) -> None:
     profile = load_registry().profiles["torq-v5-6-live"]
     common = {
-        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve"})],
-        "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete"})],
+        "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "approve", "rationale": "sound"})],
+        "builder": [_response("deepseek", "deepseek-v4-pro", {"status": "build_complete", "proposal": "safe build"})],
         "g2a": [
             _response(
                 "openai",
                 "gpt-5.5",
-                {"verdict": "reject", "defects": [{"severity": "HIGH", "class": "bug"}]},
+                {"verdict": "reject", "defects": [{"defect_id": "defect-1", "severity": "HIGH", "class": "bug", "status": "open"}]},
             )
         ],
     }
     exhausted_dispatcher = _ScriptedDispatcher(
         {
-            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})],
+            "g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})],
             **common,
         }
     )
@@ -486,7 +486,9 @@ def test_loop_exhaustion_and_off_contract_output_halt_fail_closed(tmp_path: Path
         profile_version=profile.profile_version,
         policy_version="3.1.3",
     )
-    with pytest.raises(OrchestrationBlocked, match="off_contract_stage:g1d:status"):
+    with pytest.raises(
+        OrchestrationBlocked, match="off_contract_stage:g1d:response_contract"
+    ):
         _orchestrator(off_contract).execute(
             goal="Reject ambiguous stage output",
             profile=profile,
@@ -517,7 +519,7 @@ def test_live_orchestration_fails_closed_without_dispatcher_or_model_attestation
     mismatch = _ScriptedDispatcher(
         {
             "g1d": [
-                _response("anthropic", "different-model", {"status": "design_complete"})
+                _response("anthropic", "different-model", {"status": "design_complete", "proposal": "safe design"})
             ]
         }
     )
@@ -544,13 +546,13 @@ def test_stage_receipts_preserve_the_input_output_token_split(tmp_path: Path) ->
         {
             "g1d": [
                 NormalizedResponse(
-                    json.dumps({"status": "design_complete"}, sort_keys=True),
+                    json.dumps({"status": "design_complete", "proposal": "safe design"}, sort_keys=True),
                     "",
                     {"prompt_tokens": 400, "completion_tokens": 90, "reasoning_tokens": 10},
                     Provenance("anthropic", "claude-fable-5", False),
                 )
             ],
-            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject"})],
+            "g1r": [_response("anthropic", "claude-opus-4-8", {"verdict": "reject", "rationale": "revise"})],
         }
     )
     chain = ReceiptChain(
@@ -593,7 +595,7 @@ def test_blocked_preflight_seals_an_auditable_refusal(tmp_path: Path) -> None:
     """A refusal must leave verifiable evidence that no egress occurred."""
     profile = load_registry().profiles["torq-v5-6-live"]
     dispatcher = _ScriptedDispatcher(
-        {"g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete"})]}
+        {"g1d": [_response("anthropic", "claude-fable-5", {"status": "design_complete", "proposal": "safe design"})]}
     )
     controller = RunController(tmp_path / "evidence", _orchestrator(dispatcher, budget_usd=0.05))
     identity = RunIdentity(

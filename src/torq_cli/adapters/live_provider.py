@@ -20,6 +20,7 @@ from torq_cli.connectors.credential_sources import (
     safe_child_environment,
 )
 from torq_cli.core.engine import NormalizedResponse, Provenance
+from torq_cli.domain.stage_response import stage_response_matches, stage_response_schema
 
 
 _PROVIDER_NAMES = {
@@ -29,67 +30,8 @@ _PROVIDER_NAMES = {
     "qwen": "qwen",
     "zai": "zai",
 }
-_STRING = {"type": "string", "maxLength": 120}
 _MAX_PROVIDER_OUTPUT_BYTES = 1_048_576
 _OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
-_CONTRACTS: Mapping[str, Mapping[str, object]] = {
-    "g1d": {
-        "type": "object",
-        "properties": {"status": {"type": "string", "const": "design_complete"}, "proposal": _STRING},
-        "required": ["status", "proposal"],
-        "additionalProperties": False,
-    },
-    "g1r": {
-        "type": "object",
-        "properties": {
-            "verdict": {"type": "string", "enum": ["approve", "reject"]},
-            "rationale": _STRING,
-        },
-        "required": ["verdict", "rationale"],
-        "additionalProperties": False,
-    },
-    "builder": {
-        "type": "object",
-        "properties": {"status": {"type": "string", "const": "build_complete"}, "proposal": _STRING},
-        "required": ["status", "proposal"],
-        "additionalProperties": False,
-    },
-    "g2a": {
-        "type": "object",
-        "properties": {
-            "verdict": {"type": "string", "enum": ["approve", "reject"]},
-            "defects": {
-                "type": "array",
-                "maxItems": 50,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "defect_id": _STRING,
-                        "severity": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]},
-                        "class": {"type": "string", "enum": ["bug", "ui", "security", "other"]},
-                        "status": {"type": "string", "const": "open"},
-                    },
-                    "required": ["defect_id", "severity", "class", "status"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["verdict", "defects"],
-        "additionalProperties": False,
-    },
-    "refine_bug": {
-        "type": "object",
-        "properties": {"status": {"type": "string", "const": "repair_complete"}, "proposal": _STRING},
-        "required": ["status", "proposal"],
-        "additionalProperties": False,
-    },
-    "refine_ui": {
-        "type": "object",
-        "properties": {"status": {"type": "string", "const": "repair_complete"}, "proposal": _STRING},
-        "required": ["status", "proposal"],
-        "additionalProperties": False,
-    },
-}
 
 
 class _ProcessOwner(Protocol):
@@ -176,55 +118,12 @@ def _usage_count(value: object, provider: str) -> int:
     return value
 
 
-def _matches_contract(value: object, schema: Mapping[str, object]) -> bool:
-    expected_type = schema.get("type")
-    if expected_type == "string":
-        if not isinstance(value, str):
-            return False
-        maximum = schema.get("maxLength")
-        if isinstance(maximum, int) and len(value) > maximum:
-            return False
-        if "const" in schema and value != schema["const"]:
-            return False
-        allowed = schema.get("enum")
-        return not isinstance(allowed, list) or value in allowed
-    if expected_type == "array":
-        if not isinstance(value, list):
-            return False
-        maximum = schema.get("maxItems")
-        if isinstance(maximum, int) and len(value) > maximum:
-            return False
-        item_schema = schema.get("items")
-        return isinstance(item_schema, Mapping) and all(
-            _matches_contract(item, item_schema) for item in value
-        )
-    if expected_type == "object":
-        if not isinstance(value, Mapping):
-            return False
-        properties = schema.get("properties")
-        required = schema.get("required")
-        if not isinstance(properties, Mapping) or not isinstance(required, list):
-            return False
-        if not set(required).issubset(value):
-            return False
-        if schema.get("additionalProperties") is False and not set(value).issubset(properties):
-            return False
-        return all(
-            key in properties
-            and isinstance(properties[key], Mapping)
-            and _matches_contract(item, properties[key])
-            for key, item in value.items()
-        )
-    return False
-
-
 def _validated_role_object(value: object, provider: str, role: str) -> str:
     """Validate the provider result locally; remote schema compliance is not trusted."""
 
     canonical = _single_json_object(value, provider)
     decoded = json.loads(canonical)
-    schema = _CONTRACTS.get(role)
-    if schema is None or not _matches_contract(decoded, schema):
+    if not stage_response_matches(role, decoded):
         raise OrchestrationBlocked(f"live_provider_response_invalid:{provider}")
     return canonical
 
@@ -360,7 +259,7 @@ class LiveStageDispatcher:
         model: str,
         prompt: str,
     ) -> NormalizedResponse:
-        schema = _CONTRACTS.get(role)
+        schema = stage_response_schema(role)
         if schema is None:
             raise OrchestrationBlocked(f"live_role_unsupported:{role}")
         governed_prompt = (

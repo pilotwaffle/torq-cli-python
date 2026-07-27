@@ -10,9 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +27,11 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from torq_cli.safety.entitlements import PlanWindow
 from torq_cli.safety.receipts import FileRunKeyStore, verify_receipt_store
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 
 _ZERO_HASH = "0" * 64
@@ -76,6 +83,34 @@ def _write_atomic(path: Path, payload: bytes) -> None:
             os.fsync(directory)
         finally:
             os.close(directory)
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    """Serialize accounting transactions across ledger objects and processes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if os.fstat(descriptor).st_size == 0:
+            if os.write(descriptor, b"\0") != 1:
+                raise OSError("accounting_lock_short_write")
+            os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if sys.platform == "win32":
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if sys.platform == "win32":
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -151,6 +186,7 @@ class PersistentEntitlementLedger:
         self.reconciliation_anchor_path = (
             evidence_root / ".torq-entitlement-reconciliation-anchor.json"
         )
+        self.transaction_lock_path = evidence_root / ".torq-accounting.lock"
 
     @classmethod
     def from_config(
@@ -241,30 +277,39 @@ class PersistentEntitlementLedger:
         event: Mapping[str, Any],
     ) -> dict[str, Any]:
         with self._lock:
-            rows = self._verify_journal(path, anchor_path)
-            previous = str(rows[-1]["record_hash"]) if rows else _ZERO_HASH
-            body = {
-                "sequence": len(rows) + 1,
-                "previous_hash": previous,
-                "recorded_at": _utc_now(),
-                **event,
-            }
-            record_hash = _hash(body)
-            signed = self._signed({**body, "record_hash": record_hash})
-            encoded = _canonical(signed) + b"\n"
-            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
-            descriptor = os.open(path, flags, 0o600)
-            try:
-                if os.write(descriptor, encoded) != len(encoded):
-                    raise OSError("accounting_registry_short_write")
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            anchor = self._signed(
-                {"schema_version": "1.0.0", "head": record_hash, "count": len(rows) + 1}
-            )
-            _write_atomic(anchor_path, _canonical(anchor))
-            return signed
+            with _exclusive_file_lock(self.transaction_lock_path):
+                return self._append_locked(path, anchor_path, event)
+
+    def _append_locked(
+        self,
+        path: Path,
+        anchor_path: Path,
+        event: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        rows = self._verify_journal(path, anchor_path)
+        previous = str(rows[-1]["record_hash"]) if rows else _ZERO_HASH
+        body = {
+            "sequence": len(rows) + 1,
+            "previous_hash": previous,
+            "recorded_at": _utc_now(),
+            **event,
+        }
+        record_hash = _hash(body)
+        signed = self._signed({**body, "record_hash": record_hash})
+        encoded = _canonical(signed) + b"\n"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            if os.write(descriptor, encoded) != len(encoded):
+                raise OSError("accounting_registry_short_write")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        anchor = self._signed(
+            {"schema_version": "1.0.0", "head": record_hash, "count": len(rows) + 1}
+        )
+        _write_atomic(anchor_path, _canonical(anchor))
+        return signed
 
     def verify_registry(self) -> tuple[dict[str, Any], ...]:
         return tuple(self._verify_journal(self.registry_path, self.anchor_path))
@@ -277,27 +322,29 @@ class PersistentEntitlementLedger:
         *,
         root_key_id: str | None = None,
     ) -> None:
-        rows = self._verify_journal(self.registry_path, self.anchor_path)
-        if any(
-            row.get("event") == "run_enrolled"
-            and row.get("run_id") == run_id
-            and row.get("account") == account
-            and row.get("resets_at") == resets_at
-            for row in rows
-        ):
-            return
-        self._append(
-            self.registry_path,
-            self.anchor_path,
-            {
-                "event": "run_enrolled",
-                "entry_id": "enroll-" + uuid.uuid4().hex,
-                "account": account,
-                "run_id": run_id,
-                "root_key_id": root_key_id or self.root_key_id,
-                "resets_at": resets_at,
-            },
-        )
+        with self._lock:
+            with _exclusive_file_lock(self.transaction_lock_path):
+                rows = self._verify_journal(self.registry_path, self.anchor_path)
+                if any(
+                    row.get("event") == "run_enrolled"
+                    and row.get("run_id") == run_id
+                    and row.get("account") == account
+                    and row.get("resets_at") == resets_at
+                    for row in rows
+                ):
+                    return
+                self._append_locked(
+                    self.registry_path,
+                    self.anchor_path,
+                    {
+                        "event": "run_enrolled",
+                        "entry_id": "enroll-" + uuid.uuid4().hex,
+                        "account": account,
+                        "run_id": run_id,
+                        "root_key_id": root_key_id or self.root_key_id,
+                        "resets_at": resets_at,
+                    },
+                )
 
     def _account(self, provider: str) -> str | None:
         return self._providers.get(provider)
@@ -433,23 +480,25 @@ class PersistentEntitlementLedger:
         window = self._windows[account]
         if window.settlement != "plan_covered":
             return
-        self.preflight(provider)
-        current = self.window(provider)
-        if current.used + current.reserved + calls > current.limit:
-            raise ValueError("entitlement_window_exceeded")
-        self._append(
-            self.registry_path,
-            self.anchor_path,
-            {
-                "event": "reservation_created",
-                "entry_id": "reserve-" + uuid.uuid4().hex,
-                "account": account,
-                "run_id": self._run_id,
-                "provider": provider,
-                "calls": calls,
-                "resets_at": window.resets_at,
-            },
-        )
+        with self._lock:
+            with _exclusive_file_lock(self.transaction_lock_path):
+                self.preflight(provider)
+                current = self.window(provider)
+                if current.used + current.reserved + calls > current.limit:
+                    raise ValueError("entitlement_window_exceeded")
+                self._append_locked(
+                    self.registry_path,
+                    self.anchor_path,
+                    {
+                        "event": "reservation_created",
+                        "entry_id": "reserve-" + uuid.uuid4().hex,
+                        "account": account,
+                        "run_id": self._run_id,
+                        "provider": provider,
+                        "calls": calls,
+                        "resets_at": window.resets_at,
+                    },
+                )
 
     def reconcile(self, provider: str, *, calls: int) -> None:
         if calls < 0:
@@ -460,43 +509,45 @@ class PersistentEntitlementLedger:
         if account is None:
             raise ValueError("entitlement_provider_unknown")
         window = self._windows[account]
-        rows = self._verify_journal(self.registry_path, self.anchor_path)
-        reconciled = self._reconciled_ids()
-        reservation = next(
-            (
-                row
-                for row in rows
-                if row.get("event") == "reservation_created"
-                and row.get("account") == account
-                and row.get("run_id") == self._run_id
-                and row.get("provider") == provider
-                and row.get("entry_id") not in reconciled
-            ),
-            None,
-        )
-        if reservation is None:
-            raise ValueError("entitlement_reservation_missing")
-        old_used, _ = self._totals(account, window.resets_at)
-        if old_used + calls > window.limit:
-            raise ValueError("entitlement_reconcile_invalid")
-        self._append(
-            self.reconciliation_path,
-            self.reconciliation_anchor_path,
-            {
-                "event": "reservation_reconciled",
-                "entry_id": "reconcile-" + uuid.uuid4().hex,
-                "account": account,
-                "run_id": self._run_id,
-                "provider": provider,
-                "source": "provider_response",
-                "actor": "evidence_broker",
-                "old_used": old_used,
-                "new_used": old_used + calls,
-                "calls": calls,
-                "reservation_entry_ids": [reservation["entry_id"]],
-                "resets_at": window.resets_at,
-            },
-        )
+        with self._lock:
+            with _exclusive_file_lock(self.transaction_lock_path):
+                rows = self._verify_journal(self.registry_path, self.anchor_path)
+                reconciled = self._reconciled_ids()
+                reservation = next(
+                    (
+                        row
+                        for row in rows
+                        if row.get("event") == "reservation_created"
+                        and row.get("account") == account
+                        and row.get("run_id") == self._run_id
+                        and row.get("provider") == provider
+                        and row.get("entry_id") not in reconciled
+                    ),
+                    None,
+                )
+                if reservation is None:
+                    raise ValueError("entitlement_reservation_missing")
+                old_used, _ = self._totals(account, window.resets_at)
+                if old_used + calls > window.limit:
+                    raise ValueError("entitlement_reconcile_invalid")
+                self._append_locked(
+                    self.reconciliation_path,
+                    self.reconciliation_anchor_path,
+                    {
+                        "event": "reservation_reconciled",
+                        "entry_id": "reconcile-" + uuid.uuid4().hex,
+                        "account": account,
+                        "run_id": self._run_id,
+                        "provider": provider,
+                        "source": "provider_response",
+                        "actor": "evidence_broker",
+                        "old_used": old_used,
+                        "new_used": old_used + calls,
+                        "calls": calls,
+                        "reservation_entry_ids": [reservation["entry_id"]],
+                        "resets_at": window.resets_at,
+                    },
+                )
 
     def _reconciled_ids(self) -> set[str]:
         rows = self._verify_journal(

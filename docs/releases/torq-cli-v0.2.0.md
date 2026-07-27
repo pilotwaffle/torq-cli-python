@@ -1,6 +1,7 @@
 # TORQ CLI 0.2.0 release candidate notes
 
-Status: prepared from source commit `1201e32` and its documentation descendant.
+Status: prepared from the merged baseline commit `8212efe` and its documentation
+descendants.
 Do not interpret this file as a tag, signature, GitHub release, protected-main
 CI result, or published-artifact attestation. Those release actions remain to
 be performed and recorded.

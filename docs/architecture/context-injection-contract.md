@@ -45,6 +45,12 @@ The endpoint:
 
 ## Attachment boundary
 
+At the command boundary, approved v1 media types are bounded `text/*` values,
+`application/json`, and the approved binary-envelope types `application/pdf`,
+`image/jpeg`, and `image/png`. Receipt artifact paths are validated against the
+closed receipt contract; this contract does not claim to sanitize or rewrite
+arbitrary paths.
+
 The approved v1 file contract accepts only strict UTF-8 `.txt`, `.md`/
 `.markdown`, and strict `.json` with exact MIME/extension pairing. JSON rejects
 duplicate keys, non-finite numbers, and excessive depth/nodes, then canonicalizes

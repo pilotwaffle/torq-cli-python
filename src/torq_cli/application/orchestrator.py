@@ -22,7 +22,12 @@ from torq_cli.core.graph import ExecutionMode
 from torq_cli.core.policy import Defect, G2APolicy
 from torq_cli.core.redaction import PatternRegistry, RedactionBlocked
 from torq_cli.domain.registry_schema import BindingSpec, ProfileSpec
-from torq_cli.domain.run_evidence import CONDITIONAL_LANES, LANE_ORDER
+from torq_cli.domain.run_evidence import CONDITIONAL_LANES, LANE_ORDER, is_bounded_media_type
+from torq_cli.domain.stage_response import (
+    STAGE_RESPONSE_CONTRACT_ID,
+    STAGE_RESPONSE_CONTRACT_VERSION,
+    stage_response_matches,
+)
 from torq_cli.domain.run_plan import (
     PLAN_CONTRACT,
     initial_plan_body,
@@ -159,6 +164,7 @@ class GovernedOrchestrator:
             return existing
         target = target_role or "lead"
         encoded = b""
+        safe_media_type = media_type if is_bounded_media_type(media_type) else None
         safe_source_name: str | None = None
         try:
             encoded = content.encode("utf-8", errors="strict")
@@ -175,7 +181,7 @@ class GovernedOrchestrator:
                 scanned_name, name_findings = self.registry.scan(safe_source_name)
                 if scanned_name != safe_source_name or name_findings:
                     raise OrchestrationBlocked("context_source_name_sensitive")
-            if not (
+            if safe_media_type is None or not (
                 media_type.startswith("text/")
                 or media_type in {
                     "application/json",
@@ -199,7 +205,7 @@ class GovernedOrchestrator:
                     "command_id": command_id,
                     "command_type": "context",
                     "target_role": target if isinstance(target, str) else None,
-                    "media_type": media_type,
+                    "media_type": safe_media_type,
                     "source_name": safe_source_name,
                     "content_bytes": len(encoded),
                     "finding": finding,
@@ -275,8 +281,11 @@ class GovernedOrchestrator:
         if existing is not None:
             return existing
         target = target_role or "lead"
+        safe_media_type = media_type if is_bounded_media_type(media_type) else None
         safe_source_name: str | None = None
         try:
+            if safe_media_type is None:
+                raise ArtifactExtractionError("artifact_media_type_unsupported")
             if target != "lead" and target not in self._PLANNED_ROLES:
                 raise OrchestrationBlocked("context_target_invalid")
             if target != "lead" and not confirm_direct:
@@ -298,7 +307,7 @@ class GovernedOrchestrator:
                     "command_id": command_id,
                     "command_type": "artifact",
                     "target_role": target,
-                    "media_type": media_type,
+                    "media_type": safe_media_type,
                     "source_name": safe_source_name,
                     "content_bytes": len(content),
                     "finding": str(exc),
@@ -460,10 +469,14 @@ class GovernedOrchestrator:
             # A refusal that leaves no terminal receipt is indistinguishable
             # from a run that never happened. Record the decision, then let the
             # caller seal and re-raise.
+            failed_attempt = any(
+                receipt.get("transition") == "stage_failed"
+                for receipt in chain.covered_receipts()
+            )
             chain.terminalize(
                 "run_decision",
                 {
-                    "decision": "failed" if dispatched else "blocked",
+                    "decision": "failed" if dispatched or failed_attempt else "blocked",
                     "reason": str(exc),
                     "provider_dispatch": bool(dispatched),
                     "dispatched_roles": tuple(dispatched),
@@ -857,6 +870,17 @@ class GovernedOrchestrator:
             ]
         prompt = self._prompt(role, goal, prompt_context, binding)
         clean_prompt, findings = self.registry.scan(prompt)
+        if (
+            self.entitlement_ledger is not None
+            and budget.settlement == "plan_covered"
+        ):
+            try:
+                self.entitlement_ledger.reserve(
+                    binding.provider_id,
+                    calls=budget.projected_calls,
+                )
+            except ValueError as exc:
+                raise OrchestrationBlocked(f"plan_window_exceeded:{role}") from exc
         chain.append(
             "stage_dispatch_started",
             {
@@ -874,17 +898,6 @@ class GovernedOrchestrator:
                 "provider_dispatch": True,
             },
         )
-        if (
-            self.entitlement_ledger is not None
-            and budget.settlement == "plan_covered"
-        ):
-            try:
-                self.entitlement_ledger.reserve(
-                    binding.provider_id,
-                    calls=budget.projected_calls,
-                )
-            except ValueError as exc:
-                raise OrchestrationBlocked(f"plan_window_exceeded:{role}") from exc
         return clean_prompt
 
     def _consume_context(
@@ -1065,8 +1078,8 @@ class GovernedOrchestrator:
                     "model": binding.model_id,
                     "prompt_id": binding.prompt_id,
                     "prompt_version": binding.prompt_version,
-                    "contract_id": "torq-stage-response",
-                    "contract_version": "1.0.0",
+                    "contract_id": STAGE_RESPONSE_CONTRACT_ID,
+                    "contract_version": STAGE_RESPONSE_CONTRACT_VERSION,
                 }
             )
         return catalog
@@ -1076,17 +1089,8 @@ class GovernedOrchestrator:
         role: str,
         body: Mapping[str, Any],
     ) -> None:
-        if role == "g1d":
-            self._require_value(body, "status", "design_complete", role)
-        elif role == "builder":
-            self._require_value(body, "status", "build_complete", role)
-        elif role in CONDITIONAL_LANES:
-            self._require_value(body, "status", "repair_complete", role)
-        elif role in {"g1r", "g2a"}:
-            self._require_verdict(body, role)
-            defects = body.get("defects", [])
-            if role == "g2a" and not isinstance(defects, list):
-                raise OrchestrationBlocked("malformed_audit_defects")
+        if not stage_response_matches(role, body):
+            raise OrchestrationBlocked(f"off_contract_stage:{role}:response_contract")
 
     @staticmethod
     def _usage_record(reported: Mapping[str, Any]) -> dict[str, int]:
@@ -1185,18 +1189,6 @@ class GovernedOrchestrator:
     @staticmethod
     def _verdict(body: Mapping[str, Any]) -> str:
         return str(body.get("verdict", "reject")).lower()
-
-    @staticmethod
-    def _require_value(
-        body: Mapping[str, Any], key: str, expected: str, role: str
-    ) -> None:
-        if str(body.get(key, "")).lower() != expected:
-            raise OrchestrationBlocked(f"off_contract_stage:{role}:{key}")
-
-    @staticmethod
-    def _require_verdict(body: Mapping[str, Any], role: str) -> None:
-        if str(body.get("verdict", "")).lower() not in {"approve", "reject"}:
-            raise OrchestrationBlocked(f"off_contract_stage:{role}:verdict")
 
     def _repair_role(self, audit: Mapping[str, Any]) -> str | None:
         defects = audit.get("defects", ())

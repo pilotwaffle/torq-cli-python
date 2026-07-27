@@ -54,15 +54,15 @@ class _Dispatcher:
             raise RuntimeError("transport unavailable")
         body: Mapping[str, object]
         if role == "g1d":
-            body = {"status": "design_complete"}
+            body = {"status": "design_complete", "proposal": "safe design"}
         elif role == "g1r":
-            body = {"verdict": "approve"}
+            body = {"verdict": "approve", "rationale": "sound"}
         elif role == "builder":
-            body = {"status": "build_complete"}
+            body = {"status": "build_complete", "proposal": "safe build"}
         elif role == "g2a":
             body = {"verdict": "approve", "defects": []}
         else:
-            body = {"status": "repair_complete"}
+            body = {"status": "repair_complete", "proposal": "safe repair"}
         return _response(provider, model, body)
 
 

@@ -147,7 +147,7 @@ MUTATIONS = (
     Mutation(
         "M25",
         "src/torq_cli/domain/run_evidence.py",
-        '        ("media_type", _matches(_MEDIA_TYPE, payload.get("media_type"))),',
+        '        ("media_type", is_bounded_media_type(payload.get("media_type"))),',
         '        ("media_type", isinstance(payload.get("media_type"), str)),',
         "tests/test_receipt_prose_bounds.py::test_command_accepted_rejects_prose_shaped_values",
     ),
