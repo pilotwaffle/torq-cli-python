@@ -62,6 +62,8 @@ class EntitlementLedger(Protocol):
 
     def reserve(self, provider: str, *, calls: int) -> None: ...
 
+    def cancel(self, provider: str, *, calls: int) -> None: ...
+
     def reconcile(self, provider: str, *, calls: int) -> None: ...
 
 
@@ -136,6 +138,24 @@ class InMemoryEntitlementLedger:
             raise ValueError("entitlement_window_exceeded")
         self._windows[window.account] = replace(window, used=window.used + calls)
         self._reservations.setdefault(provider, []).append(calls)
+
+    def cancel(self, provider: str, *, calls: int) -> None:
+        if calls <= 0:
+            raise ValueError("entitlement_calls_invalid")
+        window = self.window(provider)
+        if window.settlement != "plan_covered":
+            return
+        pending = self._reservations.get(provider, [])
+        try:
+            index = pending.index(calls)
+        except ValueError as exc:
+            raise ValueError("entitlement_reservation_missing") from exc
+        pending.pop(index)
+        if not pending:
+            self._reservations.pop(provider, None)
+        if window.used < calls:
+            raise ValueError("entitlement_cancellation_invalid")
+        self._windows[window.account] = replace(window, used=window.used - calls)
 
     def reconcile(self, provider: str, *, calls: int) -> None:
         if calls < 0:

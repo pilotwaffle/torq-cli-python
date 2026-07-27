@@ -500,6 +500,51 @@ class PersistentEntitlementLedger:
                     },
                 )
 
+    def cancel(self, provider: str, *, calls: int) -> None:
+        if calls <= 0:
+            raise ValueError("entitlement_calls_invalid")
+        if self._run_id is None:
+            raise ValueError("entitlement_run_unbound")
+        account = self._account(provider)
+        if account is None:
+            raise ValueError("entitlement_provider_unknown")
+        window = self._windows[account]
+        if window.settlement != "plan_covered":
+            return
+        with self._lock:
+            with _exclusive_file_lock(self.transaction_lock_path):
+                rows = self._verify_journal(self.registry_path, self.anchor_path)
+                reconciled = self._reconciled_ids()
+                reservation = next(
+                    (
+                        row
+                        for row in rows
+                        if row.get("event") == "reservation_created"
+                        and row.get("account") == account
+                        and row.get("run_id") == self._run_id
+                        and row.get("provider") == provider
+                        and int(row.get("calls", 0)) == calls
+                        and row.get("entry_id") not in reconciled
+                    ),
+                    None,
+                )
+                if reservation is None:
+                    raise ValueError("entitlement_reservation_missing")
+                self._append_locked(
+                    self.reconciliation_path,
+                    self.reconciliation_anchor_path,
+                    {
+                        "event": "reservation_cancelled",
+                        "entry_id": "cancel-" + uuid.uuid4().hex,
+                        "account": account,
+                        "run_id": self._run_id,
+                        "provider": provider,
+                        "reservation_entry_ids": [reservation["entry_id"]],
+                        "resets_at": window.resets_at,
+                        "actor": "evidence_broker",
+                    },
+                )
+
     def reconcile(self, provider: str, *, calls: int) -> None:
         if calls < 0:
             raise ValueError("entitlement_calls_invalid")

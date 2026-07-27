@@ -82,7 +82,7 @@ def extract_supported_artifact(
     if len(content) > MAX_ARTIFACT_BYTES:
         raise ArtifactExtractionError("artifact_too_large")
     normalized_name = validate_source_label(source_name)
-    normalized_type = _normalize_media_type(media_type)
+    normalized_type = normalize_media_type(media_type)
     if normalized_type not in _SUPPORTED_MEDIA_TYPES:
         raise ArtifactExtractionError("artifact_media_type_unsupported")
     if "." not in normalized_name:
@@ -198,7 +198,7 @@ def _extract_bounded_binary(
     )
 
 
-def _normalize_media_type(value: str) -> str:
+def normalize_media_type(value: str) -> str:
     pieces = [piece.strip().casefold() for piece in value.split(";")]
     if len(pieces) == 1:
         return pieces[0]

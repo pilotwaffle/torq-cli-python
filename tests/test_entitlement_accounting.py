@@ -10,11 +10,13 @@ import pytest
 from torq_cli.application.orchestrator import (
     GovernedOrchestrator,
     OrchestrationBlocked,
+    StageBudget,
 )
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
+from torq_cli.domain.registry_schema import BindingSpec
 from torq_cli.domain.config_schema import validate_config
 from torq_cli.safety.entitlements import InMemoryEntitlementLedger, PlanWindow
 from torq_cli.safety.pricing import RateTable
@@ -220,6 +222,43 @@ def test_shared_qwen_account_applies_one_window_to_deepseek_and_qwen() -> None:
     assert ledger.window("deepseek").account == "qwen-max"
     ledger.reconcile("deepseek", calls=1)
     assert ledger.window("qwen").used == 1
+
+
+def test_cancel_reservation_restores_in_memory_window() -> None:
+    ledger = _ledger()
+    ledger.reserve("deepseek", calls=2)
+    ledger.cancel("deepseek", calls=2)
+    assert ledger.window("deepseek").used == 0
+    with pytest.raises(ValueError, match="entitlement_reservation_missing"):
+        ledger.cancel("deepseek", calls=2)
+
+
+def test_dispatch_receipt_failure_cancels_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = _ledger()
+    chain = _chain(tmp_path, "dispatch-append-failure")
+    chain.append("run_attested", {"mode": "live"})
+    chain.seal()
+    binding = BindingSpec("g1d", "deepseek", "deepseek-chat", "p", "1", "standard", "chat")
+    orchestrator = GovernedOrchestrator(entitlement_ledger=ledger)
+
+    def fail_append(*_args: object, **_kwargs: object) -> None:
+        raise OSError("append_failed")
+
+    monkeypatch.setattr(chain, "append", fail_append)
+    with pytest.raises(OSError, match="append_failed"):
+        orchestrator._start_dispatch(
+            role="g1d",
+            goal="goal",
+            context={},
+            binding=binding,
+            budget=StageBudget("plan_covered", 0.0, ledger.window("deepseek"), 2),
+            attempt_evidence={"attempt_id": "a"},
+            attempt_created_sequence=1,
+            chain=chain,
+        )
+    assert ledger.window("deepseek").used == 0
 
 
 def test_pricing_uses_split_tokens_and_prices_reasoning_as_output() -> None:

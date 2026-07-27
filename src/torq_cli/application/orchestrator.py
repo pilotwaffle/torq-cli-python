@@ -15,6 +15,7 @@ from torq_cli.connectors import Connector
 from torq_cli.application.artifact_extraction import (
     ArtifactExtractionError,
     extract_supported_artifact,
+    normalize_media_type,
     validate_source_label,
 )
 from torq_cli.core.engine import NormalizedResponse
@@ -164,7 +165,7 @@ class GovernedOrchestrator:
             return existing
         target = target_role or "lead"
         encoded = b""
-        safe_media_type = media_type if is_bounded_media_type(media_type) else None
+        safe_media_type: str | None = None
         safe_source_name: str | None = None
         try:
             encoded = content.encode("utf-8", errors="strict")
@@ -181,6 +182,13 @@ class GovernedOrchestrator:
                 scanned_name, name_findings = self.registry.scan(safe_source_name)
                 if scanned_name != safe_source_name or name_findings:
                     raise OrchestrationBlocked("context_source_name_sensitive")
+            normalized_media_type = normalize_media_type(media_type)
+            safe_media_type = (
+                normalized_media_type
+                if is_bounded_media_type(normalized_media_type)
+                else None
+            )
+            media_type = normalized_media_type
             if safe_media_type is None or not (
                 media_type.startswith("text/")
                 or media_type in {
@@ -281,9 +289,16 @@ class GovernedOrchestrator:
         if existing is not None:
             return existing
         target = target_role or "lead"
-        safe_media_type = media_type if is_bounded_media_type(media_type) else None
+        safe_media_type: str | None = None
         safe_source_name: str | None = None
         try:
+            normalized_media_type = normalize_media_type(media_type)
+            safe_media_type = (
+                normalized_media_type
+                if is_bounded_media_type(normalized_media_type)
+                else None
+            )
+            media_type = normalized_media_type
             if safe_media_type is None:
                 raise ArtifactExtractionError("artifact_media_type_unsupported")
             if target != "lead" and target not in self._PLANNED_ROLES:
@@ -292,7 +307,7 @@ class GovernedOrchestrator:
                 raise OrchestrationBlocked("context_direct_confirmation_required")
             extracted = extract_supported_artifact(
                 content,
-                media_type=media_type,
+                media_type=normalized_media_type,
                 source_name=source_name,
             )
             safe_source_name = extracted.source_name
@@ -645,11 +660,11 @@ class GovernedOrchestrator:
                 attempt_created_sequence=int(created["sequence"]),
                 chain=chain,
             )
-        except Exception as exc:
+        except Exception as error:
             reason = (
-                str(exc)
-                if isinstance(exc, OrchestrationBlocked)
-                else f"unexpected_stage_failure:{role}:{type(exc).__name__}"
+                str(error)
+                if isinstance(error, OrchestrationBlocked)
+                else f"unexpected_stage_failure:{role}:{type(error).__name__}"
             )
             chain.append(
                 "stage_failed",
@@ -661,9 +676,9 @@ class GovernedOrchestrator:
                     "provider_dispatch": False,
                 },
             )
-            if isinstance(exc, OrchestrationBlocked):
+            if isinstance(error, OrchestrationBlocked):
                 raise
-            raise OrchestrationBlocked(reason) from exc
+            raise OrchestrationBlocked(reason) from error
         assert self.dispatcher is not None
         dispatched.append(role)
         try:
@@ -881,23 +896,36 @@ class GovernedOrchestrator:
                 )
             except ValueError as exc:
                 raise OrchestrationBlocked(f"plan_window_exceeded:{role}") from exc
-        chain.append(
-            "stage_dispatch_started",
-            {
-                **attempt_evidence,
-                "provider": binding.provider_id,
-                "model": binding.model_id,
-                "prompt_id": binding.prompt_id,
-                "redactions": findings,
-                "context_ids": tuple(item["context_id"] for item in injected),
-                "command_ids": tuple(item["command_id"] for item in injected),
-                "settlement": budget.settlement,
-                "entitlement": (
-                    budget.window.as_receipt() if budget.window is not None else None
-                ),
-                "provider_dispatch": True,
-            },
-        )
+        try:
+            chain.append(
+                "stage_dispatch_started",
+                {
+                    **attempt_evidence,
+                    "provider": binding.provider_id,
+                    "model": binding.model_id,
+                    "prompt_id": binding.prompt_id,
+                    "redactions": findings,
+                    "context_ids": tuple(item["context_id"] for item in injected),
+                    "command_ids": tuple(item["command_id"] for item in injected),
+                    "settlement": budget.settlement,
+                    "entitlement": (
+                        budget.window.as_receipt() if budget.window is not None else None
+                    ),
+                    "provider_dispatch": True,
+                },
+            )
+        except Exception:
+            if self.entitlement_ledger is not None and budget.settlement == "plan_covered":
+                try:
+                    self.entitlement_ledger.cancel(
+                        binding.provider_id,
+                        calls=budget.projected_calls,
+                    )
+                except Exception as rollback_exc:
+                    raise OrchestrationBlocked(
+                        "entitlement_reservation_rollback_failed"
+                    ) from rollback_exc
+            raise
         return clean_prompt
 
     def _consume_context(

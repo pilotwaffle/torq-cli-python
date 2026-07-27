@@ -180,6 +180,22 @@ def test_registry_enrollment_is_signed_append_only_and_rollback_detected(
         ledger.verify_registry()
 
 
+def test_cancel_reservation_removes_pending_capacity_without_usage(tmp_path: Path) -> None:
+    root = tmp_path / "evidence"
+    _sealed_run(root, "run-cancel")
+    ledger = _ledger(root)
+    ledger.bind_run("run-cancel")
+    ledger.reserve("deepseek", calls=3)
+
+    ledger.cancel("deepseek", calls=3)
+
+    snapshot = ledger.accounting_snapshot()["accounts"]["qwen-token-plan"]
+    assert snapshot["used"] == 0
+    assert snapshot["reserved"] == 0
+    history = ledger._read_lines(ledger.reconciliation_path)
+    assert history[-1]["event"] == "reservation_cancelled"
+
+
 def test_reserve_capacity_check_and_append_are_atomic_across_threads(
     tmp_path: Path,
 ) -> None:

@@ -83,6 +83,13 @@ def test_binary_context_rejects_extension_only_spoofs(
         )
 
 
+@pytest.mark.parametrize('media_type', ['text/plain; charset=utf-8', 'text/markdown; charset=utf-8'])
+def test_text_media_type_parameters_are_normalized(media_type: str) -> None:
+    source_name = 'note.txt' if media_type.startswith('text/plain') else 'note.md'
+    result = extract_supported_artifact(b'hello', media_type=media_type, source_name=source_name)
+    assert result.media_type == media_type.split(';', 1)[0]
+
+
 def _jpeg(size: int) -> bytes:
     assert size >= 5
     return b"\xff\xd8\xff" + (b"x" * (size - 5)) + b"\xff\xd9"

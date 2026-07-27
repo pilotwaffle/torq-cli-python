@@ -445,6 +445,15 @@ def test_oversized_media_types_are_durably_rejected_before_artifact(
     assert not (chain.root / "artifacts").exists()
 
 
+@pytest.mark.parametrize('media_type', ['text/plain; charset=utf-8', 'text/markdown; charset=utf-8'])
+def test_parameterized_media_types_are_normalized_in_receipts(tmp_path: Path, media_type: str) -> None:
+    chain = _chain(tmp_path, 'run-normalized-media')
+    accepted = GovernedOrchestrator().inject_context(chain, 'content', media_type=media_type)
+    assert accepted['media_type'] == media_type.split(';', 1)[0]
+    receipt = json.loads(chain.receipts_path.read_text(encoding='utf-8').splitlines()[-1])
+    assert receipt['payload']['media_type'] == accepted['media_type']
+
+
 def test_prompt_redaction_failure_closes_as_failed_without_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
