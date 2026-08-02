@@ -10,9 +10,10 @@ disagree, the code is authoritative and this document should be updated.
 ## Scope
 
 TORQ CLI is a governed agent runner: it validates role profiles, resolves
-provider credentials through a fail-closed backend, executes model-driven work
-in an isolated process sandbox, records cryptographically signed evidence, and
-exposes a Fleet control surface for a local attended operator.
+provider credentials through a fail-closed backend, runs provider processes
+under OS-enforced process containment (Windows Job Objects in production),
+records cryptographically signed evidence, and exposes a Fleet control surface
+for a local attended operator.
 
 **In scope of this model:** credential handling, process containment, evidence
 integrity, the Fleet HTTP surface, and the indirect-prompt-injection surface
@@ -108,10 +109,21 @@ authorized it. Auditors and compliance frameworks require the latter.
 
 `production_trust.py` defines a `ReceiptAnchor` protocol and an
 `evaluate_production_trust` path that *would* accept a remote transparency log
-or trusted timestamp — but no implementation exists. The anchor is a signed
-head on the same volume as the receipts. This is the single largest
-architecture-vs-positioning gap: the product markets "evidence-backed," but the
-evidence is not tamper-evident against a privileged insider.
+(a signed append-only log with Merkle inclusion proofs and signed checkpoints —
+a Rekor-style transparency log). A trusted timestamping service (RFC 3161 TSA)
+is **not** sufficient: the anchor contract (`production_trust.py:311-318`)
+requires `scope == "remote_transparency"`, `append_only`,
+`independently_operated`, `inclusion_proof_supported`, **and**
+`checkpoint_supported`; a TSA token satisfies none of these. No implementation
+of any compliant anchor exists. The anchor is a signed head on the same volume
+as the receipts. This is the single largest architecture-vs-positioning gap:
+the product markets "evidence-backed," but the evidence is not tamper-evident
+against a privileged insider.
+
+Note: `torq trust readiness` reports `ready` only when **three** independent
+adapters are integrated — a non-exportable signer, this remote-transparency
+anchor, **and** an independent verifier (`production_trust.py:259-353`). No
+subset suffices; the anchor alone does not flip readiness.
 
 **Impact:** a privileged operator (or host compromise) can rewrite the
 uncovered tail of a run's ledger and re-sign the head undetectably.
@@ -152,10 +164,14 @@ Ordered by leverage on the enterprise positioning:
 1. **Operator identity + RBAC** — bind a named actor to every Fleet mutation
    and record it in the receipt chain. Closes the identity and repudiation
    gaps simultaneously.
-2. **Remote receipt anchor** — implement `ReceiptAnchor` against a signed
-   append-only log or trusted timestamping service. Converts the ledger from
-   tamper-resistant to insider-tamper-evident and flips
-   `torq trust readiness` from `blocked` to `ready`.
+2. **Production trust — all THREE adapters** — implement the remote
+   `ReceiptAnchor` against a signed append-only transparency log (Rekor-style),
+   **not** a trusted timestamping service (a TSA token satisfies none of the
+   anchor-contract fields), AND integrate a non-exportable platform signer AND
+   an independent verifier. All three are required to flip
+   `torq trust readiness` from `blocked` to `ready` (`production_trust.py:259-353`);
+   no subset suffices. This is what converts the ledger from tamper-resistant
+   to insider-tamper-evident.
 3. **Structural prompt-injection isolation** — adopt a documented delimiter
    contract and an explicit "untrusted data" marker the G2A stage must honor;
    track residual risk in this document.
@@ -173,6 +189,6 @@ isolation), `tests/test_windows_job.py` and `tests/test_owned_process_spike.py`
 (process ownership), `tests/test_receipt_authority.py` and
 `tests/test_receipt_prose_bounds.py` (receipt integrity), and
 `tests/test_hermetic.py` + `tests/conftest.py` (hermeticity). Mutation testing
-(`scripts/run_named_mutants.py`, 28 named mutants) defeats "tests pass but the
+(`scripts/run_named_mutants.py`, 30 named mutants, M01–M30) defeats "tests pass but the
 security check is bypassed." The residual risks above are the ones these tests
 do *not* yet cover.

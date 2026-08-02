@@ -7,7 +7,9 @@ from the sanitizer M15 covers), lane state projection, monetary accounting, and
 Windows binary-write fidelity. M24-M28 cover the verifier-side prose bounds that
 keep operator content out of receipt bodies: the per-key command value schema,
 the bounded MIME token, the bounded action-receipt labels, the run_decision key
-allowlist, and the shared extra-key refusal.
+allowlist, and the shared extra-key refusal. M29 covers the oversize floor
+applied to every receipt transition, and M30 covers the orchestrator
+run-planned -> observed transition rule.
 """
 
 from __future__ import annotations
