@@ -29,7 +29,6 @@ from torq_cli.safety.receipts import (
     signing_file_permissions_are_restricted,
 )
 
-
 _REFERENCE: Final = re.compile(r"credref_[0-9a-f]{32}\Z")
 _PROVIDERS: Final = frozenset({"anthropic", "openai", "qwen", "moonshot", "zai", "deepseek"})
 _ALIASES: Final = {

@@ -1,10 +1,10 @@
-from dataclasses import replace
 import hashlib
-from importlib import resources
 import json
-import yaml
+from dataclasses import replace
+from importlib import resources
 
 import pytest
+import yaml
 
 from torq_cli.domain.registry_schema import (
     EXPECTED_TRANSITIONS,

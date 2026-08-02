@@ -48,14 +48,18 @@ jobs:
           path: ${{ runner.temp }}/linux-owned-process/
           if-no-files-found: error
 
-  quality-windows-py311:
+  quality-windows:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with: {python-version: "3.11"}
+        with: {python-version: "${{ matrix.python-version }}"}
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check src tests
       - run: python -m mypy src
@@ -64,14 +68,18 @@ jobs:
       - run: python -m build
       - run: python scripts/wheel_smoke.py dist
 
-  quality-macos-py311:
+  quality-macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with: {python-version: "3.11"}
+        with: {python-version: "${{ matrix.python-version }}"}
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check src tests
       - run: python -m mypy src
@@ -80,14 +88,18 @@ jobs:
       - run: python -m build
       - run: python scripts/wheel_smoke.py dist
 
-  quality-linux-py311:
+  quality-linux:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with: {python-version: "3.11"}
+        with: {python-version: "${{ matrix.python-version }}"}
       - run: python -m pip install -e ".[dev]"
       - run: python -m ruff check src tests
       - run: python -m mypy src

@@ -11,24 +11,23 @@ import json
 import queue
 import re
 import secrets
-import socket
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import UTC, datetime
 from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
-from threading import BoundedSemaphore, RLock
 from pathlib import Path
-from typing import Any, Callable, Protocol, cast
+from threading import BoundedSemaphore, RLock
+from typing import Any, Protocol, cast
+from collections.abc import Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.fleet_controls import FleetControlService
 from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.core.redaction import RedactionBlocked
-
 
 _FLEET_ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -231,7 +230,7 @@ class FleetSessionManager:
             return (
                 datetime.fromtimestamp(
                     self._wall_clock() + remaining,
-                    timezone.utc,
+                    UTC,
                 )
                 .isoformat()
                 .replace("+00:00", "Z")
@@ -529,7 +528,7 @@ def create_fleet_server(
                     if event_id != last_id:
                         frame = (
                             f"id: {event_id}\nevent: fleet\ndata: {encoded.decode('utf-8')}\n\n"
-                        ).encode("utf-8")
+                        ).encode()
                         self.wfile.write(frame)
                         self.wfile.flush()
                         last_id = event_id
@@ -540,7 +539,7 @@ def create_fleet_server(
                     }:
                         break
                     time.sleep(3)
-            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            except (TimeoutError, BrokenPipeError, ConnectionResetError):
                 pass
             finally:
                 sse_slots.release()
@@ -607,7 +606,7 @@ def create_fleet_server(
                     if encoded != last_snapshot:
                         self._sse_json({"type": "snapshot", "snapshot": snapshot})
                         last_snapshot = encoded
-            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            except (TimeoutError, BrokenPipeError, ConnectionResetError):
                 pass
             finally:
                 chat_controller.unsubscribe(channel)
@@ -620,7 +619,7 @@ def create_fleet_server(
                 separators=(",", ":"),
                 allow_nan=False,
             )
-            self.wfile.write(f"data: {encoded}\n\n".encode("utf-8"))
+            self.wfile.write(f"data: {encoded}\n\n".encode())
             self.wfile.flush()
 
         def do_POST(self) -> None:  # noqa: N802

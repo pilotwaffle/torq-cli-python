@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +18,6 @@ from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.safety.chat_evidence import ChatEvidenceJournal, verify_chat_evidence
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain
-
 
 _PROVIDER = Path("tests/fixtures/fake_owned_provider.py").resolve()
 _STRONG_OWNER_TESTABLE = os.name == "nt" or (

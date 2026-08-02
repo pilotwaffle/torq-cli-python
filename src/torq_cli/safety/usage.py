@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-
 _TOKEN_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens", "tokens")
 
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tomllib
+from pathlib import Path
 
 from torq_cli import __version__
 from torq_cli.application.e2e import run_governed_fixture

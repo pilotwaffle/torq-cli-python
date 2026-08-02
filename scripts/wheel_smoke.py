@@ -8,7 +8,6 @@ import tempfile
 import venv
 from pathlib import Path
 
-
 VALID_CONFIG = """config_version: 1
 profile:
   id: torq-v5-6-live

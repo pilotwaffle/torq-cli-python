@@ -11,7 +11,6 @@ from typing import Protocol, cast
 
 from torq_cli.domain.credential_backend import BackendUnavailable, select_credential_backend
 
-
 _CREDENTIAL_REF = re.compile(r"credref_[0-9a-f]{32}\Z")
 _PROVIDER_ALIASES = {
     "claude": "anthropic",

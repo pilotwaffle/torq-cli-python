@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-
 _SETTLEMENTS = frozenset({"plan_covered", "metered", "unknown"})
 _USED_SOURCES = frozenset({"receipt_derived", "provider_reported"})
 _LIMIT_SOURCES = frozenset({"operator_declared", "provider_reported"})

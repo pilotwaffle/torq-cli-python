@@ -26,10 +26,13 @@ def test_console_import_fixture_is_declared_for_source_distribution() -> None:
 def test_ci_declares_required_quality_and_headless_jobs() -> None:
     workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text()
 
+    # The quality jobs use a Python-version matrix (3.11/3.12/3.13), so they are
+    # named quality-{os} rather than quality-{os}-py311. The headless job stays
+    # single-version and keeps its py311 suffix.
     for job in (
-        "quality-windows-py311",
-        "quality-macos-py311",
-        "quality-linux-py311",
+        "quality-windows",
+        "quality-macos",
+        "quality-linux",
         "headless-linux-py311",
     ):
         assert job in workflow

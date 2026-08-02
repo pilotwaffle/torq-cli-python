@@ -22,7 +22,6 @@ from torq_cli.connectors.credential_sources import (
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.domain.stage_response import stage_response_matches, stage_response_schema
 
-
 _PROVIDER_NAMES = {
     "anthropic": "claude",
     "deepseek": "deepseek",

@@ -5,16 +5,26 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Mapping, NoReturn
+from typing import Any, NoReturn
+from collections.abc import Mapping
 
 import yaml
-from yaml.events import AliasEvent, DocumentStartEvent, DocumentEndEvent, MappingEndEvent, MappingStartEvent, ScalarEvent, SequenceEndEvent, SequenceStartEvent, StreamEndEvent, StreamStartEvent
+from yaml.events import (
+    AliasEvent,
+    DocumentEndEvent,
+    DocumentStartEvent,
+    MappingEndEvent,
+    MappingStartEvent,
+    ScalarEvent,
+    SequenceEndEvent,
+    SequenceStartEvent,
+    StreamEndEvent,
+    StreamStartEvent,
+)
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
-from .findings import Finding
-from .findings import FindingCatalog
+from .findings import Finding, FindingCatalog
 from .registry_schema import Registry
-
 
 _CRED_REF = re.compile(r"credref_[0-9a-f]{32}")
 _CONNECTOR_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")

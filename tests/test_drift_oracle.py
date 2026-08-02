@@ -6,7 +6,6 @@ from dataclasses import replace
 from torq_cli.domain import drift_oracle
 from torq_cli.domain.drift_oracle import load_packaged_oracle, validate_oracle
 
-
 EXPECTED_MANIFEST = (
     "schema: torq-oracle-manifest-v1\n"
     "source_commit: 3ae196102a84aed24f7daa9dc3fed037522e1f20\n"

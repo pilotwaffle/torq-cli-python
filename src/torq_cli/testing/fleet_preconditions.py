@@ -18,7 +18,6 @@ from torq_cli.domain.run_plan import (
     revision_body,
 )
 
-
 _HASH = "sha256:" + "0" * 64
 
 

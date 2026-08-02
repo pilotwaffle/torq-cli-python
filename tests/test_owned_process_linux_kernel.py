@@ -18,7 +18,6 @@ import pytest
 
 from torq_cli.adapters.process import ExperimentalLinuxOwnedProcess
 
-
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux")
     or os.environ.get("TORQ_TEST_LINUX_SYSTEMD_CGROUP") != "1",

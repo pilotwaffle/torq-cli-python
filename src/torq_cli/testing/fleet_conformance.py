@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-from copy import deepcopy
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -19,16 +19,15 @@ from torq_cli.domain.evidence_transitions import (
     TRANSITION_RULES,
     transition_authority_finding,
 )
-from torq_cli.testing.fleet_preconditions import (
-    negative_precondition_case,
-    positive_precondition_case,
-)
 from torq_cli.safety.receipts import (
     MemoryRunKeyStore,
     ReceiptChain,
     verify_receipt_store,
 )
-
+from torq_cli.testing.fleet_preconditions import (
+    negative_precondition_case,
+    positive_precondition_case,
+)
 
 _WRITERS = ("orchestrator", "supervisor", "operator_gateway", "recovery")
 _BASES = ("observed", "submitted", "derived")

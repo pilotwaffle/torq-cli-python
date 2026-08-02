@@ -14,6 +14,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import torq_cli.safety.evidence_broker as evidence_broker_module
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.fleet_controls import FleetControlService
 from torq_cli.application.orchestrator import GovernedOrchestrator
@@ -23,10 +24,9 @@ from torq_cli.domain.evidence_transitions import (
     transition_authority_finding,
 )
 from torq_cli.interfaces.fleet_http import FleetSessionManager, create_fleet_server
-import torq_cli.safety.evidence_broker as evidence_broker_module
 from torq_cli.safety.evidence_broker import (
-    BrokerEndpoint,
     BrokeredReceiptChain,
+    BrokerEndpoint,
     EvidenceBroker,
     EvidenceBrokerServer,
     RemoteEvidenceBroker,

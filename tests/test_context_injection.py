@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import http.client
 import base64
+import http.client
 import json
 import threading
 import urllib.error
@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from torq_cli.application.context import GovernedContextInjector
 from torq_cli.application.artifact_extraction import ArtifactExtractionError
+from torq_cli.application.context import GovernedContextInjector
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
 from torq_cli.core.engine import NormalizedResponse, Provenance

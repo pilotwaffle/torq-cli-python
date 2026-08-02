@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
+import secrets
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-import secrets
 from threading import RLock
-import time
 from typing import Any
-
 
 _ANNOTATION_PRIORITY = {
     "broker_unavailable": 0,

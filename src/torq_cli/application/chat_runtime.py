@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import queue
 import base64
 import binascii
 import hashlib
 import json
+import queue
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -16,7 +16,6 @@ from typing import Any, Protocol
 from torq_cli.adapters.owned_stream import ProcessEvent
 from torq_cli.adapters.process import ExitObservation, OwnedProcess
 from torq_cli.safety.pricing import load_default_rate_table
-
 
 TERMINAL_CHAT_EVENTS = frozenset(
     {"turn_completed", "turn_failed", "turn_cancelled", "turn_cancellation_uncertain"}

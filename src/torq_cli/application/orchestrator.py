@@ -11,29 +11,29 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from torq_cli.connectors import Connector
 from torq_cli.application.artifact_extraction import (
     ArtifactExtractionError,
     extract_supported_artifact,
     normalize_media_type,
     validate_source_label,
 )
+from torq_cli.connectors import Connector
 from torq_cli.core.engine import NormalizedResponse
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.core.policy import Defect, G2APolicy
 from torq_cli.core.redaction import PatternRegistry, RedactionBlocked
 from torq_cli.domain.registry_schema import BindingSpec, ProfileSpec
 from torq_cli.domain.run_evidence import CONDITIONAL_LANES, LANE_ORDER, is_bounded_media_type
-from torq_cli.domain.stage_response import (
-    STAGE_RESPONSE_CONTRACT_ID,
-    STAGE_RESPONSE_CONTRACT_VERSION,
-    stage_response_matches,
-)
 from torq_cli.domain.run_plan import (
     PLAN_CONTRACT,
     initial_plan_body,
     plan_hash,
     revision_body,
+)
+from torq_cli.domain.stage_response import (
+    STAGE_RESPONSE_CONTRACT_ID,
+    STAGE_RESPONSE_CONTRACT_VERSION,
+    stage_response_matches,
 )
 from torq_cli.safety.entitlements import EntitlementLedger, PlanWindow
 from torq_cli.safety.pricing import RateTable, load_default_rate_table

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 from torq_cli.domain.drift_oracle import load_v5_config_reference
 from torq_cli.domain.findings import Finding, FindingCatalog
@@ -30,7 +31,6 @@ from torq_cli.domain.v5_config_import import (
     validate_projection,
 )
 from torq_cli.domain.v5_console_import import parse_console_config
-
 
 COMMAND = "config_import_v5_console"
 TARGET_SHA256 = "63ffadbe88e6b04ac732d5a282e27e0af1a2bbd80f89412ad1a4364e01a3650e"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -16,7 +16,6 @@ from torq_cli.domain.registry_schema import load_registry
 from torq_cli.domain.run_evidence import validate_v2_receipt_contract
 from torq_cli.domain.run_plan import initial_plan_body, plan_hash
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
-
 
 _CEILINGS = {
     "g1d": 0.1,

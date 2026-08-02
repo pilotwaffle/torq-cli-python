@@ -1,6 +1,7 @@
 import pytest
 import yaml
 
+from torq_cli.application.resolve import resolve_text
 from torq_cli.domain.config_schema import (
     ConfigSyntaxError,
     parse_config_bytes,
@@ -9,7 +10,6 @@ from torq_cli.domain.config_schema import (
     validate_config_shape,
 )
 from torq_cli.domain.registry_schema import load_registry
-from torq_cli.application.resolve import resolve_text
 
 
 def valid_config() -> dict:

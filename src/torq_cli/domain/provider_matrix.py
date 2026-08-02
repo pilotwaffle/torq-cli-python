@@ -5,10 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import date
 from importlib import resources
-from typing import Any, Mapping, cast
+from typing import Any, cast
+from collections.abc import Mapping
 
 import yaml
-
 
 PROVIDERS = ("claude", "codex", "qwen", "kimi", "zai", "deepseek")
 REQUIRED_SURFACES = (

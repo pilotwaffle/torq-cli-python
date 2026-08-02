@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from test_phase5_cli_experience import _answers
+
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.connectors import headless_credentials as vault_module
 from torq_cli.connectors.headless_credentials import (
@@ -23,7 +23,6 @@ from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces import cli as cli_module
 from torq_cli.interfaces.cli import main
 from torq_cli.safety.receipts import signing_file_permissions_are_restricted
-
 
 REF = "credref_0123456789abcdef0123456789abcdef"
 OTHER_REF = "credref_11111111111111111111111111111111"

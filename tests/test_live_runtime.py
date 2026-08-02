@@ -11,9 +11,7 @@ from torq_cli.application.live_runtime import LiveRuntime, build_live_runtime
 from torq_cli.application.run_command import RunController, RunIdentity
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.interfaces import cli
-from torq_cli.safety.receipts import verify_receipt_store
-from torq_cli.safety.receipts import restrict_receipt_trust_anchor
-
+from torq_cli.safety.receipts import restrict_receipt_trust_anchor, verify_receipt_store
 
 _BINDINGS = {
     "g1d": ("anthropic", "claude-fable-5", "agent_sdk"),

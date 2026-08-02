@@ -17,7 +17,12 @@ from torq_cli.core.engine import (
 )
 from torq_cli.core.graph import ExecutionEvidenceStore, ExecutionMode, GraphExecutor, compile_graph
 from torq_cli.core.policy import Defect, G2APolicy
-from torq_cli.core.redaction import PatternRegistry, RedactionBlocked, SafePersistence, SafeTransport
+from torq_cli.core.redaction import (
+    PatternRegistry,
+    RedactionBlocked,
+    SafePersistence,
+    SafeTransport,
+)
 
 
 def test_engine_normalizes_mmh_shape_with_complete_provenance() -> None:

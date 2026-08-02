@@ -6,12 +6,12 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from importlib import resources
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 import yaml
 
 from .models import deep_freeze
-
 
 POLICY_HASH = "fbeb3e1597a8dde9b4e5c1b5b049605bd3ed767c468a3f75b2e362c3e2f153ca"
 POLICY_ID = "g2a-routing-3.1.3"

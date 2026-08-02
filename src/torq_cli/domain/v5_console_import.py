@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import unicodedata
-from typing import Any, Mapping, NoReturn
+from typing import Any, NoReturn
+from collections.abc import Mapping
 
 import yaml
 from yaml.events import (
@@ -20,7 +21,6 @@ from yaml.events import (
     StreamStartEvent,
 )
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
-
 
 EXPECTED_ROLES = ("g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui")
 MAX_BYTES = 65_536

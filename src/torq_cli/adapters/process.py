@@ -14,9 +14,9 @@ from enum import Enum
 from io import BufferedReader
 from typing import Any
 
-from torq_cli.adapters.macos_containment import require_macos_strong_containment
 from torq_cli.adapters.linux_cgroup import LinuxSystemdCgroup
 from torq_cli.adapters.linux_containment import linux_containment_capability
+from torq_cli.adapters.macos_containment import require_macos_strong_containment
 from torq_cli.adapters.owned_stream import BoundedEventStream, ProcessChannel, ProcessEvent
 from torq_cli.adapters.windows_job import WindowsJob, cpython_process_handle
 

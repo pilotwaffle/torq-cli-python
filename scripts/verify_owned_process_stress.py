@@ -5,14 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 from torq_cli.adapters.process import OwnedProcess
-
 
 _PROVIDER = Path(__file__).parents[1] / "tests" / "fixtures" / "fake_owned_provider.py"
 

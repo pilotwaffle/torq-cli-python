@@ -21,7 +21,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from xml.etree import ElementTree
 
-
 _EXPECTED_TESTS = 8
 _SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 _TEST_TARGETS = (

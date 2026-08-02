@@ -7,40 +7,41 @@ import getpass
 import json
 import sys
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
+from collections.abc import Mapping, Sequence
 
 import yaml
 
 from torq_cli import __version__
+from torq_cli.adapters.chat_provider import ChatProviderCommandFactory, current_environment
+from torq_cli.adapters.linux_containment import linux_containment_capability
 from torq_cli.application import import_v5_config, import_v5_console
-from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.chat_projection import reduce_chat_projection
 from torq_cli.application.chat_runtime import ChatRuntimeCoordinator
-from torq_cli.application.run_command import RunController, RunIdentity
+from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.live_runtime import build_live_runtime
 from torq_cli.application.resolve import envelope_to_dict, resolve_path
+from torq_cli.application.run_command import RunController, RunIdentity
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.application.status_effective import effective_status
-from torq_cli.connectors.status import inspect_harness
 from torq_cli.connectors.credential_sources import CredentialSourceError, ExplicitEnvVault
+from torq_cli.connectors.headless_credentials import (
+    HeadlessCredentialError,
+    HeadlessEncryptedFileStore,
+)
 from torq_cli.connectors.native_credentials import (
     NativeCredentialError,
     NativeCredentialStore,
     native_store_for_current_platform,
 )
-from torq_cli.connectors.headless_credentials import (
-    HeadlessCredentialError,
-    HeadlessEncryptedFileStore,
-)
-from torq_cli.adapters.chat_provider import ChatProviderCommandFactory, current_environment
-from torq_cli.adapters.linux_containment import linux_containment_capability
+from torq_cli.connectors.status import inspect_harness
 from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
 from torq_cli.interfaces.fleet_http import create_fleet_server
 from torq_cli.safety.chat_evidence import ChatEvidenceJournal, verify_chat_evidence
-from torq_cli.safety.receipts import FileRunKeyStore, verify_receipt_store
 from torq_cli.safety.production_trust import evaluate_production_trust
+from torq_cli.safety.receipts import FileRunKeyStore, verify_receipt_store
 
 
 def exit_code_for(status: str, require_effective: bool, findings: Sequence[object]) -> int:

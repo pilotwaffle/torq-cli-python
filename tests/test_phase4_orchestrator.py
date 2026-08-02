@@ -26,7 +26,6 @@ from torq_cli.safety.receipts import (
     verify_receipt_store,
 )
 
-
 _COST_CEILINGS = {
     "g1d": 0.10,
     "g1r": 0.10,

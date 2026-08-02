@@ -1,8 +1,7 @@
-from pathlib import Path
 import socket
+from pathlib import Path
 
 import pytest
-
 from conftest import guarded_getaddrinfo, validate_network_mode
 
 from scripts.audit_extraction import REQUIRED_SUBSYSTEMS, audit_extraction

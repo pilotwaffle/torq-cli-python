@@ -15,8 +15,8 @@ from torq_cli.connectors import (
     MockSurface,
     all_connector_specs,
 )
-from torq_cli.connectors.status import auth_status, inspect_harness
 from torq_cli.connectors.smoke import LiveSmokeRunner
+from torq_cli.connectors.status import auth_status, inspect_harness
 
 
 def _payload(model: str, *, usage: object = "unreported") -> dict:

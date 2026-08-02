@@ -7,8 +7,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from torq_cli.application.fleet import FleetProjector
-from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain
 from torq_cli.interfaces.fleet_http import create_fleet_server
+from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain
 
 
 class _MarkupAudit(HTMLParser):

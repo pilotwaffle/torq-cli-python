@@ -9,7 +9,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import PurePath
 from typing import Any
 
-
 _VERIFIED_STATES = frozenset({"verified", "live_catching_up"})
 _MESSAGE_TRANSITIONS: Mapping[str, str | None] = {
     "user_message_committed": "user",

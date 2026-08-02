@@ -2,20 +2,20 @@ import ast
 import errno
 import inspect
 import os
-from pathlib import Path
 import stat
+from pathlib import Path
 
 import pytest
 
+from torq_cli.domain import drift_oracle
+from torq_cli.domain import hermetic as hermetic_module
 from torq_cli.domain.hermetic import (
     PROHIBITED_IMPORTS,
-    ProtectedPathError,
     LegacyConfigUnreadable,
+    ProtectedPathError,
     ReadOnlyConfigReader,
     assert_read_allowed,
 )
-from torq_cli.domain import hermetic as hermetic_module
-from torq_cli.domain import drift_oracle
 
 
 def test_protected_path_denied_before_read() -> None:

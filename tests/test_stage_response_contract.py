@@ -14,7 +14,6 @@ from torq_cli.domain.stage_response import (
     stage_response_schema,
 )
 
-
 _VALID_RESPONSES: tuple[tuple[str, Mapping[str, object]], ...] = (
     ("g1d", {"status": "design_complete", "proposal": "safe design"}),
     ("g1r", {"verdict": "approve", "rationale": "sound"}),

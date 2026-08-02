@@ -16,7 +16,6 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Literal, Protocol
 
-
 SignerIsolation = Literal["local_filesystem", "os_isolated", "hardware"]
 AnchorScope = Literal["local_same_volume", "remote_transparency"]
 
