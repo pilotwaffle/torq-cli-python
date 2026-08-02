@@ -1,11 +1,11 @@
 # Install TORQ CLI 0.2.0
 
-Python 3.11 or newer is required. The supported distribution is the signed
+Python 3.11 through 3.13 is required. The supported distribution is the signed
 wheel installed with `pipx` or `uv tool`; source checkout is not required.
 
 ## Windows
 
-1. Install Python 3.11+ and `pipx`.
+1. Install Python 3.11-3.13 and `pipx`.
 2. Run `pipx install torq_cli-0.2.0-py3-none-any.whl`.
 3. Run `torq --version`.
 4. To reuse the Console team credentials temporarily, run
@@ -25,7 +25,7 @@ wheel installed with `pipx` or `uv tool`; source checkout is not required.
 
 ## macOS
 
-1. Install Python 3.11+ and `pipx` or `uv`.
+1. Install Python 3.11-3.13 and `pipx` or `uv`.
 2. Run `uv tool install torq_cli-0.2.0-py3-none-any.whl`.
 3. Run `torq --version`, then use `torq auth store` and `torq auth verify-access`
    with an opaque credential reference.
@@ -38,7 +38,7 @@ wheel installed with `pipx` or `uv tool`; source checkout is not required.
 
 ## Linux
 
-1. Install Python 3.11+ and `pipx` or `uv`.
+1. Install Python 3.11-3.13 and `pipx` or `uv`.
 2. Run `pipx install torq_cli-0.2.0-py3-none-any.whl`.
 3. Run `torq --version`, then use `torq auth store` and `torq auth verify-access`
    with an opaque credential reference.
