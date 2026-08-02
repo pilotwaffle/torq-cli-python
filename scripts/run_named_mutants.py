@@ -214,51 +214,34 @@ testpaths = tests
 addopts = -q -p no:cacheprovider
 """
 
-# A tiny sitecustomize shim written into each worktree. It runs at interpreter
-# startup (Python imports `sitecustomize` automatically from any sys.path dir)
-# and (a) forces the worktree's `src` to the front of sys.path and (b) aborts
-# fail-closed if a torq_cli module is ever imported from outside this worktree.
-# This catches leakage whether it comes from PYTHONPATH, an editable install
-# (.pth), pytest path manipulation, or anything else.
+# A sitecustomize shim written into each worktree at <worktree>/src/. Python
+# auto-imports `sitecustomize` at interpreter startup from any sys.path dir, and
+# the harness runs with PYTHONPATH=<worktree>/src, so this runs before pytest.
+# It forces the worktree's `src` to the front of sys.path and drops every OTHER
+# sys.path entry that holds a `torq_cli` package, so an editable install (.pth),
+# a stray PYTHONPATH, or pytest's own path manipulation cannot shadow the mutant
+# copy with the parent repo's unmutated `src`.
+#
+# A meta_path finder that called importlib.util.find_spec() was tried and
+# rejected: find_spec() re-enters the finder at sys.meta_path[0], recursing
+# infinitely during collection (RecursionError, pytest rc 4), which the harness
+# mistook for a kill. The sys.path filter below is sufficient AND non-recursive.
 _WORKTREE_SITECUSTOMIZE = '''\
-"""Mutant isolation guard — fail-closed if a tested module leaks outside the worktree."""
+"""Mutant isolation guard — keep the mutant worktree authoritative on sys.path."""
 import os
 import sys
 
-_WORKTREE_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
-_worktree = os.path.abspath(_WORKTREE_SRC)
-if _worktree not in sys.path:
-    sys.path.insert(0, _worktree)
+# __file__ is <worktree>/src/sitecustomize.py; the worktree src dir is its parent.
+_WORKTREE_SRC = os.path.dirname(os.path.abspath(__file__))
+if _WORKTREE_SRC not in sys.path:
+    sys.path.insert(0, _WORKTREE_SRC)
 
 # Drop any sys.path entry that holds a torq_cli package and is not our worktree,
 # so an editable install or stray PYTHONPATH cannot shadow the mutant copy.
 sys.path[:] = [
     p for p in sys.path
-    if not (os.path.isdir(os.path.join(p, "torq_cli")) and os.path.abspath(p) != _worktree)
+    if not (os.path.isdir(os.path.join(p, "torq_cli")) and os.path.abspath(p) != _WORKTREE_SRC)
 ]
-
-import importlib.abc
-import importlib.util
-
-class _OriginGuard(importlib.abc.MetaPathFinder):
-    """Reject imports of torq_cli that resolve outside the mutant worktree."""
-
-    def find_spec(self, name, path, target=None):
-        if not name.startswith("torq_cli"):
-            return None
-        spec = importlib.util.find_spec(name)
-        if spec is None or spec.origin is None:
-            return None
-        origin = os.path.abspath(spec.origin)
-        if not origin.startswith(_worktree + os.sep):
-            raise SystemExit(
-                "mutant_origin_leak: " + name + " resolved to " + origin
-                + ", expected under " + _worktree
-            )
-        return None  # let the default machinery finish the import
-
-# Insert the guard at the front so it observes every torq_cli import.
-sys.meta_path.insert(0, _OriginGuard())
 '''
 
 
