@@ -27,7 +27,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "cryptography>=44.0,<48",
+    "cryptography>=44.0,<50",
     "keyring>=25.7,<26",
     "PyNaCl>=1.5,<2",
     "PyYAML>=6.0,<7",
