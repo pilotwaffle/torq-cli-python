@@ -20,6 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MUTANT_ROOT = ROOT / "tmp" / "named-mutants"
 
@@ -197,13 +198,91 @@ def _apply(root: Path, mutation: Mutation) -> None:
     source_path.write_text(mutated, encoding="utf-8")
 
 
+# Per-worktree pytest configuration. The mutant worktrees live beneath
+# ROOT/tmp/named-mutants, which is *inside* the parent repository, so pytest's
+# upward config discovery would otherwise find the parent pyproject.toml. That
+# parent config declares `[tool.pytest.ini_options] pythonpath = ["src"]`,
+# pointing at the parent's *unmutated* src, and pytest would import the
+# unmutated module instead of the mutant copy — making every mutant appear to
+# "survive" against code that was never actually mutated. A dedicated config
+# file in the worktree, selected with `pytest -c`, pins rootdir to the worktree
+# and stops upward discovery from reaching the parent.
+_WORKTREE_PYTEST_INI = """\
+[pytest]
+pythonpath = src
+testpaths = tests
+addopts = -q -p no:cacheprovider
+"""
+
+# A tiny sitecustomize shim written into each worktree. It runs at interpreter
+# startup (Python imports `sitecustomize` automatically from any sys.path dir)
+# and (a) forces the worktree's `src` to the front of sys.path and (b) aborts
+# fail-closed if a torq_cli module is ever imported from outside this worktree.
+# This catches leakage whether it comes from PYTHONPATH, an editable install
+# (.pth), pytest path manipulation, or anything else.
+_WORKTREE_SITECUSTOMIZE = '''\
+"""Mutant isolation guard — fail-closed if a tested module leaks outside the worktree."""
+import os
+import sys
+
+_WORKTREE_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+_worktree = os.path.abspath(_WORKTREE_SRC)
+if _worktree not in sys.path:
+    sys.path.insert(0, _worktree)
+
+# Drop any sys.path entry that holds a torq_cli package and is not our worktree,
+# so an editable install or stray PYTHONPATH cannot shadow the mutant copy.
+sys.path[:] = [
+    p for p in sys.path
+    if not (os.path.isdir(os.path.join(p, "torq_cli")) and os.path.abspath(p) != _worktree)
+]
+
+import importlib.abc
+import importlib.util
+
+class _OriginGuard(importlib.abc.MetaPathFinder):
+    """Reject imports of torq_cli that resolve outside the mutant worktree."""
+
+    def find_spec(self, name, path, target=None):
+        if not name.startswith("torq_cli"):
+            return None
+        spec = importlib.util.find_spec(name)
+        if spec is None or spec.origin is None:
+            return None
+        origin = os.path.abspath(spec.origin)
+        if not origin.startswith(_worktree + os.sep):
+            raise SystemExit(
+                "mutant_origin_leak: " + name + " resolved to " + origin
+                + ", expected under " + _worktree
+            )
+        return None  # let the default machinery finish the import
+
+# Insert the guard at the front so it observes every torq_cli import.
+sys.meta_path.insert(0, _OriginGuard())
+'''
+
+
+def _materialize_worktree(worktree: Path) -> None:
+    """Write the isolation config and startup guard into a mutant worktree."""
+    (worktree / "pytest.ini").write_text(_WORKTREE_PYTEST_INI, encoding="utf-8")
+    # sitecustomize.py on the worktree src dir is auto-imported at startup once
+    # that dir is on sys.path. We write it under src so PYTHONPATH=src loads it.
+    (worktree / "src" / "sitecustomize.py").write_text(
+        _WORKTREE_SITECUSTOMIZE, encoding="utf-8"
+    )
+
+
 def _run(root: Path, mutation: Mutation) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    # The worktree's own pytest.ini (selected via -c) sets pythonpath=src; we
+    # also set PYTHONPATH for non-pytest resolution (e.g. the sitecustomize guard
+    # itself) and strip any inherited PYTEST_ADDOPTS so it cannot override -c.
     env["PYTHONPATH"] = str(root / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
+    env.pop("PYTEST_ADDOPTS", None)
+    config = str(root / "pytest.ini")
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", mutation.target],
+        [sys.executable, "-m", "pytest", "-c", config, "-q", mutation.target],
         cwd=root,
         env=env,
         capture_output=True,
@@ -229,6 +308,7 @@ def main() -> int:
                 )
                 shutil.copytree(ROOT / "src", worktree / "src", ignore=ignore)
                 shutil.copytree(ROOT / "tests", worktree / "tests", ignore=ignore)
+                _materialize_worktree(worktree)
                 _apply(worktree, mutation)
                 result = _run(worktree, mutation)
                 if result.returncode == 0:
