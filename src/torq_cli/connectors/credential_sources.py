@@ -9,16 +9,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
-from torq_cli.connectors.native_credentials import (
-    ConfiguredNativeVault,
-    native_store_for_current_platform,
-)
 from torq_cli.connectors.headless_credentials import (
     ConfiguredHeadlessVault,
     HeadlessEncryptedFileStore,
 )
+from torq_cli.connectors.native_credentials import (
+    ConfiguredNativeVault,
+    native_store_for_current_platform,
+)
 from torq_cli.safety.receipts import signing_file_permissions_are_restricted
-
 
 MAX_CREDENTIAL_SOURCE_BYTES = 65_536
 _KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")

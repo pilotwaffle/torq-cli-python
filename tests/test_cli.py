@@ -3,8 +3,8 @@ from importlib import resources
 
 import yaml
 
-from torq_cli.application import resolve as resolve_module
 from torq_cli.application import import_v5_config
+from torq_cli.application import resolve as resolve_module
 from torq_cli.domain import hermetic as hermetic_module
 from torq_cli.interfaces import cli as cli_module
 from torq_cli.interfaces.cli import main

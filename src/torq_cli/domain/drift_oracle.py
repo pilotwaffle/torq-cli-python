@@ -7,12 +7,12 @@ import json
 from dataclasses import dataclass
 from importlib import resources
 from importlib.resources.abc import Traversable
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 import yaml
 
 from .models import deep_freeze
-
 
 ORACLE_ROOT = ("data", "oracles", "torq-console-3ae19610")
 TRUSTED_MANIFEST_SHA256 = "f4255aadddfbe1d3de47d51145c2ea4e8e610dcc1284d017a9abd80d22f68e4b"

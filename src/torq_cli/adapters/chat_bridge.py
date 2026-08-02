@@ -10,7 +10,6 @@ import urllib.request
 from collections.abc import Mapping
 from typing import Any
 
-
 _ALLOWED_MEDIA = frozenset(
     {
         "application/json",

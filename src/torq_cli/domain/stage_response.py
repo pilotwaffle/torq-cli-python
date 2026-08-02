@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-
 STAGE_RESPONSE_CONTRACT_ID = "torq-stage-response"
 STAGE_RESPONSE_CONTRACT_VERSION = "1.0.0"
 STAGE_RESPONSE_STRING_LIMIT = 120

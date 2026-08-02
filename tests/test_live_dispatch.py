@@ -7,9 +7,9 @@ from typing import Any
 import pytest
 
 from torq_cli.adapters import live_provider as live_provider_module
-from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.adapters.owned_stream import ProcessEvent
 from torq_cli.adapters.process import ContainmentState, ExitObservation
+from torq_cli.application.orchestrator import OrchestrationBlocked
 from torq_cli.connectors.credential_sources import ExplicitEnvVault
 from torq_cli.connectors.live_dispatch import LiveStageDispatcher
 from torq_cli.domain import stage_response as stage_response_module

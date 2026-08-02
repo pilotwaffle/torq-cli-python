@@ -7,8 +7,8 @@ import time
 from pathlib import Path
 
 import pytest
-import torq_cli.safety.receipts as receipts_module
 
+import torq_cli.safety.receipts as receipts_module
 from torq_cli.safety.approval import ApprovalBoundary, ChangeProposal
 from torq_cli.safety.governed import EvidenceBundle, GovernedRun, RunState
 from torq_cli.safety.policy import ExecutionPolicy, ManagedProcess, PolicyHalt, ResourceCeilings

@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
 from torq_cli.core.engine import NormalizedResponse
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import load_registry
-from torq_cli.application.fleet import FleetProjector
 from torq_cli.safety.accounting_registry import (
     PersistentEntitlementLedger,
     RegistryRollbackError,
@@ -26,7 +26,6 @@ from torq_cli.safety.receipts import (
     ReceiptChain,
     restrict_receipt_trust_anchor,
 )
-
 
 _RESET = "2030-01-01T00:00:00Z"
 

@@ -11,17 +11,18 @@ import secrets
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
+from collections.abc import Callable
 
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from torq_cli.core.redaction import PatternRegistry
 from torq_cli.core.canonical_json import canonical_json
+from torq_cli.core.redaction import PatternRegistry
 from torq_cli.domain.evidence_transitions import (
     transition_authority_finding,
     transition_rule,
@@ -30,7 +31,6 @@ from torq_cli.domain.run_evidence import (
     validate_receipt_payload,
     validate_v2_receipt_contract,
 )
-
 
 _PRIVATE_KEY_NAME = ".torq-receipt-signing-key"
 _PUBLIC_KEY_NAME = ".torq-receipt-signing-key.pub"
@@ -1378,7 +1378,7 @@ class ReceiptChain:
                 "evidence_basis": evidence_basis,
                 "writer_key_id": _key_id(writer_public),
                 "payload": clean,
-                "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             }
             writer_signature = (
                 Ed25519PrivateKey.from_private_bytes(writer_private)

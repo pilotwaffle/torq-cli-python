@@ -1,0 +1,35 @@
+# Dependabot configuration. Honors the project's SHA-pinning discipline: GitHub
+# Actions are pinned to commit SHAs in the workflows, so updates surface here
+# as PRs that bump the SHA (reviewed before merge) rather than floating tags.
+version: 2
+updates:
+  # Runtime + dev Python dependencies. Pip ecosystem; pyproject.toml is the
+  # source of truth. Weekly cadence keeps security patches visible without
+  # daily noise.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  # GitHub Actions used in .github/workflows/. Keeps the SHA-pinned actions
+  # (checkout, setup-python, upload-artifact) current against upstream.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

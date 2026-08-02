@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from torq_cli.application.artifact_extraction import (
-    ArtifactExtractionError,
     MAX_ARTIFACT_BYTES,
+    ArtifactExtractionError,
     extract_supported_artifact,
 )
 from torq_cli.application.orchestrator import GovernedOrchestrator

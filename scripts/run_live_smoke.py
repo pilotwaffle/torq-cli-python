@@ -23,7 +23,6 @@ from torq_cli.connectors.credential_sources import (
 )
 from torq_cli.connectors.smoke import LiveSmokeRunner
 
-
 PROMPT = "Return exactly TORQ_SMOKE_OK and nothing else. Do not use tools."
 MODELS = {
     "claude": "claude-fable-5",

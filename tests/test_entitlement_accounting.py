@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from test_phase5_cli_experience import _answers
 
 from torq_cli.application.orchestrator import (
     GovernedOrchestrator,
@@ -15,9 +16,8 @@ from torq_cli.application.orchestrator import (
 from torq_cli.application.setup import SetupError, SetupService
 from torq_cli.core.engine import NormalizedResponse, Provenance
 from torq_cli.core.graph import ExecutionMode
-from torq_cli.domain.registry_schema import load_registry
-from torq_cli.domain.registry_schema import BindingSpec
 from torq_cli.domain.config_schema import validate_config
+from torq_cli.domain.registry_schema import BindingSpec, load_registry
 from torq_cli.safety.entitlements import InMemoryEntitlementLedger, PlanWindow
 from torq_cli.safety.pricing import RateTable
 from torq_cli.safety.receipts import (
@@ -26,7 +26,6 @@ from torq_cli.safety.receipts import (
     ReceiptChain,
     verify_receipt_store,
 )
-from test_phase5_cli_experience import _answers
 
 
 class _Dispatcher:

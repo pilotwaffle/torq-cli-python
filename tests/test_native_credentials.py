@@ -4,22 +4,20 @@ import json
 from pathlib import Path
 
 import pytest
+from test_phase5_cli_experience import _answers
 
 from torq_cli.application.setup import SetupError, SetupService
-from torq_cli.connectors import credential_sources
-from torq_cli.connectors import native_credentials
+from torq_cli.connectors import credential_sources, native_credentials
 from torq_cli.connectors.native_credentials import (
     ConfiguredNativeVault,
     NativeCredentialError,
     NativeCredentialStore,
 )
-from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.config_schema import parse_config_text, validate_config
+from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces import cli as cli_module
 from torq_cli.interfaces.cli import main
-from test_phase5_cli_experience import _answers
-
 
 _REF = "credref_0123456789abcdef0123456789abcdef"
 

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from torq_cli.core.conformance import assert_conformant, extracted_projection, mmh_reference_normalize
+from torq_cli.core.conformance import (
+    assert_conformant,
+    extracted_projection,
+    mmh_reference_normalize,
+)
 
 
 def _fixtures() -> list[dict]:

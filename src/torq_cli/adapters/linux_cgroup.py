@@ -18,7 +18,6 @@ import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-
 _BOOTSTRAP_LIMIT = 4_000_000
 _CONTROL_TIMEOUT = 2.0
 _TRUSTED_SYSTEM_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"

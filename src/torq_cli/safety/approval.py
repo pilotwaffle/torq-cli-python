@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from torq_cli.safety.workspace import GuardedPaths, tree_hash
@@ -46,7 +46,7 @@ class ApprovalBoundary:
             target.write_bytes(content)
         return {
             "approved_by": approved_by,
-            "approved_at": datetime.now(timezone.utc).isoformat(),
+            "approved_at": datetime.now(UTC).isoformat(),
             "pinned_tree_hash": proposal.pinned_tree_hash,
             "diff_hash": proposal.diff_hash,
         }

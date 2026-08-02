@@ -7,7 +7,7 @@ Sol G1R thread: `019f7345-ded0-7971-af5d-1b733b862af6` (`APPROVE`)
 
 ## Outcome
 
-Build a standalone Python 3.11+ CLI that validates immutable TORQ governance profiles and non-secret configuration offline. The Foundation Slice exposes:
+Build a standalone Python 3.11–3.13 CLI that validates immutable TORQ governance profiles and non-secret configuration offline. The Foundation Slice exposes:
 
 ```text
 torq profile validate --config PATH

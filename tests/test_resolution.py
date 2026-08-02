@@ -1,17 +1,17 @@
 import json
-import pytest
-import yaml
 from copy import deepcopy
 from dataclasses import replace
 
+import pytest
+import yaml
+
 from torq_cli.application import resolve as resolve_module
-from torq_cli.application.resolve import resolve_text
-from torq_cli.application.resolve import envelope_to_dict
-from torq_cli.interfaces.cli import exit_code_for
-from torq_cli.domain import drift_oracle
+from torq_cli.application.resolve import envelope_to_dict, resolve_text
 from torq_cli.domain import config_schema as config_schema_module
+from torq_cli.domain import drift_oracle
 from torq_cli.domain.findings import FindingCatalog
 from torq_cli.domain.hermetic import ProtectedPathError
+from torq_cli.interfaces.cli import exit_code_for
 
 
 def valid_config() -> dict:

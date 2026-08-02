@@ -6,7 +6,6 @@ from pathlib import Path
 
 from torq_cli.interfaces.cli import main
 
-
 REFERENCE = Path("src/torq_cli/data/oracles/torq-console-3ae19610/v5_config.normalized.json")
 TARGET_SHA256 = "63ffadbe88e6b04ac732d5a282e27e0af1a2bbd80f89412ad1a4364e01a3650e"
 

@@ -50,7 +50,7 @@ candidate.
 
 ## External prerequisites
 
-- Python 3.11+ and an installed wheel through pipx or `uv tool`.
+- Python 3.11–3.13 and an installed wheel through pipx or `uv tool`.
 - Provider subscriptions/credentials and entitled model grants are owned by
   the operator; the package contains none.
 - Provider command-line transports must be installed where a selected adapter

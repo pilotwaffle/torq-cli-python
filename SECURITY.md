@@ -32,14 +32,33 @@ chat providers currently require an explicit absolute external env file. Fleet
 chat does not resolve platform-keychain or headless-vault references. The
 browser receives neither credentials nor process handles.
 
-## Sandbox and approval
+## Process containment, workspace sandbox, and approval
 
-Builder and refinement work occurs in an isolated worktree or copy sandbox.
+Agent provider processes run under OS-enforced **process containment** — Windows
+Job Objects in production (the provider tree is owned and its termination is
+confirmed), an experimental Linux cgroup-v2 harness, and fail-closed refusal on
+macOS. This is *process* containment of the provider, not a workspace sandbox.
+
+**A workspace sandbox — an isolated worktree or copy that the builder writes
+files into — is not implemented in v0.2.0.** A previous version of this document
+asserted that "Builder and refinement work occurs in an isolated worktree or
+copy sandbox." That is not the case: in the governed run flow the builder
+returns a closed JSON response that is stored as an encrypted artifact, and no
+agent writes files to the primary tree during a run. Building that sandbox and
+wiring it into the governed flow is tracked work (`SPEC.md` §7, Step 1).
+
 Protected paths are denied for both reads and writes before content can enter a
 prompt. Network and commands are deny-by-default, child environments are
 filtered, resource ceilings halt fail-closed, and cancellation terminates the
-process tree. The primary worktree changes only after explicit approval of the
-audited diff against its pinned starting tree hash.
+process tree.
+
+A tree-pinned `ApprovalBoundary` (`src/torq_cli/safety/approval.py`) exists as a
+primitive: given an explicit approver and a `ChangeProposal` bound to a SHA-256
+of the starting tree, it writes files to the primary tree and refuses if the
+tree has moved or the audited diff hash has changed. In v0.2.0 this primitive is
+exercised only by `src/torq_cli/application/e2e.py`; it is not yet wired into the
+`g1d → g1r → builder → g2a` governed run, which does not itself produce a
+`ChangeProposal`.
 
 ## Redaction and evidence
 

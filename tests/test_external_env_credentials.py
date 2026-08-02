@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import pytest
+from test_phase5_cli_experience import _answers
 
 from torq_cli.adapters import process as process_module
 from torq_cli.adapters.process import ManagedProcess
@@ -19,7 +20,6 @@ from torq_cli.domain.config_schema import parse_config_text, validate_config
 from torq_cli.domain.registry_schema import load_registry
 from torq_cli.interfaces.cli import main
 from torq_cli.safety.receipts import restrict_receipt_trust_anchor
-from test_phase5_cli_experience import _answers
 
 
 def _credential_file(tmp_path: Path) -> Path:

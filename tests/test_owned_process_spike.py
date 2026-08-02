@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from torq_cli.adapters import process as process_module
 from torq_cli.adapters.process import OwnedProcess
 from torq_cli.adapters.windows_job import WindowsJob
-
 
 _FAKE_PROVIDER = Path(__file__).parent / "fixtures" / "fake_owned_provider.py"
 

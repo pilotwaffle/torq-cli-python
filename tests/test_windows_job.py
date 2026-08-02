@@ -10,7 +10,6 @@ import pytest
 
 from torq_cli.adapters.windows_job import WindowsJob, cpython_process_handle
 
-
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows Job Object tests")
 
 

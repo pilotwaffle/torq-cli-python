@@ -1,6 +1,6 @@
 # TORQ CLI
 
-TORQ CLI 0.2.0 is a standalone Python 3.11+ governed agent runner. It validates immutable role profiles, connects providers through fail-closed adapters, executes work in an isolated sandbox, records tamper-resistant evidence, and exposes an evidence-backed Fleet control and attended chat surface.
+TORQ CLI 0.2.0 is a standalone Python 3.11–3.13 governed agent runner. It validates immutable role profiles, connects providers through fail-closed adapters, runs provider processes under OS-enforced containment, records tamper-resistant evidence, and exposes an evidence-backed Fleet control and attended chat surface.
 
 ```text
 torq profile validate --config PATH

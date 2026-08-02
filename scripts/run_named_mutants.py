@@ -7,7 +7,9 @@ from the sanitizer M15 covers), lane state projection, monetary accounting, and
 Windows binary-write fidelity. M24-M28 cover the verifier-side prose bounds that
 keep operator content out of receipt bodies: the per-key command value schema,
 the bounded MIME token, the bounded action-receipt labels, the run_decision key
-allowlist, and the shared extra-key refusal.
+allowlist, and the shared extra-key refusal. M29 covers the oversize floor
+applied to every receipt transition, and M30 covers the orchestrator
+run-planned -> observed transition rule.
 """
 
 from __future__ import annotations
@@ -198,13 +200,74 @@ def _apply(root: Path, mutation: Mutation) -> None:
     source_path.write_text(mutated, encoding="utf-8")
 
 
+# Per-worktree pytest configuration. The mutant worktrees live beneath
+# ROOT/tmp/named-mutants, which is *inside* the parent repository, so pytest's
+# upward config discovery would otherwise find the parent pyproject.toml. That
+# parent config declares `[tool.pytest.ini_options] pythonpath = ["src"]`,
+# pointing at the parent's *unmutated* src, and pytest would import the
+# unmutated module instead of the mutant copy — making every mutant appear to
+# "survive" against code that was never actually mutated. A dedicated config
+# file in the worktree, selected with `pytest -c`, pins rootdir to the worktree
+# and stops upward discovery from reaching the parent.
+_WORKTREE_PYTEST_INI = """\
+[pytest]
+pythonpath = src
+testpaths = tests
+addopts = -q -p no:cacheprovider
+"""
+
+# A sitecustomize shim written into each worktree at <worktree>/src/. Python
+# auto-imports `sitecustomize` at interpreter startup from any sys.path dir, and
+# the harness runs with PYTHONPATH=<worktree>/src, so this runs before pytest.
+# It forces the worktree's `src` to the front of sys.path and drops every OTHER
+# sys.path entry that holds a `torq_cli` package, so an editable install (.pth),
+# a stray PYTHONPATH, or pytest's own path manipulation cannot shadow the mutant
+# copy with the parent repo's unmutated `src`.
+#
+# A meta_path finder that called importlib.util.find_spec() was tried and
+# rejected: find_spec() re-enters the finder at sys.meta_path[0], recursing
+# infinitely during collection (RecursionError, pytest rc 4), which the harness
+# mistook for a kill. The sys.path filter below is sufficient AND non-recursive.
+_WORKTREE_SITECUSTOMIZE = '''\
+"""Mutant isolation guard — keep the mutant worktree authoritative on sys.path."""
+import os
+import sys
+
+# __file__ is <worktree>/src/sitecustomize.py; the worktree src dir is its parent.
+_WORKTREE_SRC = os.path.dirname(os.path.abspath(__file__))
+if _WORKTREE_SRC not in sys.path:
+    sys.path.insert(0, _WORKTREE_SRC)
+
+# Drop any sys.path entry that holds a torq_cli package and is not our worktree,
+# so an editable install or stray PYTHONPATH cannot shadow the mutant copy.
+sys.path[:] = [
+    p for p in sys.path
+    if not (os.path.isdir(os.path.join(p, "torq_cli")) and os.path.abspath(p) != _WORKTREE_SRC)
+]
+'''
+
+
+def _materialize_worktree(worktree: Path) -> None:
+    """Write the isolation config and startup guard into a mutant worktree."""
+    (worktree / "pytest.ini").write_text(_WORKTREE_PYTEST_INI, encoding="utf-8")
+    # sitecustomize.py on the worktree src dir is auto-imported at startup once
+    # that dir is on sys.path. We write it under src so PYTHONPATH=src loads it.
+    (worktree / "src" / "sitecustomize.py").write_text(
+        _WORKTREE_SITECUSTOMIZE, encoding="utf-8"
+    )
+
+
 def _run(root: Path, mutation: Mutation) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    # The worktree's own pytest.ini (selected via -c) sets pythonpath=src; we
+    # also set PYTHONPATH for non-pytest resolution (e.g. the sitecustomize guard
+    # itself) and strip any inherited PYTEST_ADDOPTS so it cannot override -c.
     env["PYTHONPATH"] = str(root / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
+    env.pop("PYTEST_ADDOPTS", None)
+    config = str(root / "pytest.ini")
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", mutation.target],
+        [sys.executable, "-m", "pytest", "-c", config, "-q", mutation.target],
         cwd=root,
         env=env,
         capture_output=True,
@@ -230,6 +293,7 @@ def main() -> int:
                 )
                 shutil.copytree(ROOT / "src", worktree / "src", ignore=ignore)
                 shutil.copytree(ROOT / "tests", worktree / "tests", ignore=ignore)
+                _materialize_worktree(worktree)
                 _apply(worktree, mutation)
                 result = _run(worktree, mutation)
                 if result.returncode == 0:

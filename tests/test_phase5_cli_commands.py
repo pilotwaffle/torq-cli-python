@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 
+from test_phase5_cli_experience import _answers
+
 from torq_cli.interfaces.cli import main
 from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_receipt_store
-
-from test_phase5_cli_experience import _answers
 
 
 def test_setup_and_effective_status_commands(tmp_path, capsys) -> None:

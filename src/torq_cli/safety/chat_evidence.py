@@ -8,8 +8,8 @@ import os
 import re
 import stat
 import threading
-from contextlib import contextmanager
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 

@@ -21,7 +21,6 @@ from torq_cli.safety.receipts import (
     verify_receipt_store,
 )
 
-
 _PROSE = "LEAK: merger terms do not disclose " * 3000  # ~100 KB
 #: Over every bound in the contract, but short enough that pytest can put it in
 #: a parametrization id without overflowing the Windows environment-block limit.

@@ -5,12 +5,13 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
-from pathlib import Path, PurePosixPath
 import stat
 import sys
-from dataclasses import dataclass
-from typing import Callable, NoReturn, cast
 import unicodedata
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import NoReturn, cast
+from collections.abc import Callable
 
 PROHIBITED_IMPORTS = frozenset({
     "os", "subprocess", "socket", "urllib", "http", "requests", "httpx", "asyncio",

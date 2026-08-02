@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from typing import Any, Mapping, cast
+from typing import Any, cast
+from collections.abc import Mapping
 
 from .config_schema import resolve_profile, validate_config_shape, validate_eligibility
 from .registry_schema import Registry
-
 
 EXPECTED_ROLES = ("g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui")
 EXPECTED_AGENT_KEYS = {"role_id", "cli", "endpoint", "model", "prompt"}

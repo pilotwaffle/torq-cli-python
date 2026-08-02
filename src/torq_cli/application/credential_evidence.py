@@ -6,7 +6,6 @@ import secrets
 from collections.abc import Callable
 from typing import Any, Protocol
 
-
 _EVIDENCE_PLATFORM_NAMES = {
     "Windows": "Windows",
     "macOS": "Darwin",

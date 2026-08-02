@@ -13,7 +13,6 @@ from torq_cli.safety.receipts import FileRunKeyStore, ReceiptChain, verify_recei
 from torq_cli.safety.usage import summarize_usage
 from torq_cli.safety.workspace import WorkspaceManager
 
-
 _GOAL = "Implement and test a CLI flag parser module with documented edge cases"
 
 
@@ -40,14 +39,14 @@ def run_governed_fixture(root: Path, *, date: str) -> Path:
         _deepseek, build = _connector("deepseek", "deepseek-v4-pro", "builder", root / "sessions")
         _kimi, repair = _connector("kimi", "k3", "refine_bug", root / "sessions")
         content = (
-            "\"\"\"Small deterministic flag parser fixture.\"\"\"\n"
-            "def parse_flag(value: str) -> bool:\n"
-            "    if value in {'1', 'true', 'yes'}:\n"
-            "        return True\n"
-            "    if value in {'0', 'false', 'no'}:\n"
-            "        return False\n"
-            "    raise ValueError('unsupported flag')\n"
-        ).encode()
+            b"\"\"\"Small deterministic flag parser fixture.\"\"\"\n"
+            b"def parse_flag(value: str) -> bool:\n"
+            b"    if value in {'1', 'true', 'yes'}:\n"
+            b"        return True\n"
+            b"    if value in {'0', 'false', 'no'}:\n"
+            b"        return False\n"
+            b"    raise ValueError('unsupported flag')\n"
+        )
         changed = handle.root / "flag_parser.py"
         changed.write_bytes(content)
         diff_hash = _sha256(content)

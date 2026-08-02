@@ -26,11 +26,21 @@ def test_console_import_fixture_is_declared_for_source_distribution() -> None:
 def test_ci_declares_required_quality_and_headless_jobs() -> None:
     workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text()
 
+    # The Python 3.11 lanes are the required branch-protection contexts and
+    # must keep their exact names. 3.12/3.13 are compatibility lanes with
+    # matching stable names. No matrix renaming is permitted because the 3.11
+    # names are protected.
     for job in (
         "quality-windows-py311",
         "quality-macos-py311",
         "quality-linux-py311",
         "headless-linux-py311",
+        "quality-windows-py312",
+        "quality-windows-py313",
+        "quality-macos-py312",
+        "quality-macos-py313",
+        "quality-linux-py312",
+        "quality-linux-py313",
     ):
         assert job in workflow
 

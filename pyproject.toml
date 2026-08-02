@@ -1,18 +1,44 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "torq-cli"
 version = "0.2.0"
 description = "Governed multi-provider agent runner and evidence-backed Fleet control surface"
-requires-python = ">=3.11"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "TORQ CLI Contributors"}]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
 dependencies = [
-    "cryptography>=44.0",
+    "cryptography>=44.0,<48",
     "keyring>=25.7,<26",
     "PyNaCl>=1.5,<2",
-    "PyYAML>=6.0",
+    "PyYAML>=6.0,<7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pilotwaffle/torq-cli-python"
+Repository = "https://github.com/pilotwaffle/torq-cli-python"
+Documentation = "https://github.com/pilotwaffle/torq-cli-python/tree/main/docs"
+Issues = "https://github.com/pilotwaffle/torq-cli-python/issues"
+Changelog = "https://github.com/pilotwaffle/torq-cli-python/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -44,6 +70,13 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
+# Wave 1 keeps the original passing rule set (E4, E7, E9, F) so the CI gate
+# stays green. The broader bandit (S), bugbear (B), pyupgrade (UP), and
+# import-sort (I) rules were triaged in this wave: I001 import-sorting and
+# safe UP fixes were applied tree-wide, and ~62 real findings remain
+# (notably S101 `assert` in src/ — a control-bypass risk under `python -O`,
+# plus B904/B023 in safety/tests). Those are tracked in CHANGELOG as Wave 2
+# debt and intentionally NOT suppressed. Re-enable S/B/UP here once fixed.
 select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
@@ -51,10 +84,18 @@ python_version = "3.11"
 strict = true
 files = ["src"]
 
+# This override silences attr-defined for the platform-conditional getattr()
+# shims in adapters/process.py and domain/hermetic.py (e.g. getattr(os,
+# "O_NOFOLLOW", ...), getattr(errno, "ENOSYS", 38), getattr(os, "killpg")).
+# It is intentionally broader than ideal: a future typo'd attribute in these
+# security-critical modules would also be silenced. Wave 2 should replace the
+# getattr-with-default shims with typed hasattr/Callable guards and narrow this
+# to inline `# type: ignore[attr-defined]` on the specific lines.
 [[tool.mypy.overrides]]
 module = ["torq_cli.adapters.process", "torq_cli.domain.hermetic"]
 disable_error_code = ["attr-defined"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "-q"

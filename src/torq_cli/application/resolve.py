@@ -2,15 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 import yaml
 
 from torq_cli.application.offline_status import offline_status_data
-from torq_cli.domain.config_schema import ConfigSyntaxError, parse_config_bytes, parse_config_text, resolve_profile, validate_config_shape, validate_eligibility
+from torq_cli.domain.config_schema import (
+    ConfigSyntaxError,
+    parse_config_bytes,
+    parse_config_text,
+    resolve_profile,
+    validate_config_shape,
+    validate_eligibility,
+)
 from torq_cli.domain.drift_oracle import load_packaged_oracle, validate_oracle
 from torq_cli.domain.findings import Finding, FindingCatalog
-from torq_cli.domain.hermetic import LegacyConfigTooLarge, LegacyConfigUnreadable, ProtectedPathError, ReadOnlyConfigReader
+from torq_cli.domain.hermetic import (
+    LegacyConfigTooLarge,
+    LegacyConfigUnreadable,
+    ProtectedPathError,
+    ReadOnlyConfigReader,
+)
 from torq_cli.domain.models import ResolutionSnapshot, ResultEnvelope
 from torq_cli.domain.registry_schema import (
     Registry,
@@ -21,7 +34,6 @@ from torq_cli.domain.registry_schema import (
     load_registry,
     validate_registry,
 )
-
 
 _STAGES = {
     "registry_read": 0, "registry_parse": 1, "registry_validate": 2,

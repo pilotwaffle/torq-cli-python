@@ -7,7 +7,6 @@ from torq_cli.application.import_v5_console import import_v5_console_path
 from torq_cli.domain.v5_console_import import parse_console_config
 from torq_cli.interfaces.cli import main
 
-
 FIXTURE = Path("tests/fixtures/torq-console-v5-config.yaml")
 NORMALIZED_REFERENCE = Path("src/torq_cli/data/oracles/torq-console-3ae19610/v5_config.normalized.json")
 

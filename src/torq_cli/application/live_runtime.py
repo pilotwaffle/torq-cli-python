@@ -22,13 +22,12 @@ from torq_cli.connectors.credential_sources import (
     credential_vault_from_config,
     openai_compatible_environment,
 )
+from torq_cli.core.policy import G2APolicy
 from torq_cli.domain.config_schema import parse_config_bytes, validate_config
 from torq_cli.domain.registry_schema import ProfileSpec, load_registry
-from torq_cli.core.policy import G2APolicy
 from torq_cli.safety.accounting_registry import PersistentEntitlementLedger
 from torq_cli.safety.entitlements import InMemoryEntitlementLedger
 from torq_cli.safety.receipts import restrict_owner_only_directory
-
 
 _DIRECT_CREDENTIAL_NAMES = {
     "deepseek": "deepseek",

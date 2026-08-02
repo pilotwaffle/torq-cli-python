@@ -8,4 +8,14 @@ dist/
 build/
 tmp/
 .venv/
+.tmp-tests/
+
+# Cryptographic material — never commit. Covers run-local signing identities
+# emitted under docs/evidence/**/.torq-run-identities/<hash>/ (Ed25519 seeds).
+.torq-run-identities/
+*.key
+*.pem
+
+# Operator-local memory; not project documentation.
+MEMORY.md
 

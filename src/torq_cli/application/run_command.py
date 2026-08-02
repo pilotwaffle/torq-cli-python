@@ -9,9 +9,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
 from torq_cli.application.context import GovernedContextInjector
 from torq_cli.application.fleet import FleetProjector
+from torq_cli.application.orchestrator import GovernedOrchestrator, OrchestrationBlocked
 from torq_cli.core.graph import ExecutionMode
 from torq_cli.domain.registry_schema import ProfileSpec, load_registry
 from torq_cli.safety.evidence_broker import (

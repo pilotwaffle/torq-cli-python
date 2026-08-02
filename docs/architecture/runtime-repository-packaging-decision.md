@@ -4,7 +4,7 @@ Date: 2026-07-23
 
 ## Decisions
 
-- **Runtime: Python 3.11+.** The T-02 audit found the MMH engine, redaction,
+- **Runtime: Python 3.11–3.13.** The T-02 audit found the MMH engine, redaction,
   Conductor graph compiler, and policy contracts extractable in Python. Only
   the small telemetry lifecycle requires a contract-preserving rebuild.
 - **Repository: standalone.** `E:\Torq-CLI` is the intended standalone product

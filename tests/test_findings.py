@@ -1,7 +1,7 @@
-from dataclasses import FrozenInstanceError, replace
 import hashlib
 import json
 import os
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 import yaml
@@ -10,7 +10,7 @@ from torq_cli.application import resolve as resolve_module
 from torq_cli.application.resolve import resolve_text
 from torq_cli.domain import drift_oracle
 from torq_cli.domain.findings import CATALOG, FindingCatalog, FindingSeverity
-from torq_cli.domain.models import ResultEnvelope, ResolutionSnapshot
+from torq_cli.domain.models import ResolutionSnapshot, ResultEnvelope
 from torq_cli.domain.registry_schema import (
     RegistryResourceMissing,
     RegistrySyntaxError,

@@ -14,7 +14,6 @@ from torq_cli.domain.run_evidence import (
 from torq_cli.safety.receipts import StoreVerification, verify_receipt_store
 from torq_cli.safety.usage import summarize_usage
 
-
 _REASON_GLOSSES = {
     "plan_window_exceeded": "The subscription account has no remaining dispatch capacity.",
     "budget_preflight_blocked": "The metered API ceiling would be exceeded.",
