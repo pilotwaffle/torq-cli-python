@@ -18,7 +18,24 @@ this file is the canonical cumulative record.
   Trove classifiers in packaging metadata.
 
 ### Changed
-- `requires-python` is now bounded: `>=3.11,<3.14`.
+- `requires-python` is now bounded: `>=3.11,<3.14`; README and `docs/install.md`
+  state Python 3.11–3.13. Build-system floor raised from `setuptools>=68` to
+  `setuptools>=77` (required by the PEP 639 SPDX license expression).
+- Import blocks sorted tree-wide and safe pyupgrade fixes applied across 91
+  files via `ruff --select I001,UP012,UP017,UP035,UP041,F401 --fix`
+  (import sorting, deprecated `typing`→`collections.abc`, `.encode()`→byte
+  literals, unused-import removal). No intentional runtime behavior change;
+  semantic equivalence was not independently verified per line. The CI ruff
+  gate (`E4,E7,E9,F`) remains green.
+
+### Fixed
+- Mutation harness isolation: mutant worktrees live beneath the parent repo,
+  so pytest discovered the parent `pyproject.toml` (`pythonpath = ["src"]`)
+  and imported the unmutated module, making mutants falsely "survive." The
+  harness now gives each worktree its own pytest config, runs `pytest -c` to
+  pin rootdir, forces the worktree `src` first on `sys.path`, and aborts
+  fail-closed if a tested module resolves outside the worktree. Regression
+  test added (`tests/test_named_mutants_isolation.py`).
 
 ### Security
 - `.torq-run-identities/`, `*.key`, `*.pem`, and `.tmp-tests/` are now
@@ -26,12 +43,9 @@ this file is the canonical cumulative record.
   output from being committed.
 - `MEMORY.md` (operator-local notes containing filesystem paths) is no longer
   tracked in the repository.
-
-### Changed
-- Import blocks sorted tree-wide (117 files) via `ruff --select I001 --fix`;
-  safe pyupgrade fixes (UP012/UP017/UP035/UP041) and unused-import removal
-  (F401) applied. No source logic changed; the CI ruff gate (`E4,E7,E9,F`)
-  remains green.
+- `SECURITY.md` corrected: a workspace sandbox is not implemented in v0.2.0
+  (process containment is). The tree-pinned `ApprovalBoundary` primitive
+  exists but is exercised only by `application/e2e.py`, not the governed run.
 
 ### Known Limitations (tracked Wave 2 debt)
 - A broader ruff pass (S/B/UP) surfaced ~62 real findings kept visible rather
@@ -82,8 +96,10 @@ this file is the canonical cumulative record.
 
 ### Added
 - Initial standalone release: governed multi-provider agent runner with role
-  profile validation, fail-closed provider adapters, isolated execution
-  sandboxes, evidence recording, and the Fleet control surface.
+  profile validation, fail-closed provider adapters, OS-enforced process
+  containment, evidence recording, and the Fleet control surface. (Note: a
+  workspace sandbox for agent file writes is not part of v0.1.0 or v0.2.0;
+  see SPEC.md §1.1.)
 - Security model and credential backend boundaries documented in `SECURITY.md`.
 - Dated production-readiness audit: `docs/security/production-readiness-audit-2026-07-23.md`.
 
