@@ -88,7 +88,7 @@ def test_provider_matrix_rejects_missing_surface_and_missing_decision_flag() -> 
 
 def test_runtime_repository_and_packaging_decision_is_closed() -> None:
     text = Path("docs/architecture/runtime-repository-packaging-decision.md").read_text(encoding="utf-8")
-    assert "Runtime: Python 3.11+" in text
+    assert "Runtime: Python 3.11–3.13" in text
     assert "Repository: standalone" in text
     assert "Distribution: pipx/uv tool" in text
     assert "torq-cli-v0.1.0" in text
