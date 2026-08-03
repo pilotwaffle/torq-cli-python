@@ -324,10 +324,23 @@ hand-waved):
       terminal_receipt_sequence, reason, provider_dispatch}` —
       `terminal_receipt_sequence` names the causative `change_apply_failed` /
       `change_recovery_completed` receipt; `reason` is a bounded enum.
-    - `blocked` after rejection or approval invalidation: `{decision,
-      outcome, action_sequence, reason, provider_dispatch}` —
-      `action_sequence` names the causative `action_resolved(rejected)` /
-      `approval_invalidated` receipt; `reason` is a bounded enum.
+    - `blocked` after **direct rejection**: `{decision, outcome,
+      action_sequence, reason, provider_dispatch}` — writer
+      `operator_gateway`; `action_sequence` names the causative
+      `action_resolved(rejected)` receipt; `reason` is a bounded enum.
+    - `blocked|failed` after **approval invalidation**: `{decision, outcome,
+      change_set_id, change_manifest_generation, change_manifest_hash,
+      approval_invalidated_sequence, reason, provider_dispatch}` — writer
+      `applier` (the applier owns the causative invalidation evidence, and
+      there is no new operator submission after invalidation);
+      `approval_invalidated_sequence` names the causative
+      `approval_invalidated` receipt; the change tuple MUST match the
+      invalidated approval; `reason` is a bounded enum; `provider_dispatch`
+      is false; no apply, journal, backup, apply-failure, or recovery receipt
+      may precede this terminal path. `blocked` versus `failed` is selected by
+      policy, but both decisions are written by `applier` —
+      `operator_gateway` must not write a derived decision from an
+      applier-owned invalidation.
 - **Schema-version dispatch (Review 7, Finding 2)** — `verify_receipt_store`
   (`receipts.py:1695`) branches on the **existing** receipt/manifest
   `schema_version` (`receipts.py:1721-1756`): a chain stamped `3.0.0` routes to
@@ -481,28 +494,34 @@ terminal transition other than `run_decision`.
 | `change_recovery_required` | `applier` | `observed` |
 | `run_decision(completed)` | `applier` | `derived` |
 | `run_decision(failed)` after apply/recovery | `applier` | `derived` |
-| `run_decision(blocked)` after rejection or approval invalidation | `operator_gateway` | `derived` |
+| `run_decision(blocked)` after direct rejection | `operator_gateway` | `derived` |
+| `run_decision(blocked\|failed)` after approval invalidation | `applier` | `derived` |
 
 `action_opened` stays with the `orchestrator` — the governed orchestrator
 creates the audited proposal and opens the action; `operator_gateway`
-resolves the action, it does not open it. `run_decision(blocked)` is written
-by `operator_gateway` in both pre-apply blocked paths (rejection and
-`approval_invalidated`), because no apply/recovery evidence exists at that
-point; every post-apply decision is written by `applier`.
+resolves the action, it does not open it. Terminal blocked-decision authority
+is split by causation: after a **direct operator rejection**,
+`run_decision(blocked)` is written by `operator_gateway` (`derived`); after an
+**applier-owned `approval_invalidated`**, the terminal
+`run_decision(blocked|failed)` is written by `applier` (`derived`) — there is
+no new operator submission once the applier invalidates the approval, so the
+applier owns the causative evidence and the derived terminal decision;
+`operator_gateway` must not write a derived decision from an applier-owned
+invalidation. Every post-apply decision is written by `applier`.
 
 | Transition | Writer role | Evidence basis | Precondition | `*_KEYS` allowlist | Field validators | Lifecycle-order rule | Sealed-state rule | Test | Named mutant |
 |---|---|---|---|---|---|---|---|---|---|
 | `change_proposed` | `orchestrator` | `derived` | generation == max+1 (or 1); no `action_opened` for the tuple | `CHANGE_PROPOSED_KEYS` (§2.5) | `_OPAQUE_ID`/`_ARTIFACT_PATH`/sha256/bounded int/bool=false | precedes G2A audit and `action_opened` | non-terminal | §11.1 ordering/repair tests | M45, M47 |
 | `action_opened` | `orchestrator` | `derived` | preceding `change_proposed` + final successful G2A audit for the exact tuple | `ACTION_OPENED_KEYS_V3` (§2.3) | bounded ID/enum/sha256/bounded int/bool=false; approved no longer maps to `completed` | after `change_proposed` + G2A | non-terminal | E0/E2 tests | M31, M33 |
 | `action_resolved` | `operator_gateway` | `submitted` | `action_opened` for the same `action_id` | `ACTION_RESOLVED_KEYS_V3` (§2.3) | `_OPAQUE_ID`/`_ARTIFACT_PATH`/sha256/enum/bool=false | after `action_opened` | non-terminal even when approved | §6.1 identity tests | M31, M43 |
-| `approval_invalidated` | `applier` | `derived` | `action_resolved(approved)` in chain AND no `change_apply_started` | `APPROVAL_INVALIDATED_KEYS` (§6.2) | `_OPAQUE_ID`/sha256/bounded int/enum reason/bool=false | followed by terminal `run_decision(blocked\|failed)` | non-terminal; no seal from here | §6.2/§11.1 denial tests | M46 |
+| `approval_invalidated` | `applier` | `derived` | `action_resolved(approved)` in chain AND no `change_apply_started` | `APPROVAL_INVALIDATED_KEYS` (§6.2) | `_OPAQUE_ID`/sha256/bounded int/enum reason/bool=false | followed by terminal `run_decision(blocked\|failed)` written by `applier` | non-terminal; no seal from here | §6.2/§11.1 denial tests | M46, M48 |
 | `change_apply_started` | `applier` | `observed` | `action_resolved(approved)` for the same tuple + authz recheck allowed + generation == max + journal hashed | `CHANGE_APPLY_STARTED_KEYS` (§2.3) | sha256/bounded int/bool=false | only after approval of the max generation | non-terminal | §11.1 crash/durability tests | M34 |
 | `change_applied` | `applier` | `observed` | valid `change_apply_started` for the same tuple; recomputed primary hash == `result_tree_hash` | `CHANGE_APPLIED_KEYS` (§2.3) | sha256/`_OPAQUE_ID`/`_ARTIFACT_PATH`/enum/bounded int/bool=false | after `change_apply_started`; at most one per run (E4) | NON-terminal prerequisite for `completed` | E0/E2 tests | M33, M36 |
 | `change_apply_failed` | `applier` | `observed` | `change_apply_started` in chain | `CHANGE_APPLY_FAILED_KEYS` (§2.3) | sha256/bounded enum reason/bool/bool=false | after `change_apply_started` | non-terminal | §9.5 rollback tests | — (covered by E5) |
 | `change_recovery_started` | `applier` | `observed` | kernel lock acquirable (§3.2.1) + operator acknowledgment | `CHANGE_RECOVERY_STARTED_KEYS` (§2.3) | `_OPAQUE_ID`/sha256/bounded int/enum/bool=false | only after abandonment | non-terminal | §9.5 recovery tests | — (lock authority: §3.2.1) |
 | `change_recovery_completed` | `applier` | `observed` | `change_recovery_started` in chain | `CHANGE_RECOVERY_COMPLETED_KEYS` (§2.3) | sha256/enum/bool/bool=false; outcome-dependent required hash (`restored` ⇒ `restored_tree_hash`; `completed_verified` ⇒ `result_tree_hash`) | after `change_recovery_started`; followed by `run_decision` | non-terminal | §9.5/E5 tests | — |
 | `change_recovery_required` | `applier` | `observed` | `change_apply_started` in chain + uncertain FS state | `CHANGE_RECOVERY_REQUIRED_KEYS` (§2.3) | sha256/bounded int/bool=false | keeps the chain open | non-terminal; **seal rejected** until a final `run_decision` | §9.5 no-seal-while-uncertain test | — |
-| `run_decision` | decision-specific (authority matrix above) | `derived` | `completed` ⇒ valid `change_applied` at `change_applied_sequence`; `failed` ⇒ causative apply/recovery receipt; `blocked` ⇒ causative rejection/invalidation receipt | `RUN_DECISION_KEYS_V3` decision subset (§2.3) | enum + decision-specific prerequisite + bool=false | THE ONLY terminal transition | terminal; enables seal | E0/E2 tests | M33 |
+| `run_decision` | decision-specific (authority matrix): `applier` (`completed`; `failed` after apply/recovery; `blocked\|failed` after invalidation); `operator_gateway` (`blocked` after direct rejection) | `derived` | `completed` ⇒ valid `change_applied` at `change_applied_sequence`; `failed` ⇒ causative apply/recovery receipt; `blocked` ⇒ causative `action_resolved(rejected)` (gateway path) or `approval_invalidated` (applier path, full change tuple + `approval_invalidated_sequence`) | `RUN_DECISION_KEYS_V3` decision subset (§2.3) | enum + decision-specific prerequisite + bool=false | THE ONLY terminal transition | terminal; enables seal | E0/E2 + §6.2 authority tests | M33, M48 |
 
 **`seal` — audited separately (chain operation, not a receipt; no
 `TRANSITION_RULES` row):** performed by the seal machinery inside the broker
@@ -850,8 +869,8 @@ is emitted, because the filesystem transaction never began. Instead:
 ```
 action_resolved(approved)
   → broker authorization recheck denied
-  → approval_invalidated                          # §2.1 transition
-  → run_decision(blocked|failed, per policy)
+  → approval_invalidated                          # §2.1 transition, writer applier
+  → run_decision(blocked|failed, per policy)      # writer applier (§2.6)
   → seal
 ```
 **Exact closed allowlist (`APPROVAL_INVALIDATED_KEYS`); all fields
@@ -871,9 +890,19 @@ APPROVAL_INVALIDATED_KEYS = {
 Rules: permitted **only after** `action_resolved(approved)`; **forbidden
 after** `change_apply_started` (machine-enforced precondition, §2.3); followed
 by terminal `run_decision(blocked)` or `run_decision(failed)` according to the
-selected policy; emits **no** journal, backup, apply-failure, or recovery
-evidence. `reason` validates as a bounded machine reason code enum — prose is
-rejected. The four Review-7 properties hold: PID reuse cannot deadlock it
+selected policy. **Both terminal decisions are written by `applier`**
+(`evidence_basis` `derived`, §2.6): the applier owns the causative
+invalidation evidence, and there is no new operator submission after the
+invalidation — `operator_gateway` must not write a derived decision from an
+applier-owned invalidation. The terminal payload is the `RUN_DECISION_KEYS_V3`
+invalidation subset (§2.3): the full change tuple (matching the invalidated
+approval) + the causative `approval_invalidated_sequence` + bounded `reason` +
+`provider_dispatch=false`. No apply, journal, backup, apply-failure, or
+recovery receipt may precede this terminal path. `approval_invalidated` itself
+emits **no** journal, backup, apply-failure, or recovery evidence. `reason`
+validates as a bounded machine reason code enum — prose is rejected.
+
+The four Review-7 properties hold: PID reuse cannot deadlock it
 (kernel lock not yet acquired at the denial point); it produces no false
 recovery evidence; it cannot be confused with a `change_apply_failed` that did
 begin the FS transaction; and it reaches a terminal `run_decision` (no stuck
@@ -1287,6 +1316,10 @@ no-op because the `result_content_hash` already matches. A second
 - `test_repair_emits_new_change_proposed_with_incremented_generation` (§2.5).
 - `test_approval_invalidated_forbidden_after_change_apply_started` (§6.2, M46).
 - `test_approval_invalidated_emits_no_journal_backup_or_recovery_evidence` (§6.2).
+- `test_approval_invalidated_terminal_decision_is_applier_owned` (§6.2, M48) —
+  rejects: `operator_gateway`/`run_decision(blocked)` caused by
+  `approval_invalidated`; an applier decision missing the full change tuple;
+  and a decision referencing the wrong `approval_invalidated_sequence`.
 - `test_governed_receipts_reject_provider_dispatch_true` (E13, M47).
 - `test_builder_scratch_outside_sealed_workspace_and_result_equals_workspace`
   (E14, §8.1) — scratch lands in `<governance_state_root>/scratch/<run_id>/`,
@@ -1325,6 +1358,13 @@ no-op because the `result_content_hash` already matches. A second
   and no-recovery-evidence tests.
 - **M47** accept any governed lifecycle receipt with `provider_dispatch=true`
   → killed by the provider-dispatch sentinel test (E13).
+- **M48** swap the invalidation terminal writer back to `operator_gateway`
+  (accept `operator_gateway`/`run_decision(blocked|failed)` after
+  `approval_invalidated`) → killed **semantically** by
+  `test_approval_invalidated_terminal_decision_is_applier_owned`: the test
+  asserts the writer-role/authority contract of the terminal decision, not
+  just receipt acceptance, so the swap is caught even though the payload
+  shape is unchanged (§6.2, §2.6).
 
 ---
 
