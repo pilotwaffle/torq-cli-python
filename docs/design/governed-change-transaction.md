@@ -26,11 +26,11 @@ behavior:** `src/torq_cli/safety/{approval,workspace,receipts}.py`,
 
 ## 0. The three events (read first)
 
-| Event | Receipt (schema v3) | Meaning | Producer |
+| Event | Receipt (schema v3) | Meaning | Producer (writer role; §2.6) |
 |---|---|---|---|
-| **approval_granted** | `action_resolved` (resolution=`approved`) | A verified actor authorized the proposal. **Nothing is written to the primary tree.** `action_resolved` is **non-terminal** for an approval. | operator gateway → broker |
-| **apply_started** | `change_apply_started` | The transaction has begun under the per-primary apply lease; journal prepared and hashed. Outcome unknown. | broker (trusted process) |
-| **change_applied** | `change_applied` | The transaction committed: every operation applied, final primary tree hash re-verified, manifest `result_tree_hash` matched. **Non-terminal — the mandatory verified-success prerequisite for `run_decision(completed)`.** | broker |
+| **approval_granted** | `action_resolved` (resolution=`approved`) | A verified actor authorized the proposal. **Nothing is written to the primary tree.** `action_resolved` is **non-terminal** for an approval. | `operator_gateway` (submitted to the broker process) |
+| **apply_started** | `change_apply_started` | The transaction has begun under the per-primary apply lease; journal prepared and hashed. Outcome unknown. | `applier` (inside the broker process) |
+| **change_applied** | `change_applied` | The transaction committed: every operation applied, final primary tree hash re-verified, manifest `result_tree_hash` matched. **Non-terminal — the mandatory verified-success prerequisite for `run_decision(completed)`.** | `applier` (inside the broker process) |
 
 **Invariant E0 (approval ≠ application):** an `approval_granted` MUST NOT be
 reportable as, or imply, successful application. `completed` is forbidden
@@ -157,7 +157,12 @@ The design mandates changes to (each specified at implementation time, not
 hand-waved):
 - **`TRANSITION_RULES`** — new `TransitionRule(writer_role, transition,
   evidence_basis, precondition)` rows for each §2.1 transition (complete rows
-  in §2.6). `run_decision` is the ONLY terminal lifecycle transition;
+  in §2.6). `evidence_basis` is exactly one of the closed enum values
+  `observed` / `derived` / `submitted` — never prose; the descriptive proof
+  inputs belong in the payload/precondition documentation. Writer roles and
+  bases follow the §2.6 authority matrix; there is no `broker` writer role
+  (the broker is a process boundary, not a receipt authority identity).
+  `run_decision` is the ONLY terminal lifecycle transition;
   `change_proposed`, `action_opened`, `action_resolved`,
   `approval_invalidated`, `change_apply_started`, `change_applied`,
   `change_apply_failed`, `change_recovery_started`,
@@ -199,7 +204,7 @@ hand-waved):
   `outcome_map` stops mapping `approved→completed`, that comparison fires
   `operator_decision_outcome_mismatch` unless updated to the v3 non-terminal
   approval model. Additionally, the **writer_role for v3
-  `run_decision(completed)`** must be pinned (the `applier` broker role, R1.1),
+  `run_decision(completed)`** must be pinned (the `applier` writer role, R1.1),
   and the `validate_v3` branch that emits `completed` — whether operator_gateway
   *or* the generic `run_decision` branch at `run_evidence.py:1168-1280` — MUST
   enforce the `change_applied` prerequisite (the generic v2 branch sets
@@ -233,7 +238,14 @@ hand-waved):
   names `change_set_id` / `change_manifest_generation` /
   `change_manifest_hash`; the stale generic names `manifest_hash` /
   `manifest_generation` never appear in change payloads, and the receipt-store
-  `_manifest_generation` never appears in a change-proposal or apply payload:
+  `_manifest_generation` never appears in a change-proposal or apply payload.
+  Every governed transaction lifecycle receipt carries `provider_dispatch`
+  with value exactly **false** (E13; a true value is rejected as
+  `provider_dispatch_forbidden` — the provider never receives an apply
+  capability, §3). Fields referencing `ReceiptChain.write_artifact()` output
+  (`change_manifest_artifact`, `actor_artifact`) validate as `_ARTIFACT_PATH`
+  — bounded relative artifact paths with traversal rejection and artifact-hash
+  verification — never as opaque IDs:
   - `CHANGE_PROPOSED_KEYS = {change_set_id, change_manifest_generation,
     change_manifest_hash, change_manifest_artifact,
     change_manifest_artifact_hash, workspace_tree_hash, result_tree_hash,
@@ -246,37 +258,76 @@ hand-waved):
     change_manifest_generation, change_manifest_hash, subject_id,
     policy_version, reason, provider_dispatch}` — full definition and rules
     in §6.2.
-  - `CHANGE_APPLY_STARTED_KEYS = {journal_hash, journal_sequence,
-    change_set_id, change_manifest_generation, change_manifest_hash,
-    prior_tree_hash}`
+  - `CHANGE_APPLY_STARTED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, journal_hash, journal_sequence, prior_tree_hash,
+    provider_dispatch}`
   - `CHANGE_APPLIED_KEYS = {change_set_id, change_manifest_generation,
-    change_manifest_hash, post_tree_hash, files_written, applied_subject_id,
-    applied_assurance_level, actor_artifact, actor_artifact_hash,
-    authorization_policy, authorization_result}`
+    change_manifest_hash, journal_hash, prior_tree_hash, post_tree_hash,
+    operation_count, applied_subject_id, applied_assurance_level,
+    actor_artifact, actor_artifact_hash, authorization_policy,
+    authorization_result, provider_dispatch}` — bounded `operation_count`
+    plus the authenticated `journal_hash` replace any unbounded file list;
+    per-operation detail lives in the journal, not the receipt.
   - `CHANGE_APPLY_FAILED_KEYS = {change_set_id, change_manifest_generation,
-    change_manifest_hash, reason, recoverable}`
+    change_manifest_hash, journal_hash, reason, recoverable,
+    provider_dispatch}` — `reason` bounded enum; `recoverable` bool.
   - `CHANGE_RECOVERY_STARTED_KEYS = {abandoned_run_id, change_set_id,
-    change_manifest_generation, journal_hash, lock_key, operator_subject_id,
-    recovery_reason, provider_dispatch}` (operator-acknowledged). `lock_key`
-    is the `primary_path_hash` naming the kernel lock (§3.2);
-    `recovery_reason` is a bounded enum (`abandoned_journal`,
-    `interrupted_apply`, `uncertain_fs_state`); `provider_dispatch` is false.
-    PID, executable path, and process-start data are **not** receipt fields —
-    they may be written to a separate diagnostic artifact only, and never
-    control lock ownership or recovery authorization (§3.2.1).
-  - `CHANGE_RECOVERY_COMPLETED_KEYS = {outcome, restored_tree_hash,
-    journal_reconciled: bool}`
+    change_manifest_generation, change_manifest_hash, journal_hash, lock_key,
+    operator_subject_id, recovery_reason, provider_dispatch}`
+    (operator-acknowledged). `lock_key` is the `primary_path_hash` naming the
+    kernel lock (§3.2); `recovery_reason` is a bounded enum
+    (`abandoned_journal`, `interrupted_apply`, `uncertain_fs_state`). PID,
+    executable path, and process-start data are **not** receipt fields — they
+    may be written to a separate diagnostic artifact only, and never control
+    lock ownership or recovery authorization (§3.2.1).
+  - `CHANGE_RECOVERY_COMPLETED_KEYS = {change_set_id,
+    change_manifest_generation, change_manifest_hash, journal_hash, outcome,
+    restored_tree_hash, result_tree_hash, journal_reconciled,
+    provider_dispatch}` — `outcome` is a bounded enum with outcome-dependent
+    hash requirements: `restored` REQUIRES `restored_tree_hash` (equal to the
+    pre-apply `primary_tree_hash`) and forbids `result_tree_hash`;
+    `completed_verified` REQUIRES `result_tree_hash` (equal to the
+    `change_applied` `post_tree_hash`) and forbids `restored_tree_hash`.
+    `journal_reconciled` is bool.
   - `CHANGE_RECOVERY_REQUIRED_KEYS = {change_set_id,
-    change_manifest_generation, change_manifest_hash,
-    uncertain_since_sequence}`
-  - `VERIFIED_ACTOR_KEYS` = the §6.1 actor field set, all `_OPAQUE_ID`/enum.
-  - `provider_dispatch` (bool) MUST be false in every governed transaction
-    lifecycle receipt — the provider never receives an apply capability (§3);
-    a true value is rejected as `provider_dispatch_forbidden` (E13).
+    change_manifest_generation, change_manifest_hash, journal_hash,
+    uncertain_since_sequence, provider_dispatch}`
+  - `VERIFIED_ACTOR_KEYS` = the §6.1 actor field set, all
+    `_OPAQUE_ID`/`_ARTIFACT_PATH`/enum.
+  In every frozenset above, `provider_dispatch` MUST be exactly false.
   The floor validator (`_oversized_value`, `run_evidence.py:396`) alone is
   insufficient — every transition MUST have its exact whitelist or the receipt
   becomes a bounded-but-open signed-prose channel. The closed-schema
   consistency audit (§2.6) confirms every lifecycle transition now has one.
+- **Modified existing schemas — exact schema-v3 allowlists (not
+  descriptions):**
+  - `ACTION_OPENED_KEYS_V3 = {action_id, type, scope, target, summary,
+    allowed_resolutions, caused_by_sequence, change_set_id,
+    change_manifest_generation, change_manifest_hash,
+    change_manifest_artifact_hash, workspace_tree_hash, result_tree_hash,
+    g2a_receipt_hash, g2a_attempt_id, repair_cycle, provider_dispatch}` —
+    binds the exact approved target (§8.3 tuple + G2A binding); the approved
+    outcome no longer maps directly to `completed` (R1.2).
+  - `ACTION_RESOLVED_KEYS_V3 = {action_id, resolution, opened_sequence,
+    change_set_id, change_manifest_generation, change_manifest_hash,
+    subject_id, assurance_level, actor_artifact, actor_artifact_hash,
+    provider_dispatch}` — `resolver_identity` removed; `subject_id` +
+    `assurance_level` mandatory (§6.1).
+  - `RUN_DECISION_KEYS_V3` — decision-specific subsets:
+    - `completed`: `{decision, outcome, change_set_id,
+      change_manifest_generation, change_manifest_hash,
+      change_applied_sequence, result_tree_hash, provider_dispatch}` —
+      rejected without a valid `change_applied` at `change_applied_sequence`
+      (E2).
+    - `failed` after apply/recovery: `{decision, outcome, change_set_id,
+      change_manifest_generation, change_manifest_hash,
+      terminal_receipt_sequence, reason, provider_dispatch}` —
+      `terminal_receipt_sequence` names the causative `change_apply_failed` /
+      `change_recovery_completed` receipt; `reason` is a bounded enum.
+    - `blocked` after rejection or approval invalidation: `{decision,
+      outcome, action_sequence, reason, provider_dispatch}` —
+      `action_sequence` names the causative `action_resolved(rejected)` /
+      `approval_invalidated` receipt; `reason` is a bounded enum.
 - **Schema-version dispatch (Review 7, Finding 2)** — `verify_receipt_store`
   (`receipts.py:1695`) branches on the **existing** receipt/manifest
   `schema_version` (`receipts.py:1721-1756`): a chain stamped `3.0.0` routes to
@@ -292,9 +343,13 @@ hand-waved):
   transitions.
 - **Portable verification** — the offline verifier (`verify_receipt_store`)
   gains v3 rules; v3 receipts remain exportable and third-party-verifiable.
-- **Certificate compatibility** — if a new writer role (e.g. an `applier`
-  broker role) is introduced, the run certificate's writer-key set and
-  `_CERTIFICATE_SCHEMA_VERSION` are bumped; existing keys are preserved.
+- **Certificate compatibility — introducing `applier` is a contract change:**
+  the `applier` writer role requires ALL of: addition to `_WRITER_ROLES`; an
+  applier signing key in the run certificate; a `_CERTIFICATE_SCHEMA_VERSION`
+  bump; broker capability authorization for the role; and portable-verifier
+  support for the new role. Existing keys are preserved. There is no separate
+  `broker` writer role — the broker is a process boundary, not a receipt
+  authority identity (§2.6).
 - **Mutation coverage** — new named mutants (§11) cover each new invariant.
 - **Schema-v2 backward verification** — see §2.4.
 
@@ -341,15 +396,20 @@ invalidated (§8.3).
 
 ```
 TransitionRule(
-  writer_role="broker",        # manifest derivation runs in the trusted broker
+  writer_role="orchestrator",    # governed orchestrator derives the manifest
   transition="change_proposed",
-  evidence_basis="sealed workspace_tree_hash + recomputed
-                  change_manifest_artifact_hash",
+  evidence_basis="derived",      # closed enum: observed | derived | submitted
   precondition="change_manifest_generation == max recorded generation + 1
                 (or 1 for the first proposal of the change_set_id) AND
                 no action_opened exists for this (change_set_id,
                 change_manifest_generation)")
 ```
+
+The derivation's proof inputs — the sealed `workspace_tree_hash` and the
+recomputed `change_manifest_artifact_hash` — are bound in the payload below
+and checked by the validators; they are payload/precondition facts, not
+`evidence_basis` prose. Manifest derivation runs inside the broker process
+boundary; the broker is not a receipt writer role (§2.6).
 
 **Payload — exact closed allowlist (`CHANGE_PROPOSED_KEYS`); all fields
 mandatory, using bounded IDs, hashes, artifact paths, and integers consistent
@@ -360,21 +420,23 @@ CHANGE_PROPOSED_KEYS = {
   change_set_id,                 # _OPAQUE_ID — immutable per proposal lineage
   change_manifest_generation,    # bounded positive integer, begins at 1
   change_manifest_hash,          # sha256:… (§8.2 domain-separated)
-  change_manifest_artifact,      # _OPAQUE_ID — encrypted artifact reference
-  change_manifest_artifact_hash, # sha256:… recomputed by the broker
+  change_manifest_artifact,      # _ARTIFACT_PATH — encrypted artifact path
+  change_manifest_artifact_hash, # sha256:… recomputed on load
   workspace_tree_hash,           # sha256:… captured at workspace seal
-  result_tree_hash,              # sha256:… expected post-apply primary hash (§8.1)
+  result_tree_hash,              # sha256:… == workspace_tree_hash in v1 (§8.1)
   provider_dispatch,             # bool — MUST be false (E13)
 }
 ```
 
-**Field validators (`validate_receipt_payload` branch):** `change_set_id` and
-`change_manifest_artifact` validate as `_OPAQUE_ID`
-(`run_evidence.py:64`); every `*_hash` field validates as a `sha256:` digest;
-`change_manifest_generation` validates as a bounded positive integer;
-`provider_dispatch` validates as bool with value exactly false (a true value
-is rejected as `provider_dispatch_forbidden` — the provider never receives an
-apply capability, §3).
+**Field validators (`validate_receipt_payload` branch):** `change_set_id`
+validates as `_OPAQUE_ID` (`run_evidence.py:64`); `change_manifest_artifact`
+validates as `_ARTIFACT_PATH` — a bounded relative artifact path with
+traversal rejection, and the stored artifact hash is verified against
+`change_manifest_artifact_hash`; every `*_hash` field validates as a
+`sha256:` digest; `change_manifest_generation` validates as a bounded
+positive integer; `provider_dispatch` validates as bool with value exactly
+false (a true value is rejected as `provider_dispatch_forbidden` — the
+provider never receives an apply capability, §3).
 
 **Lifecycle-order rule:** `action_opened` is rejected unless a
 `change_proposed` referencing the exact `(change_set_id,
@@ -391,30 +453,69 @@ accepted).
 
 ### 2.6 Closed-schema consistency audit (reconciliation revision)
 
-Mechanical enumeration of every schema-v3 lifecycle transition. The audit
-confirms that there is **no** transition defined only in prose, **no** payload
-allowlist without a transition, **no** lifecycle transition routed through
-`CURRENT_AUDIT_TRANSITIONS`, **no** stale generic
+Mechanical enumeration of every schema-v3 governed **receipt** transition —
+**11 receipt transitions, audited one row at a time — plus the `seal` chain
+operation, audited separately** (`seal` is not a receipt and has no
+`TRANSITION_RULES` row). Every `evidence_basis` is the exact closed enum
+(`observed` / `derived` / `submitted`) — never prose. There is **no `broker`
+writer role**: the broker is a process boundary, not a receipt authority
+identity. The audit confirms that there is **no** transition defined only in
+prose, **no** payload allowlist without a transition, **no** lifecycle
+transition routed through `CURRENT_AUDIT_TRANSITIONS`, **no** stale generic
 `manifest_hash`/`manifest_generation` field in any change payload, and **no**
 terminal transition other than `run_decision`.
 
-| Transition | TRANSITION_RULES row | Writer role | Evidence basis | Precondition | `*_KEYS` allowlist | Field validators | Lifecycle-order rule | Sealed-state rule | Test | Named mutant |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `change_proposed` | §2.5 | broker | sealed `workspace_tree_hash` + recomputed `change_manifest_artifact_hash` | generation == max+1 (or 1); no `action_opened` for the tuple | `CHANGE_PROPOSED_KEYS` (§2.5) | `_OPAQUE_ID`/sha256/bounded int/bool=false | precedes G2A audit and `action_opened` | non-terminal | §11.1 ordering/repair tests | M45, M47 |
-| `action_opened` | existing row (v2; v3 binding) | operator_gateway | approved-proposal tuple | preceding `change_proposed` + final successful G2A audit for the exact tuple | `ACTION_OPENED_KEYS` (existing; v3: `outcome_map` no longer maps approved→completed) | existing + v3 lifecycle branch | after `change_proposed` + G2A | non-terminal | E0/E2 tests | M31, M33 |
-| `action_resolved` | existing row (v2; v3 binding) | operator_gateway | `VerifiedActor` artifact reference (§6.1) | `action_opened` for the same `action_id` | `ACTION_RESOLVED_KEYS` (v3: `resolver_identity` removed; `subject_id` + `assurance_level` mandatory) | `_OPAQUE_ID` + enum (§6.1) | after `action_opened` | non-terminal even when approved | §6.1 identity tests | M31, M43 |
-| `approval_invalidated` | §6.2 | broker authorization gate | denied `can_approve` bound to `(subject_id, change_manifest_hash, policy_version)` | `action_resolved(approved)` in chain AND no `change_apply_started` | `APPROVAL_INVALIDATED_KEYS` (§6.2) | `_OPAQUE_ID`/sha256/bounded int/enum reason/bool=false | followed by terminal `run_decision(blocked\|failed)` | non-terminal; no seal from here | §6.2/§11.1 denial tests | M46 |
-| `change_apply_started` | §2.3 | applier (broker) | journal prepared + hashed (write-ahead) | `action_resolved(approved)` for the same tuple + broker authz recheck allowed + generation == max | `CHANGE_APPLY_STARTED_KEYS` (§2.3) | sha256/bounded int | only after approval of the max generation | non-terminal | §11.1 crash/durability tests | M34 |
-| `change_applied` | §2.3 | applier (broker) | recomputed post-apply primary hash == `result_tree_hash` | valid `change_apply_started` for the same tuple | `CHANGE_APPLIED_KEYS` (§2.3) | sha256/`_OPAQUE_ID`/enum/bounded int | after `change_apply_started`; at most one per run (E4) | NON-terminal prerequisite for `completed` | E0/E2 tests | M33, M36 |
-| `change_apply_failed` | §2.3 | applier (broker) | journal state + bounded reason | `change_apply_started` in chain | `CHANGE_APPLY_FAILED_KEYS` (§2.3) | bounded enum reason/bool | after `change_apply_started` | non-terminal | §9.5 rollback tests | — (covered by E5) |
-| `change_recovery_started` | §2.3 | applier (broker) | kernel lock acquirable + abandoned journal hash | lock acquirable (§3.2.1) + operator acknowledgment | `CHANGE_RECOVERY_STARTED_KEYS` (§2.3) | `_OPAQUE_ID`/sha256/bounded int/enum/bool=false | only after abandonment | non-terminal | §9.5 recovery tests | — (lock authority: §3.2.1) |
-| `change_recovery_completed` | §2.3 | applier (broker) | restored/verified tree hash + reconciled journal | `change_recovery_started` in chain | `CHANGE_RECOVERY_COMPLETED_KEYS` (§2.3) | enum/sha256/bool | after `change_recovery_started`; followed by `run_decision` | non-terminal | §9.5/E5 tests | — |
-| `change_recovery_required` | §2.3 | applier (broker) | last certain journal sequence | `change_apply_started` in chain + uncertain FS state | `CHANGE_RECOVERY_REQUIRED_KEYS` (§2.3) | sha256/bounded int | keeps the chain open | non-terminal; **seal rejected** until a final `run_decision` | §9.5 no-seal-while-uncertain test | — |
-| `run_decision` | existing row (v3 semantics) | operator_gateway (blocked/failed); applier (completed, R1.2) | decision enum + decision-specific preconditions | `completed` ⇒ valid `change_applied` referencing the approved manifest | `RUN_DECISION_KEYS` (existing) | enum + v3 prerequisite check | THE ONLY terminal transition | terminal; enables seal | E0/E2 tests | M33 |
-| `seal` | chain operation (not a receipt) | broker seal machinery | terminal `run_decision` present | chain ends in a terminal `run_decision`; never on `change_recovery_required` | — (no payload) | `validate_v3_receipt_contract(sealed=True)` | after terminal `run_decision` | closes the chain | §9.5 seal-resume tests | — |
+**Authority matrix (writer role × evidence basis):**
 
-**Audit result:** 12/12 lifecycle entries carry all ten closed-schema
-components; every defect class listed above is empty.
+| Transition | Writer role | Evidence basis |
+|---|---|---|
+| `change_proposed` | `orchestrator` | `derived` |
+| `action_opened` | `orchestrator` | `derived` |
+| `action_resolved` | `operator_gateway` | `submitted` |
+| `approval_invalidated` | `applier` | `derived` |
+| `change_apply_started` | `applier` | `observed` |
+| `change_applied` | `applier` | `observed` |
+| `change_apply_failed` | `applier` | `observed` |
+| `change_recovery_started` | `applier` | `observed` |
+| `change_recovery_completed` | `applier` | `observed` |
+| `change_recovery_required` | `applier` | `observed` |
+| `run_decision(completed)` | `applier` | `derived` |
+| `run_decision(failed)` after apply/recovery | `applier` | `derived` |
+| `run_decision(blocked)` after rejection or approval invalidation | `operator_gateway` | `derived` |
+
+`action_opened` stays with the `orchestrator` — the governed orchestrator
+creates the audited proposal and opens the action; `operator_gateway`
+resolves the action, it does not open it. `run_decision(blocked)` is written
+by `operator_gateway` in both pre-apply blocked paths (rejection and
+`approval_invalidated`), because no apply/recovery evidence exists at that
+point; every post-apply decision is written by `applier`.
+
+| Transition | Writer role | Evidence basis | Precondition | `*_KEYS` allowlist | Field validators | Lifecycle-order rule | Sealed-state rule | Test | Named mutant |
+|---|---|---|---|---|---|---|---|---|---|
+| `change_proposed` | `orchestrator` | `derived` | generation == max+1 (or 1); no `action_opened` for the tuple | `CHANGE_PROPOSED_KEYS` (§2.5) | `_OPAQUE_ID`/`_ARTIFACT_PATH`/sha256/bounded int/bool=false | precedes G2A audit and `action_opened` | non-terminal | §11.1 ordering/repair tests | M45, M47 |
+| `action_opened` | `orchestrator` | `derived` | preceding `change_proposed` + final successful G2A audit for the exact tuple | `ACTION_OPENED_KEYS_V3` (§2.3) | bounded ID/enum/sha256/bounded int/bool=false; approved no longer maps to `completed` | after `change_proposed` + G2A | non-terminal | E0/E2 tests | M31, M33 |
+| `action_resolved` | `operator_gateway` | `submitted` | `action_opened` for the same `action_id` | `ACTION_RESOLVED_KEYS_V3` (§2.3) | `_OPAQUE_ID`/`_ARTIFACT_PATH`/sha256/enum/bool=false | after `action_opened` | non-terminal even when approved | §6.1 identity tests | M31, M43 |
+| `approval_invalidated` | `applier` | `derived` | `action_resolved(approved)` in chain AND no `change_apply_started` | `APPROVAL_INVALIDATED_KEYS` (§6.2) | `_OPAQUE_ID`/sha256/bounded int/enum reason/bool=false | followed by terminal `run_decision(blocked\|failed)` | non-terminal; no seal from here | §6.2/§11.1 denial tests | M46 |
+| `change_apply_started` | `applier` | `observed` | `action_resolved(approved)` for the same tuple + authz recheck allowed + generation == max + journal hashed | `CHANGE_APPLY_STARTED_KEYS` (§2.3) | sha256/bounded int/bool=false | only after approval of the max generation | non-terminal | §11.1 crash/durability tests | M34 |
+| `change_applied` | `applier` | `observed` | valid `change_apply_started` for the same tuple; recomputed primary hash == `result_tree_hash` | `CHANGE_APPLIED_KEYS` (§2.3) | sha256/`_OPAQUE_ID`/`_ARTIFACT_PATH`/enum/bounded int/bool=false | after `change_apply_started`; at most one per run (E4) | NON-terminal prerequisite for `completed` | E0/E2 tests | M33, M36 |
+| `change_apply_failed` | `applier` | `observed` | `change_apply_started` in chain | `CHANGE_APPLY_FAILED_KEYS` (§2.3) | sha256/bounded enum reason/bool/bool=false | after `change_apply_started` | non-terminal | §9.5 rollback tests | — (covered by E5) |
+| `change_recovery_started` | `applier` | `observed` | kernel lock acquirable (§3.2.1) + operator acknowledgment | `CHANGE_RECOVERY_STARTED_KEYS` (§2.3) | `_OPAQUE_ID`/sha256/bounded int/enum/bool=false | only after abandonment | non-terminal | §9.5 recovery tests | — (lock authority: §3.2.1) |
+| `change_recovery_completed` | `applier` | `observed` | `change_recovery_started` in chain | `CHANGE_RECOVERY_COMPLETED_KEYS` (§2.3) | sha256/enum/bool/bool=false; outcome-dependent required hash (`restored` ⇒ `restored_tree_hash`; `completed_verified` ⇒ `result_tree_hash`) | after `change_recovery_started`; followed by `run_decision` | non-terminal | §9.5/E5 tests | — |
+| `change_recovery_required` | `applier` | `observed` | `change_apply_started` in chain + uncertain FS state | `CHANGE_RECOVERY_REQUIRED_KEYS` (§2.3) | sha256/bounded int/bool=false | keeps the chain open | non-terminal; **seal rejected** until a final `run_decision` | §9.5 no-seal-while-uncertain test | — |
+| `run_decision` | decision-specific (authority matrix above) | `derived` | `completed` ⇒ valid `change_applied` at `change_applied_sequence`; `failed` ⇒ causative apply/recovery receipt; `blocked` ⇒ causative rejection/invalidation receipt | `RUN_DECISION_KEYS_V3` decision subset (§2.3) | enum + decision-specific prerequisite + bool=false | THE ONLY terminal transition | terminal; enables seal | E0/E2 tests | M33 |
+
+**`seal` — audited separately (chain operation, not a receipt; no
+`TRANSITION_RULES` row):** performed by the seal machinery inside the broker
+process boundary (not a receipt writer role); precondition: the chain ends in
+a terminal `run_decision`; never permitted while the chain ends in
+`change_recovery_required` or any other non-terminal transition; validator
+`validate_v3_receipt_contract(sealed=True)`; tests: §9.5 seal-resume.
+
+**Audit result:** **11 governed receipt transitions audited + 1 seal
+operation audited separately.** 11/11 receipt rows carry an exact writer
+role, evidence-basis enum, precondition, payload allowlist, validator set,
+ordering rule, sealed-state rule, test reference, and named mutant where
+security-relevant; every defect class listed above is empty.
 
 ---
 
@@ -580,6 +681,7 @@ outside the primary tree**.
 <governance_state_root>/
   evidence/           # receipt chains, artifacts
   workspaces/         # isolated builder sandboxes
+  scratch/            # builder/adapter/analysis scratch per run (§8.1)
   apply-journals/     # write-ahead journals (§9)
   apply-backups/      # prior-content backups (§9.4)
   locks/              # ApplyLease records (§3.2)
@@ -648,6 +750,10 @@ absent → provisioning → ready → sealed → released → (purged)
   primary, run_id, dirty=False)` → `WorkspaceHandle` with `pinned_tree_hash`.
 - **Ready:** builder/refiners write **only** under `handle.root` (enforced by
   `GuardedPaths(handle.root)` + the typed change channel §7). Primary untouched.
+  Builder/adapter/analysis scratch is written to
+  `<governance_state_root>/scratch/<run_id>/` (§8.1), never into the
+  workspace — the sealed workspace is the exact intended resulting primary
+  tree (E14).
 - **Sealed** (`awaiting_approval`): workspace tree hash captured into the
   `ChangeSetManifest` (§8); G2A binds it (§8.3). No further workspace writes.
 - **Released** on terminal outcome; copy retained for evidence until run seal,
@@ -685,7 +791,7 @@ Receipts carry bounded fields:
 ```text
 subject_id               # _OPAQUE_ID: [A-Za-z0-9][A-Za-z0-9:._-]{0,127}  (NOT free text)
 assurance_level          # enum {none, local_unverified, verified}  (NOT a string)
-actor_artifact           # reference to the encrypted artifact (_OPAQUE_ID)
+actor_artifact           # _ARTIFACT_PATH — bounded relative path of the encrypted artifact (traversal rejected, hash-verified)
 actor_artifact_hash      # sha256:...
 authorization_policy     # _OPAQUE_ID (policy id, not free text)
 authorization_result     # enum {allowed, denied}  (NOT a string)
@@ -854,29 +960,37 @@ ChangeSetManifest
   created_at
   change_manifest_hash      # domain-separated hash of this manifest (§8.2)
 ```
-**`result_tree_hash` (Review 7, Finding 7; derivation made concrete, re-review
-Vector 7):** the broker MUST compare the recomputed post-apply primary hash to
-`result_tree_hash`. The manifest carries an explicit **exclusion list** of
-workspace-relative paths that are builder scratch/intermediates not destined for
-primary (default empty). The derivation is a concrete algorithm, not an
-assumption:
+**`result_tree_hash` (Review 7, Finding 7; v1 invariant, reconciliation
+revision):** the sealed workspace IS the exact intended resulting primary
+tree. Therefore, in v1:
+
 ```text
-result_tree_hash = H( virtual_tree =
-    primary_tree_with_operations_applied
-    — workspace_excluded_paths )
+result_tree_hash == workspace_tree_hash
 ```
-Concretely: at manifest build, compute the expected result by starting from
-`primary_tree_hash`'s tree, applying each `operations[]` entry (create/update/
-delete) with its `result_content_hash`, then excluding any `workspace_excluded`
-paths. The default `workspace_excluded = []` makes `result_tree_hash ==
-workspace_tree_hash` **only when the workspace contains exactly the primary tree
-plus the operation results** — because builders may leave scratch files in the
-workspace, the manifest builder MUST either (a) record scratch paths in
-`workspace_excluded` and use the algorithm above, or (b) ensure the workspace is
-clean of non-destined files before seal (workspace-cleaning step). A manifest
-that asserts `result_tree_hash == workspace_tree_hash` while the workspace
-contains un-excluded scratch is rejected at audit (`result_hash_derivation_invalid`).
-This removes the false-failure trap where legitimate applies would roll back.
+
+There is **no workspace-exclusion list** in v1 — builder, adapter, and
+analysis scratch MUST live outside the sealed workspace, under
+`<governance_state_root>/scratch/<run_id>/` (§4.1), so nothing ever needs to
+be "hidden" from the derivation. Scratch inside the sealed workspace is
+rejected at audit (`workspace_scratch_at_seal`). Manifest derivation is
+concrete:
+
+1. Workspace creation produces an exact copy of the pinned primary.
+2. Builder/refiner tools modify only the workspace.
+3. Scratch is written outside the workspace
+   (`<governance_state_root>/scratch/<run_id>/`).
+4. At seal, `operations[]` are derived by comparing the initial workspace
+   inventory with the final workspace inventory.
+5. `workspace_tree_hash` is computed from the final workspace.
+6. `result_tree_hash = workspace_tree_hash`.
+7. G2A audits the operation manifest and the sealed workspace hash (§8.3).
+8. After application, the recomputed primary hash must equal both hashes
+   (§9.2 step 13).
+
+A hash alone contains no inventory — the tree is never "reconstructed from
+`primary_tree_hash`". The operation manifest comes from the workspace
+inventory diff, and post-apply success is proven by recomputing the primary
+tree hash and comparing it to `result_tree_hash`.
 
 **Initial operations:** `create`, `update`, `delete`. **Defer `rename` and
 mode changes** until cross-platform semantics are fully defined — unsupported
@@ -887,7 +1001,8 @@ operation                 # create|update|delete
 path                      # UTF-8 forward-slash relative
 prior_content_hash        # per §8.2 table
 result_content_hash       # per §8.2 table
-content_artifact          # when applicable (reference to encrypted artifact)
+content_artifact          # when applicable (_ARTIFACT_PATH — bounded relative
+                          # path of the encrypted artifact, hash-verified)
 content_size
 ```
 
@@ -1173,6 +1288,10 @@ no-op because the `result_content_hash` already matches. A second
 - `test_approval_invalidated_forbidden_after_change_apply_started` (§6.2, M46).
 - `test_approval_invalidated_emits_no_journal_backup_or_recovery_evidence` (§6.2).
 - `test_governed_receipts_reject_provider_dispatch_true` (E13, M47).
+- `test_builder_scratch_outside_sealed_workspace_and_result_equals_workspace`
+  (E14, §8.1) — scratch lands in `<governance_state_root>/scratch/<run_id>/`,
+  a workspace containing scratch at seal is rejected, and
+  `result_tree_hash == workspace_tree_hash`.
 - Schema-v2 back-compat: `test_v2_chain_verifies_under_v2_rules`, `test_v2_chain_cannot_be_extended_with_v3_transitions`.
 
 ### 11.2 Named mutants (extend M31+)
@@ -1275,6 +1394,9 @@ OIDC/SAML remains Phase C.
   generations are monotonic from 1 (§2.5).
 - **E13** no governed lifecycle receipt carries `provider_dispatch=true`
   (the provider never receives an apply capability, §3).
+- **E14** `result_tree_hash == workspace_tree_hash` in v1; no scratch inside
+  the sealed workspace — builder/adapter/analysis scratch lives in
+  `<governance_state_root>/scratch/<run_id>/` (§8.1).
 
 ---
 
@@ -1313,7 +1435,7 @@ peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 ### Review 1 — Receipt schema v3 and lifecycle
 | ID | Sev | Finding | Disposition | Section | Remaining risk |
 |---|---|---|---|---|---|
-| R1.1 | High | writer_role for apply/recovery transitions unspecified | Resolved: §2.3 states a new `applier` broker role is required (not conditional), with certificate bump | §2.3 | Implementer must pin one role per transition at build time |
+| R1.1 | High | writer_role for apply/recovery transitions unspecified | Resolved: §2.3 states a new `applier` role is required (not conditional), with certificate bump (reconciliation revision: `applier` is a writer role; the broker is a process boundary, not a receipt authority identity — §2.6) | §2.3, §2.6 | Implementer must pin one role per transition at build time |
 | R1.2 | **Critical** | non-terminal approval requires rewriting `run_evidence.py:1149-1168` operator-gateway terminal logic | Resolved (updated by re-review Vector 3): §2.3 names the exact code path + the **three** coupled changes (outcome_map removal + terminal-decision rewrite + `run_evidence.py:1156-1157` outcome-compare rework) and pins the `applier` writer_role | §2.3 | Load-bearing; if missed, approval still collapses to terminal |
 | R1.3 | High | `receipt_schema_version` field invented, not in code | Resolved — (superseded by Review 7 / 7-2): **no parallel field**; the existing `schema_version` is authoritative (§2) | §2.3 | None (field abolished) |
 | R1.4 | High | v3 dispatch unspecified | Resolved: §2.3 specifies the `verify_receipt_store` branch, portable verifier path, v2/v3 coexistence by stamping | §2.3 | None |
@@ -1422,7 +1544,7 @@ the sections cited; the revised doc subsequently passed independent re-review
 | 7-4 | High | `_manifest_generation` confusion could select the wrong approved manifest | Resolved: §8.1/§8.3 — separate `change_set_id` + `change_manifest_generation`; `_manifest_generation` never selects the change manifest; `change_proposed` binds the tuple; M44 updated | §8.1, §8.3 | None |
 | 7-5 | Medium | write-based case probing mutates primary and is non-portable | Resolved: §8.2 — removed; NFC + unconditional case-fold reject; case-distinct support recorded as future feature; no-mutation test added | §8.2 | Over-rejects distinct paths on case-sensitive FS (accepted; deterministic+safe) |
 | 7-6 | **Critical** | `O_NOFOLLOW`+`os.replace` does not defeat parent-dir replacement | Resolved: §9.3 — handle/`dir_fd`-relative model (`openat`/`renameat`/`O_DIRECTORY\|O_NOFOLLOW` per component, `fstat` revalidation); honest residual + `strong_path_race_required` fail-closed policy | §9.3 | Older Python/FS without `dir_fd` → fail closed (documented) |
-| 7-7 | High | no expected final tree hash in manifest → success unverifiable | Resolved: §8.1/§8.3/§9.2 — `result_tree_hash` added; default `result==workspace`; explicit derivation otherwise; §9.2 step 13 compares to it | §8.1, §8.3, §9.2 | None |
+| 7-7 | High | no expected final tree hash in manifest → success unverifiable | Resolved: §8.1/§8.3/§9.2 — `result_tree_hash` added; §9.2 step 13 compares to it (reconciliation revision: v1 invariant `result_tree_hash == workspace_tree_hash`; arbitrary workspace exclusion removed — scratch lives outside the workspace, §8.1/E14) | §8.1, §8.3, §9.2 | None |
 | 7-8 | High | pre-apply authz denial wrongly routed to apply-failure/recovery | Resolved: §2.1/§6.2 — `approval_invalidated` transition (no journal/backup/recovery emitted); exact `APPROVAL_INVALIDATED_KEYS` schema in §6.2; binds action/change-set/subject/policy/reason | §2.1, §6.2 | None |
 | 7-9 | High | phased rollout could half-enable v3; identity consequence unstated | Resolved: §12 — dark launch: Phase A disabled plumbing (v2 unchanged); Phase B complete v3 + capability gate + **minimal signed local credential provider**; Phase C full IdP. v3 off until end-to-end gate present | §12 | None |
 
@@ -1443,7 +1565,7 @@ defects (not security holes); all are fixed in this revision:
 | 4 proposal selection via generation confusion | PREVENTS; broker max-gen un-named | Fixed: §8.3 broker rejects approval whose generation < max in `change_proposed` receipts |
 | 5 case-probe primary mutation | PREVENTS (clean) | No change needed; NFC + unconditional casefold, in-memory, no mutation |
 | 6 parent-dir replacement | PREVENTS; `AT_FDCWD` inconsistency | Fixed: §9.3 uses `fstatat(parent_fd, …)` so verification + rename share the validated handle |
-| 7 success without `result_tree_hash` | PREVENTS; derivation hand-waved | Fixed: §8.1 concrete algorithm + explicit `workspace_excluded` list; rejects `result==workspace` when scratch present |
+| 7 success without `result_tree_hash` | PREVENTS; derivation hand-waved | Fixed: §8.1 concrete derivation; final revision: exclusion removed — v1 invariant `result_tree_hash == workspace_tree_hash` with scratch outside the workspace (§8.1/E14) |
 | 8 false recovery on pre-apply authz denial | PREVENTS; precondition unstated | Fixed: §2.3 `approval_invalidated` precondition `no change_apply_started` is machine-enforced |
 | 9 partially enabled v3 in rollout | PREVENTS (Phase A triple-backstopped); Phase B gate hand-waved | Fixed: §12 concrete `v3_enabled` predicate (5 components) evaluated at run creation + `change_apply_started`; fail-closed `v3_end_to_end_gate_not_satisfied` |
 
@@ -1460,3 +1582,20 @@ closed-schema gaps (`change_proposed` absent from the §2.1 inventory with no
 field names; PID-probe residue in `CHANGE_RECOVERY_STARTED_KEYS`). All are
 fixed in this revision; the closed-schema consistency audit (§2.6) is the
 authoritative completeness check.
+
+**Contract-finalization addendum (final independent review).** A final
+independent closed-schema review then found contract-level defects the
+mechanical audit missed: prose `evidence_basis` values (only the closed enum
+`observed`/`derived`/`submitted` is permitted); an undefined `broker` writer
+role (the broker is a process boundary, not a receipt authority identity);
+`action_opened` mis-attributed to the operator gateway (it stays
+`orchestrator`/`derived`); artifact references validated as opaque IDs
+instead of `_ARTIFACT_PATH`; the arbitrary `workspace_excluded` derivation
+(replaced by the v1 invariant `result_tree_hash == workspace_tree_hash` with
+scratch under `<governance_state_root>/scratch/<run_id>/`); incomplete
+apply/recovery payloads (missing change tuples, `journal_hash`,
+`provider_dispatch`); missing exact v3 allowlists for `action_opened` /
+`action_resolved` / `run_decision`; and a `12/12` audit count that treated
+`seal` as a receipt transition. All are fixed in this revision; §2.6 is the
+authoritative audit — 11 governed receipt transitions audited + 1 seal
+operation audited separately.
