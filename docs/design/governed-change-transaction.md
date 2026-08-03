@@ -2,8 +2,13 @@
 
 **Status:** Draft for operator review. Design only — **no implementation is
 included**. Resolves blocker decisions D1–D3.
-**Branch:** `design/governed-change-transaction`, based exactly on
-`origin/main` `72e86932168f93b8c77a65b4da76b9f06008d27b`.
+**Provenance:** designed against `origin/main`
+`72e86932168f93b8c77a65b4da76b9f06008d27b` and reconciled onto `main` via
+PR #55 after PR #54 squash-merged the pre-Review-7 revision. The original
+design history (initial design, Review 7 revision, independent re-review) is
+archived on the historical branch `design/governed-change-transaction`
+(commits `5260f5e`, `03c5d8e`, `da4d9f6`); this document is the internally
+authoritative revision and does not depend on that branch.
 **Product intent:** SPEC.md §1.1, §7 Step 1. **Authoritative for implemented
 behavior:** `src/torq_cli/safety/{approval,workspace,receipts}.py`,
 `src/torq_cli/application/{orchestrator,e2e,run_command}.py`,
@@ -70,26 +75,49 @@ invalid.
 ### 2.1 Lifecycle transitions (schema v3) — `run_decision` is the ONLY terminal
 
 ```
+change_proposed             # non-terminal — proposal lifecycle transition (§2.5)
 action_opened               # non-terminal
 action_resolved             # non-terminal (even when resolution=approved)
+approval_invalidated        # non-terminal (Review 7, Finding 8) — pre-apply authz denial
 change_apply_started        # non-terminal
 change_applied              # NON-TERMINAL — mandatory verified-success prerequisite for completed
 change_apply_failed         # non-terminal evidence
 change_recovery_started     # non-terminal
 change_recovery_completed   # non-terminal
 change_recovery_required    # non-terminal — keeps the run open and unsealed
-approval_invalidated        # non-terminal (Review 7, Finding 8) — pre-apply authz denial
 run_decision                # THE ONLY terminal run transition (completed|blocked|failed)
 seal
 ```
 
 **`run_decision` is the only terminal run transition (Review 7, Finding 3).**
-`change_applied` is a mandatory, verified-success *prerequisite* for
-`run_decision(completed)` — it is not itself terminal. Recovery transitions are
-non-terminal until a final `run_decision`. `change_recovery_required` keeps the
-run open and unsealed. Lifecycle events belong in `TRANSITION_RULES`;
-`CURRENT_AUDIT_TRANSITIONS` is **not** extended with lifecycle transitions
-(audit events are added only when they are truly non-lifecycle evidence).
+Every other lifecycle transition — `change_proposed`, `action_opened`,
+`action_resolved`, `approval_invalidated`, `change_apply_started`,
+`change_applied`, `change_apply_failed`, `change_recovery_started`,
+`change_recovery_completed`, `change_recovery_required` — is **non-terminal**.
+`change_applied` is verified-success evidence and the mandatory prerequisite
+for `run_decision(completed)` — it is not itself terminal. Recovery
+transitions are non-terminal until a final `run_decision`.
+`change_recovery_required` keeps the run open and unsealed.
+
+**Proposal ordering (mandatory, §2.5):**
+
+```
+builder or repair output
+→ derive and encrypt change manifest
+→ change_proposed
+→ final G2A audit of that exact generation
+→ action_opened
+```
+
+A repair that changes output produces another `change_proposed` with the same
+`change_set_id` and an incremented `change_manifest_generation`; approval for
+the earlier generation is invalidated (§8.3).
+
+Every governed transaction lifecycle event is declared in `TRANSITION_RULES`.
+`CURRENT_AUDIT_TRANSITIONS` is changed **only** for genuinely non-lifecycle
+observed evidence; **no** lifecycle transition is accepted through the generic
+audit-event exception. The closed-schema consistency audit (§2.6) covers every
+transition above.
 
 ### 2.2 Resolution behavior
 
@@ -128,10 +156,20 @@ state is uncertain.
 The design mandates changes to (each specified at implementation time, not
 hand-waved):
 - **`TRANSITION_RULES`** — new `TransitionRule(writer_role, transition,
-  evidence_basis, precondition)` rows for each §2.1 transition. `change_applied`
-  and the recovery transitions are terminal where indicated.
-- **Audit-transition declarations** — extend the closed
-  `CURRENT_AUDIT_TRANSITIONS` set.
+  evidence_basis, precondition)` rows for each §2.1 transition (complete rows
+  in §2.6). `run_decision` is the ONLY terminal lifecycle transition;
+  `change_proposed`, `action_opened`, `action_resolved`,
+  `approval_invalidated`, `change_apply_started`, `change_applied`,
+  `change_apply_failed`, `change_recovery_started`,
+  `change_recovery_completed`, and `change_recovery_required` are all
+  **non-terminal**. `change_applied` is verified-success evidence and the
+  mandatory prerequisite for `run_decision(completed)`, not a terminal
+  transition.
+- **Lifecycle vs audit-event ownership** — every governed transaction
+  lifecycle event is declared in `TRANSITION_RULES` (the rows above).
+  `CURRENT_AUDIT_TRANSITIONS` is changed **only** for genuinely non-lifecycle
+  observed evidence; no lifecycle transition is accepted through the generic
+  audit-event exception.
 - **Payload-key allowlists** — new bounded whitelists alongside
   `ACTION_OPENED_KEYS`/`ACTION_RESOLVED_KEYS`/`RUN_DECISION_KEYS` for each new
   transition (e.g. `CHANGE_APPLIED_KEYS`).
@@ -140,9 +178,10 @@ hand-waved):
 - **Lifecycle validators** — `validate_v3_receipt_contract`: `run_decision` is
   the only terminal run transition (Review 7, Finding 3). `completed` is
   forbidden without a valid `change_applied` (a non-terminal prerequisite)
-  referencing the approved change manifest (§4-change_set). `action_resolved(
-  approved)`, `change_apply_started`, `change_applied`, `change_apply_failed`,
-  and all recovery transitions are **non-terminal**. `change_recovery_required`
+  referencing the approved change manifest (§4-change_set). `change_proposed`,
+  `action_resolved(approved)`, `approval_invalidated`,
+  `change_apply_started`, `change_applied`, `change_apply_failed`, and all
+  recovery transitions are **non-terminal**. `change_recovery_required`
   keeps the chain unsealed until a final `run_decision`.
 - **⚠ Load-bearing v2 rewrite (review R1.2; precision gaps closed in re-review
   Vector 3):** making `action_resolved(approved)` non-terminal is **not**
@@ -178,32 +217,66 @@ hand-waved):
   value (`versions[0]`), so a `2.0.0`-receipts/`3.0.0`-manifest store cannot
   mis-route to `validate_v3`.
 - **Transition preconditions (re-review Vector 8):** each new `TransitionRule`
-  carries an explicit `precondition`. In particular `approval_invalidated` /
-  `change_apply_blocked` has precondition `no change_apply_started in chain`
-  (it is forbidden once the FS transaction has begun), and `change_applied` has
-  precondition `valid change_apply_started referencing the same change manifest`.
-  These are machine-enforced by the lifecycle validator, not just prose.
+  carries an explicit `precondition` (complete rows in §2.6). In particular
+  `approval_invalidated` has precondition `action_resolved(approved) in chain
+  AND no change_apply_started in chain` — it is permitted only after
+  `action_resolved(approved)` and forbidden once the FS transaction has begun
+  (§6.2); `change_applied` has precondition `valid change_apply_started
+  referencing the same (change_set_id, change_manifest_generation,
+  change_manifest_hash) tuple`; and `change_proposed` carries the
+  generation/ordering precondition (§2.5). These are machine-enforced by the
+  lifecycle validator, not just prose.
 - **Payload-key allowlists (review R1.6) — concretely specified:** each new
   transition gets an exact `*_KEYS` frozenset (matching the codebase pattern at
-  `run_evidence.py:138-140,282-302`) and a `validate_receipt_payload` branch:
+  `run_evidence.py:138-140,282-302`) and a `validate_receipt_payload` branch.
+  Every field that identifies the governed change proposal uses the canonical
+  names `change_set_id` / `change_manifest_generation` /
+  `change_manifest_hash`; the stale generic names `manifest_hash` /
+  `manifest_generation` never appear in change payloads, and the receipt-store
+  `_manifest_generation` never appears in a change-proposal or apply payload:
+  - `CHANGE_PROPOSED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, change_manifest_artifact,
+    change_manifest_artifact_hash, workspace_tree_hash, result_tree_hash,
+    provider_dispatch}` — full definition, validators, and ordering in §2.5.
+    This frozenset replaces the orphaned `MANIFEST_SEALED_KEYS` (removed):
+    manifest sealing is proven by `change_proposed`, and the G2A binding
+    remains the final G2A receipt's work (§8.3), so no separate
+    `manifest_sealed` transition exists.
+  - `APPROVAL_INVALIDATED_KEYS = {action_id, change_set_id,
+    change_manifest_generation, change_manifest_hash, subject_id,
+    policy_version, reason, provider_dispatch}` — full definition and rules
+    in §6.2.
   - `CHANGE_APPLY_STARTED_KEYS = {journal_hash, journal_sequence,
-    manifest_hash, prior_tree_hash}`
-  - `CHANGE_APPLIED_KEYS = {manifest_hash, manifest_generation,
-    post_tree_hash, files_written, applied_subject_id, applied_assurance_level,
-    actor_artifact, actor_artifact_hash, authorization_policy,
-    authorization_result}`
-  - `CHANGE_APPLY_FAILED_KEYS = {manifest_hash, reason, recoverable}`
-  - `CHANGE_RECOVERY_STARTED_KEYS = {abandoned_run_id, abandoned_pid,
-    probe_method, operator_subject_id}` (operator-acknowledged)
+    change_set_id, change_manifest_generation, change_manifest_hash,
+    prior_tree_hash}`
+  - `CHANGE_APPLIED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, post_tree_hash, files_written, applied_subject_id,
+    applied_assurance_level, actor_artifact, actor_artifact_hash,
+    authorization_policy, authorization_result}`
+  - `CHANGE_APPLY_FAILED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, reason, recoverable}`
+  - `CHANGE_RECOVERY_STARTED_KEYS = {abandoned_run_id, change_set_id,
+    change_manifest_generation, journal_hash, lock_key, operator_subject_id,
+    recovery_reason, provider_dispatch}` (operator-acknowledged). `lock_key`
+    is the `primary_path_hash` naming the kernel lock (§3.2);
+    `recovery_reason` is a bounded enum (`abandoned_journal`,
+    `interrupted_apply`, `uncertain_fs_state`); `provider_dispatch` is false.
+    PID, executable path, and process-start data are **not** receipt fields —
+    they may be written to a separate diagnostic artifact only, and never
+    control lock ownership or recovery authorization (§3.2.1).
   - `CHANGE_RECOVERY_COMPLETED_KEYS = {outcome, restored_tree_hash,
     journal_reconciled: bool}`
-  - `CHANGE_RECOVERY_REQUIRED_KEYS = {manifest_hash, uncertain_since_sequence}`
-  - `MANIFEST_SEALED_KEYS = {manifest_hash, manifest_generation,
-    workspace_tree_hash, g2a_binding}`
+  - `CHANGE_RECOVERY_REQUIRED_KEYS = {change_set_id,
+    change_manifest_generation, change_manifest_hash,
+    uncertain_since_sequence}`
   - `VERIFIED_ACTOR_KEYS` = the §6.1 actor field set, all `_OPAQUE_ID`/enum.
+  - `provider_dispatch` (bool) MUST be false in every governed transaction
+    lifecycle receipt — the provider never receives an apply capability (§3);
+    a true value is rejected as `provider_dispatch_forbidden` (E13).
   The floor validator (`_oversized_value`, `run_evidence.py:396`) alone is
   insufficient — every transition MUST have its exact whitelist or the receipt
-  becomes a bounded-but-open signed-prose channel.
+  becomes a bounded-but-open signed-prose channel. The closed-schema
+  consistency audit (§2.6) confirms every lifecycle transition now has one.
 - **Schema-version dispatch (Review 7, Finding 2)** — `verify_receipt_store`
   (`receipts.py:1695`) branches on the **existing** receipt/manifest
   `schema_version` (`receipts.py:1721-1756`): a chain stamped `3.0.0` routes to
@@ -239,6 +312,109 @@ Schema-v2 evidence MUST remain:
 terminal manifest, recorded at chain creation and checked at verify dispatch
 (Review 7, Finding 2). Mixed-version chains are rejected
 (`version_inconsistency`, the existing finding).
+
+### 2.5 `change_proposed` — the proposal lifecycle transition
+
+`change_proposed` is a governed, **non-terminal** lifecycle transition that
+proves the change-manifest artifact was created, encrypted, hashed, and made
+immutable for its generation. It replaces any separate manifest-sealing event:
+sealing the manifest is not a distinct state-machine state, so there is **no
+`manifest_sealed` transition** (and no `MANIFEST_SEALED_KEYS`). The G2A
+binding remains the final G2A receipt's work (§8.3).
+
+**Mandatory ordering (§2.1):**
+
+```
+builder or repair output
+→ derive and encrypt change manifest
+→ change_proposed
+→ final G2A audit of that exact generation
+→ action_opened
+```
+
+**Repair:** a repair that changes output produces another `change_proposed`
+with the same `change_set_id` and an incremented
+`change_manifest_generation`; approval targeting the earlier generation is
+invalidated (§8.3).
+
+**Transition authority (`TRANSITION_RULES` row):**
+
+```
+TransitionRule(
+  writer_role="broker",        # manifest derivation runs in the trusted broker
+  transition="change_proposed",
+  evidence_basis="sealed workspace_tree_hash + recomputed
+                  change_manifest_artifact_hash",
+  precondition="change_manifest_generation == max recorded generation + 1
+                (or 1 for the first proposal of the change_set_id) AND
+                no action_opened exists for this (change_set_id,
+                change_manifest_generation)")
+```
+
+**Payload — exact closed allowlist (`CHANGE_PROPOSED_KEYS`); all fields
+mandatory, using bounded IDs, hashes, artifact paths, and integers consistent
+with the existing closed receipt-schema conventions:**
+
+```
+CHANGE_PROPOSED_KEYS = {
+  change_set_id,                 # _OPAQUE_ID — immutable per proposal lineage
+  change_manifest_generation,    # bounded positive integer, begins at 1
+  change_manifest_hash,          # sha256:… (§8.2 domain-separated)
+  change_manifest_artifact,      # _OPAQUE_ID — encrypted artifact reference
+  change_manifest_artifact_hash, # sha256:… recomputed by the broker
+  workspace_tree_hash,           # sha256:… captured at workspace seal
+  result_tree_hash,              # sha256:… expected post-apply primary hash (§8.1)
+  provider_dispatch,             # bool — MUST be false (E13)
+}
+```
+
+**Field validators (`validate_receipt_payload` branch):** `change_set_id` and
+`change_manifest_artifact` validate as `_OPAQUE_ID`
+(`run_evidence.py:64`); every `*_hash` field validates as a `sha256:` digest;
+`change_manifest_generation` validates as a bounded positive integer;
+`provider_dispatch` validates as bool with value exactly false (a true value
+is rejected as `provider_dispatch_forbidden` — the provider never receives an
+apply capability, §3).
+
+**Lifecycle-order rule:** `action_opened` is rejected unless a
+`change_proposed` referencing the exact `(change_set_id,
+change_manifest_generation, change_manifest_hash)` tuple precedes it and the
+final successful G2A audit binds that same generation (§8.3).
+
+**Sealed-state rule:** `change_proposed` is non-terminal; a chain ending in
+`change_proposed` (or any other non-terminal transition) cannot seal without a
+final `run_decision` (§2.3 terminal-state validator).
+
+**Tests / mutants:** §11.1 generation-ordering and repair tests; mutants
+**M45** (generation/ordering bypass) and **M47** (`provider_dispatch=true`
+accepted).
+
+### 2.6 Closed-schema consistency audit (reconciliation revision)
+
+Mechanical enumeration of every schema-v3 lifecycle transition. The audit
+confirms that there is **no** transition defined only in prose, **no** payload
+allowlist without a transition, **no** lifecycle transition routed through
+`CURRENT_AUDIT_TRANSITIONS`, **no** stale generic
+`manifest_hash`/`manifest_generation` field in any change payload, and **no**
+terminal transition other than `run_decision`.
+
+| Transition | TRANSITION_RULES row | Writer role | Evidence basis | Precondition | `*_KEYS` allowlist | Field validators | Lifecycle-order rule | Sealed-state rule | Test | Named mutant |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `change_proposed` | §2.5 | broker | sealed `workspace_tree_hash` + recomputed `change_manifest_artifact_hash` | generation == max+1 (or 1); no `action_opened` for the tuple | `CHANGE_PROPOSED_KEYS` (§2.5) | `_OPAQUE_ID`/sha256/bounded int/bool=false | precedes G2A audit and `action_opened` | non-terminal | §11.1 ordering/repair tests | M45, M47 |
+| `action_opened` | existing row (v2; v3 binding) | operator_gateway | approved-proposal tuple | preceding `change_proposed` + final successful G2A audit for the exact tuple | `ACTION_OPENED_KEYS` (existing; v3: `outcome_map` no longer maps approved→completed) | existing + v3 lifecycle branch | after `change_proposed` + G2A | non-terminal | E0/E2 tests | M31, M33 |
+| `action_resolved` | existing row (v2; v3 binding) | operator_gateway | `VerifiedActor` artifact reference (§6.1) | `action_opened` for the same `action_id` | `ACTION_RESOLVED_KEYS` (v3: `resolver_identity` removed; `subject_id` + `assurance_level` mandatory) | `_OPAQUE_ID` + enum (§6.1) | after `action_opened` | non-terminal even when approved | §6.1 identity tests | M31, M43 |
+| `approval_invalidated` | §6.2 | broker authorization gate | denied `can_approve` bound to `(subject_id, change_manifest_hash, policy_version)` | `action_resolved(approved)` in chain AND no `change_apply_started` | `APPROVAL_INVALIDATED_KEYS` (§6.2) | `_OPAQUE_ID`/sha256/bounded int/enum reason/bool=false | followed by terminal `run_decision(blocked\|failed)` | non-terminal; no seal from here | §6.2/§11.1 denial tests | M46 |
+| `change_apply_started` | §2.3 | applier (broker) | journal prepared + hashed (write-ahead) | `action_resolved(approved)` for the same tuple + broker authz recheck allowed + generation == max | `CHANGE_APPLY_STARTED_KEYS` (§2.3) | sha256/bounded int | only after approval of the max generation | non-terminal | §11.1 crash/durability tests | M34 |
+| `change_applied` | §2.3 | applier (broker) | recomputed post-apply primary hash == `result_tree_hash` | valid `change_apply_started` for the same tuple | `CHANGE_APPLIED_KEYS` (§2.3) | sha256/`_OPAQUE_ID`/enum/bounded int | after `change_apply_started`; at most one per run (E4) | NON-terminal prerequisite for `completed` | E0/E2 tests | M33, M36 |
+| `change_apply_failed` | §2.3 | applier (broker) | journal state + bounded reason | `change_apply_started` in chain | `CHANGE_APPLY_FAILED_KEYS` (§2.3) | bounded enum reason/bool | after `change_apply_started` | non-terminal | §9.5 rollback tests | — (covered by E5) |
+| `change_recovery_started` | §2.3 | applier (broker) | kernel lock acquirable + abandoned journal hash | lock acquirable (§3.2.1) + operator acknowledgment | `CHANGE_RECOVERY_STARTED_KEYS` (§2.3) | `_OPAQUE_ID`/sha256/bounded int/enum/bool=false | only after abandonment | non-terminal | §9.5 recovery tests | — (lock authority: §3.2.1) |
+| `change_recovery_completed` | §2.3 | applier (broker) | restored/verified tree hash + reconciled journal | `change_recovery_started` in chain | `CHANGE_RECOVERY_COMPLETED_KEYS` (§2.3) | enum/sha256/bool | after `change_recovery_started`; followed by `run_decision` | non-terminal | §9.5/E5 tests | — |
+| `change_recovery_required` | §2.3 | applier (broker) | last certain journal sequence | `change_apply_started` in chain + uncertain FS state | `CHANGE_RECOVERY_REQUIRED_KEYS` (§2.3) | sha256/bounded int | keeps the chain open | non-terminal; **seal rejected** until a final `run_decision` | §9.5 no-seal-while-uncertain test | — |
+| `run_decision` | existing row (v3 semantics) | operator_gateway (blocked/failed); applier (completed, R1.2) | decision enum + decision-specific preconditions | `completed` ⇒ valid `change_applied` referencing the approved manifest | `RUN_DECISION_KEYS` (existing) | enum + v3 prerequisite check | THE ONLY terminal transition | terminal; enables seal | E0/E2 tests | M33 |
+| `seal` | chain operation (not a receipt) | broker seal machinery | terminal `run_decision` present | chain ends in a terminal `run_decision`; never on `change_recovery_required` | — (no payload) | `validate_v3_receipt_contract(sealed=True)` | after terminal `run_decision` | closes the chain | §9.5 seal-resume tests | — |
+
+**Audit result:** 12/12 lifecycle entries carry all ten closed-schema
+components; every defect class listed above is empty.
 
 ---
 
@@ -543,12 +719,12 @@ authorization_result     # enum {allowed, denied}  (NOT a string)
 
 ### 6.2 Authorization policy
 
-`ApprovalPolicy.can_approve(actor, manifest_hash, policy_version) ->
+`ApprovalPolicy.can_approve(actor, change_manifest_hash, policy_version) ->
 AuthorizationResult{allowed: bool, reason: _OPAQUE_ID}`. Enforced at two points
 and **bound to the same tuple** (reviews 5-4): (a) the operator-gateway approval
 RPC before `action_resolved(approved)` is recorded, and (b) the broker before
 `change_apply_started` — the broker **re-runs** `can_approve(actor,
-manifest_hash, policy_version)` and aborts unless the result is `allowed` AND
+change_manifest_hash, policy_version)` and aborts unless the result is `allowed` AND
 `policy_version` equals the immutable value fixed in `GovernedRunContext` (§3.1).
 Because `policy_version` is pinned at broker startup and the manifest hash is
 load-by-generation (§8.3), the two checks see identical inputs; a role revoked
@@ -568,16 +744,34 @@ is emitted, because the filesystem transaction never began. Instead:
 ```
 action_resolved(approved)
   → broker authorization recheck denied
-  → approval_invalidated / change_apply_blocked   # §2.1 transition
+  → approval_invalidated                          # §2.1 transition
   → run_decision(blocked|failed, per policy)
   → seal
 ```
-`approval_invalidated` binds: action ID, change-set ID + generation (§4-cs),
-subject ID, policy version, bounded reason code. The four Review-7 properties
-hold: PID reuse cannot deadlock it (kernel lock not yet acquired at the denial
-point); it produces no false recovery evidence; it cannot be confused with a
-`change_apply_failed` that did begin the FS transaction; and it reaches a
-terminal `run_decision` (no stuck state).
+**Exact closed allowlist (`APPROVAL_INVALIDATED_KEYS`); all fields
+mandatory:**
+```
+APPROVAL_INVALIDATED_KEYS = {
+  action_id,                   # _OPAQUE_ID
+  change_set_id,               # _OPAQUE_ID
+  change_manifest_generation,  # bounded positive integer
+  change_manifest_hash,        # sha256:… of the denied generation
+  subject_id,                  # _OPAQUE_ID (§6.1)
+  policy_version,              # _OPAQUE_ID
+  reason,                      # bounded machine reason code (enum, NOT prose)
+  provider_dispatch,           # bool — MUST be false
+}
+```
+Rules: permitted **only after** `action_resolved(approved)`; **forbidden
+after** `change_apply_started` (machine-enforced precondition, §2.3); followed
+by terminal `run_decision(blocked)` or `run_decision(failed)` according to the
+selected policy; emits **no** journal, backup, apply-failure, or recovery
+evidence. `reason` validates as a bounded machine reason code enum — prose is
+rejected. The four Review-7 properties hold: PID reuse cannot deadlock it
+(kernel lock not yet acquired at the denial point); it produces no false
+recovery evidence; it cannot be confused with a `change_apply_failed` that did
+begin the FS transaction; and it reaches a terminal `run_decision` (no stuck
+state).
 
 **Persistent-denial after apply has begun** (review 5-5): if authorization is
 somehow denied after `change_apply_started` (defense-in-depth failure), the run
@@ -638,7 +832,8 @@ Rules (Review 7, Finding 4):
 - **Receipt-store manifest generation (`_manifest_generation`) must NEVER select
   the approved change manifest.** The two generation counters are distinct.
 - A governed `change_proposed` receipt binds the change-set ID, generation,
-  artifact path, and artifact hash.
+  artifact path, and artifact hash (exact closed schema
+  `CHANGE_PROPOSED_KEYS`, §2.5).
 - The final G2A receipt references that exact tuple.
 - `action_opened` references that exact tuple.
 - Broker application loads the artifact named by authenticated evidence and
@@ -657,7 +852,7 @@ ChangeSetManifest
   result_tree_hash          # Review 7, Finding 7 — expected post-apply primary hash
   operations[]              # canonical: sorted by path
   created_at
-  manifest_hash             # domain-separated hash (§8.2)
+  change_manifest_hash      # domain-separated hash of this manifest (§8.2)
 ```
 **`result_tree_hash` (Review 7, Finding 7; derivation made concrete, re-review
 Vector 7):** the broker MUST compare the recomputed post-apply primary hash to
@@ -718,10 +913,12 @@ content_size
   implementation.
 - **Reject duplicate operation targets.**
 - **Symlink creation/modification denied in v1** (operations are regular-file
-  bytes only) — AND enforced at apply per-target via `O_NOFOLLOW` (§9.3, review 4-5).
+  bytes only) — AND enforced at apply per-target via the handle-relative,
+  `dir_fd`-bound model (§9.3; review 4-5 superseded by Review 7 / 7-6:
+  final-component `O_NOFOLLOW` alone does not protect pathname replacement).
 - **Protected paths denied** (`GuardedPaths._PROTECTED_NAMES` + `.env.*`).
 - Canonical JSON serialization; **domain-separated hashing (review 4-1, E9) —
-  concrete construction:** `manifest_hash = "sha256:" + sha256(
+  concrete construction:** `change_manifest_hash = "sha256:" + sha256(
   b"torq-changeset-manifest-v1\0" ‖ canonical_json(manifest_without_hash)
   ).hexdigest()`. The tag `torq-changeset-manifest-v1` is distinct from the
   artifact-content hash tag (`torq-artifact-v1`) and the receipt hash domain,
@@ -821,8 +1018,6 @@ change_manifest_generation)` tuple or confusing it with `_manifest_generation`.
     (Review 7, Finding 3) — then seal.
 16. Mark/archive the journal as committed.
 17. Release the apply lease.
-
-### 9.3 Single-file replacement (within §9.2 step 10)
 
 ### 9.3 Single-file replacement (within §9.2 step 10) — path-race model (Review 7, Finding 6)
 
@@ -929,7 +1124,7 @@ neither alone. Boundaries and behavior:
   archive the journal on recovery entry.
 
 **Double-apply prevention (E4):** every operation is keyed by
-`(manifest_hash, path)` and idempotent — re-applying an already-applied op is a
+`(change_manifest_hash, path)` and idempotent — re-applying an already-applied op is a
 no-op because the `result_content_hash` already matches. A second
 `change_applied` for the same run is forbidden by the lifecycle validator.
 
@@ -973,6 +1168,11 @@ no-op because the `result_content_hash` already matches. A second
 - `test_governance_state_inside_primary_fails_closed` (§4.2).
 - `test_stray_apply_temp_cleaned_before_final_hash` (§4.3).
 - `test_double_apply_is_idempotent_per_operation` (E4 double-apply).
+- `test_change_proposed_precedes_action_opened_and_binds_exact_generation` (§2.5).
+- `test_repair_emits_new_change_proposed_with_incremented_generation` (§2.5).
+- `test_approval_invalidated_forbidden_after_change_apply_started` (§6.2, M46).
+- `test_approval_invalidated_emits_no_journal_backup_or_recovery_evidence` (§6.2).
+- `test_governed_receipts_reject_provider_dispatch_true` (E13, M47).
 - Schema-v2 back-compat: `test_v2_chain_verifies_under_v2_rules`, `test_v2_chain_cannot_be_extended_with_v3_transitions`.
 
 ### 11.2 Named mutants (extend M31+)
@@ -991,11 +1191,21 @@ no-op because the `result_content_hash` already matches. A second
 - **M41** allow a `delete` op carrying `result_content_hash` → killed by the
   per-op hash-requirement test (§8.2 table).
 - **M42** plant a symlink at the apply target between revalidation and replace
-  → killed by the `O_NOFOLLOW`/`lstat` apply test (§9.3).
+  → killed by the handle-relative apply test (`fstatat(parent_fd, …,
+  AT_SYMLINK_NOFOLLOW)` + parent-directory swap attack, §9.3).
 - **M43** a `subject_id` carrying prose/control chars accepted → killed by the
   opaque-token validator test (§6.1, proof 4).
 - **M44** broker loads the wrong manifest generation on recovery → killed by the
   generation-swap test (§8.3).
+- **M45** accept `change_proposed` with a non-monotonic
+  `change_manifest_generation`, or `action_opened` without a preceding
+  `change_proposed` for the exact tuple → killed by the §2.5
+  generation-ordering tests.
+- **M46** accept `approval_invalidated` after `change_apply_started`, or emit
+  journal/backup/recovery evidence for it → killed by the §6.2 precondition
+  and no-recovery-evidence tests.
+- **M47** accept any governed lifecycle receipt with `provider_dispatch=true`
+  → killed by the provider-dispatch sentinel test (E13).
 
 ---
 
@@ -1007,7 +1217,7 @@ and manifest derivation **behind a disabled capability flag**. **Preserve curren
 schema-v2 behavior unchanged.** **Do not expose or accept schema-v3 approval** —
 no user can create a half-supported v3 run. The v2 `approved→completed` mapping
 stays in place (do NOT remove it while no apply engine exists, Finding 9). No
-`manifest_sealed`/v3 transitions are emitted.
+`change_proposed`/v3 transitions are emitted.
 
 **Phase B — complete schema-v3 transaction.** Land schema-v3 lifecycle, broker
 apply, the **kernel-held per-primary lock** (§3.2), journal, and recovery
@@ -1060,6 +1270,11 @@ OIDC/SAML remains Phase C.
 - **E9** manifest hash domain-separated from content/artifact hashes.
 - **E10** mutable TORQ state never inside primary (containment fail-closed).
 - **E11** receipts + journal + recomputed tree must all agree for `completed`.
+- **E12** `change_proposed` precedes G2A audit and `action_opened`; repair
+  increments `change_manifest_generation` under an immutable `change_set_id`;
+  generations are monotonic from 1 (§2.5).
+- **E13** no governed lifecycle receipt carries `provider_dispatch=true`
+  (the provider never receives an apply capability, §3).
 
 ---
 
@@ -1082,11 +1297,16 @@ PR**, not folded into implementation:
 
 ---
 
-## 15. Independent review findings and dispositions
+## 15. Independent review findings and dispositions (historical record)
 
 Six independent reviews ran against this document and the `72e8693` code. Every
 finding is recorded with severity · evidence · disposition · section changed ·
-remaining risk. The two initially-blocking facets — (a) the "kernel-authenticated
+remaining risk. **This section is a historical record of each review round:
+dispositions describe the document as of that round, and several are
+superseded by Review 7 (§17), the independent re-review (§18), or the
+reconciliation closed-schema pass (§2.5/§2.6). Superseded rows carry an
+explicit note; they must not be read as the normative design, which is
+§1–§14.** The two initially-blocking facets — (a) the "kernel-authenticated
 peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 (proof 4) — are resolved in §3.2.1, §3.1.1, and §6.1.
 
@@ -1094,10 +1314,10 @@ peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 | ID | Sev | Finding | Disposition | Section | Remaining risk |
 |---|---|---|---|---|---|
 | R1.1 | High | writer_role for apply/recovery transitions unspecified | Resolved: §2.3 states a new `applier` broker role is required (not conditional), with certificate bump | §2.3 | Implementer must pin one role per transition at build time |
-| R1.2 | **Critical** | non-terminal approval requires rewriting `run_evidence.py:1149-1168` operator-gateway terminal logic | Resolved: §2.3 now names the exact code path + the two required changes (outcome_map removal + terminal-decision rewrite) | §2.3 | Load-bearing; if missed, approval still collapses to terminal |
-| R1.3 | High | `receipt_schema_version` field invented, not in code | Resolved: §2.3 states it is a new per-chain field, distinct from manifest `schema_version`, set at creation | §2.3 | Migration tooling must stamp it |
+| R1.2 | **Critical** | non-terminal approval requires rewriting `run_evidence.py:1149-1168` operator-gateway terminal logic | Resolved (updated by re-review Vector 3): §2.3 names the exact code path + the **three** coupled changes (outcome_map removal + terminal-decision rewrite + `run_evidence.py:1156-1157` outcome-compare rework) and pins the `applier` writer_role | §2.3 | Load-bearing; if missed, approval still collapses to terminal |
+| R1.3 | High | `receipt_schema_version` field invented, not in code | Resolved — (superseded by Review 7 / 7-2): **no parallel field**; the existing `schema_version` is authoritative (§2) | §2.3 | None (field abolished) |
 | R1.4 | High | v3 dispatch unspecified | Resolved: §2.3 specifies the `verify_receipt_store` branch, portable verifier path, v2/v3 coexistence by stamping | §2.3 | None |
-| R1.6 | High | all 7 new transitions lack payload whitelists | Resolved: §2.3 lists exact `*_KEYS` frozensets for every new transition + validators | §2.3 | None |
+| R1.6 | High | all 7 new transitions lack payload whitelists | Resolved: §2.3 lists exact `*_KEYS` frozensets for every new transition + validators (completed by the reconciliation revision §2.5/§2.6: `CHANGE_PROPOSED_KEYS` + `APPROVAL_INVALIDATED_KEYS` added; orphaned `MANIFEST_SEALED_KEYS` removed; stale generic manifest field names normalized) | §2.3, §2.5, §2.6 | None |
 | R1.7 | Medium | `change_recovery_required` terminality rule unspecified | Resolved: §2.3 terminal-state validator bullet | §2.3 | None |
 
 ### Review 2 — Broker/process ownership and per-primary locking
@@ -1125,28 +1345,28 @@ peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 |---|---|---|---|---|---|
 | 4-1 | High | domain-separation hand-waved | Resolved: §8.2 gives the exact tag construction `torq-changeset-manifest-v1\0…` | §8.2 | M37 pins it |
 | 4-2 | High | device-name list incomplete/typo | Resolved: §8.2 inherits `receipts.py:61-65` set + extension rule | §8.2 | None |
-| 4-3 | Medium | case-fold over-rejects / under-detects | Resolved: §8.2 — conditional on a real per-directory probe; NFC unconditional | §8.2 | Probe cost |
+| 4-3 | Medium | case-fold over-rejects / under-detects | Resolved — (superseded by Review 7 / 7-5): the write-based per-directory probe is **removed**; unconditional case-fold rejection, NFC, no primary mutation (§8.2) | §8.2 | Over-rejects case-distinct paths on case-sensitive FS (accepted; deterministic + safe) |
 | 4-4 | Medium | `result_content_hash` ambiguous per op | Resolved: §8.2 per-op requirement table + M41 | §8.2 | None |
-| 4-5 | High | apply TOCTOU vs planted symlink | Resolved: §9.3 — `lstat`+`O_NOFOLLOW` per target before replace + M42 | §9.3 | None |
+| 4-5 | High | apply TOCTOU vs planted symlink | Resolved — (superseded by Review 7 / 7-6): final-component `O_NOFOLLOW` alone is insufficient; handle-relative `dir_fd`-bound apply (§9.3) + M42 | §9.3 | Documented residual under `strong_path_race_required` (§9.3) |
 | 4-6 | Medium | manifest-swap window during repair | Resolved: §8.3 — load-by-generation, abort on hash mismatch + M44 | §8.3 | None |
 | 4-7 | Low | containment check via `resolve()` follows symlinks | Resolved: §4.2 uses `os.path.realpath` + symlink rejection | §4.2 | None |
 
 ### Review 5 — Actor identity and authorization
 | ID | Sev | Finding | Disposition | Section | Remaining risk |
 |---|---|---|---|---|---|
-| 5-1 | **Critical (blocker)** | peer-PID mechanism asserted, absent in code | Resolved: §3.2.1 + §6.1 specify concrete per-platform probes | §3.2.1, §6.1 | None |
+| 5-1 | **Critical (blocker)** | peer-PID mechanism asserted, absent in code | Resolved — (superseded by Review 7 / 7-1): the **kernel-held lock** is the sole liveness authority; PID probes removed (§3.2.1). §6.1 keeps peer-credential **RPC-caller** authentication only, never lease ownership | §3.2.1, §6.1 | None |
 | 5-2 | **Critical (blocker)** | `subject_id` unconstrained re-opens injection (proof 4) | Resolved: §6.1 pins `subject_id` to `_OPAQUE_ID`, enums for `assurance_level`/`authorization_result`, `VERIFIED_ACTOR_KEYS` + M43 | §6.1, §2.3 | None |
 | 5-3 | Medium | `local_unverified` gate not default-deny | Resolved: §6.2 default-deny rule | §6.2 | None |
-| 5-4 | High | TOCTOU between gateway and broker authz | Resolved: §6.2 — both checks bound to `(actor, manifest_hash, policy_version)` with `policy_version` pinned at startup | §6.2 | None |
+| 5-4 | High | TOCTOU between gateway and broker authz | Resolved: §6.2 — both checks bound to `(actor, change_manifest_hash, policy_version)` with `policy_version` pinned at startup | §6.2 | None |
 | 5-5 | Medium | denied authz leaves run stuck forever | Resolved: §6.2 persistent-denial terminal path | §6.2, §2.1 | None |
 | 5-6 | Low | `resolver_identity`/`subject_id` collision in migration | Resolved: §6.1 — `resolver_identity` removed in v3, replaced by `subject_id`+`assurance_level` | §6.1 | None |
 
 ### Review 6 — Adversarial final (the 8 proofs)
 | Proof | Verdict | Note |
 |---|---|---|
-| 1 approval recorded without application | PREVENTS (Phase A/B) | Phase A removes `approved→completed`; Phase B gates on `change_applied`. Live in code today until Phase A ships. |
+| 1 approval recorded without application | PREVENTS (Phase B onward) | Per Finding 9 the v2 `approved→completed` mapping **stays in place** during Phase A and is displaced when Phase B lands the complete v3 gate; live in code today until Phase B ships. |
 | 2 completion after partial application | PREVENTS | §9.5 + E11 receipt/journal/tree agreement |
-| 3 two runs concurrently apply one primary | PREVENTS | §3.2 per-primary lease (conditional on 5-1 probe) |
+| 3 two runs concurrently apply one primary | PREVENTS | §3.2/§3.2.1 kernel-held per-primary lock (5-1 probe superseded by Review 7 / 7-1) |
 | 4 actor forged through a string | PREVENTS (after 5-2 fix) | §6.1 `_OPAQUE_ID` + enum + M43; today's `resolver_identity` string is replaced |
 | 5 repaired proposal reuses older approval | PREVENTS | §8.3 manifest invalidation + load-by-generation (conditional on 4-6 fix) |
 | 6 mutable evidence pollutes primary hash | PREVENTS | §4 governance-state-outside-primary + containment fail-closed |
@@ -1160,9 +1380,12 @@ is resolved via §6.1 + §3.2.1.
 
 ## 16. Residual risks (after revisions)
 
-1. **Phase A is mandatory before any v3 approval is accepted.** Until Phase A
-   removes `approved→completed`, today's code still records approval as
-   completed (proof 1, live). The design's correctness assumes Phase A ships first.
+1. **Phase A is mandatory before any v3 approval is accepted.** Per Finding 9
+   the v2 `approved→completed` mapping stays in place through Phase A and is
+   displaced only when Phase B lands the complete v3 gate — until then,
+   today's code still records approval as completed (proof 1, live). The
+   design's correctness assumes Phase A (then Phase B) ships before any v3
+   approval is accepted.
 2. **The identity story is `local_unverified` until a real IdP lands.** §6
    codifies `local_unverified` honestly (default-denied in production), but a
    verified human actor requires the future IdP (SPEC §7 Step 3). The
@@ -1186,8 +1409,10 @@ is resolved via §6.1 + §3.2.1.
 ## 17. Review 7 — Operator architecture review (nine findings)
 
 Recorded with severity · evidence · disposition · changed section · residual
-risk. All nine are resolved in the sections cited; the revised doc is pending
-independent re-review (§18) before the PR is marked ready.
+risk. **Historical record of the Review-7 round.** All nine were resolved in
+the sections cited; the revised doc subsequently passed independent re-review
+(§18), followed by the reconciliation closed-schema consistency pass
+(§2.5/§2.6).
 
 | ID | Sev | Finding | Disposition | Section | Residual risk |
 |---|---|---|---|---|---|
@@ -1198,7 +1423,7 @@ independent re-review (§18) before the PR is marked ready.
 | 7-5 | Medium | write-based case probing mutates primary and is non-portable | Resolved: §8.2 — removed; NFC + unconditional case-fold reject; case-distinct support recorded as future feature; no-mutation test added | §8.2 | Over-rejects distinct paths on case-sensitive FS (accepted; deterministic+safe) |
 | 7-6 | **Critical** | `O_NOFOLLOW`+`os.replace` does not defeat parent-dir replacement | Resolved: §9.3 — handle/`dir_fd`-relative model (`openat`/`renameat`/`O_DIRECTORY\|O_NOFOLLOW` per component, `fstat` revalidation); honest residual + `strong_path_race_required` fail-closed policy | §9.3 | Older Python/FS without `dir_fd` → fail closed (documented) |
 | 7-7 | High | no expected final tree hash in manifest → success unverifiable | Resolved: §8.1/§8.3/§9.2 — `result_tree_hash` added; default `result==workspace`; explicit derivation otherwise; §9.2 step 13 compares to it | §8.1, §8.3, §9.2 | None |
-| 7-8 | High | pre-apply authz denial wrongly routed to apply-failure/recovery | Resolved: §2.1/§6.2 — `approval_invalidated`/`change_apply_blocked` transition (no journal/backup/recovery emitted); binds action/change-set/subject/policy/reason | §2.1, §6.2 | None |
+| 7-8 | High | pre-apply authz denial wrongly routed to apply-failure/recovery | Resolved: §2.1/§6.2 — `approval_invalidated` transition (no journal/backup/recovery emitted); exact `APPROVAL_INVALIDATED_KEYS` schema in §6.2; binds action/change-set/subject/policy/reason | §2.1, §6.2 | None |
 | 7-9 | High | phased rollout could half-enable v3; identity consequence unstated | Resolved: §12 — dark launch: Phase A disabled plumbing (v2 unchanged); Phase B complete v3 + capability gate + **minimal signed local credential provider**; Phase C full IdP. v3 off until end-to-end gate present | §12 | None |
 
 ---
@@ -1222,7 +1447,16 @@ defects (not security holes); all are fixed in this revision:
 | 8 false recovery on pre-apply authz denial | PREVENTS; precondition unstated | Fixed: §2.3 `approval_invalidated` precondition `no change_apply_started` is machine-enforced |
 | 9 partially enabled v3 in rollout | PREVENTS (Phase A triple-backstopped); Phase B gate hand-waved | Fixed: §12 concrete `v3_enabled` predicate (5 components) evaluated at run creation + `change_apply_started`; fail-closed `v3_end_to_end_gate_not_satisfied` |
 
-**Overall re-review verdict: SOUND** — all nine vectors prevented; the doc is
-now internally consistent and the Phase B gate is machine-checkable. The PR is
-marked ready for operator re-review.
+**Overall re-review verdict: SOUND** — all nine vectors prevented; the Phase B
+gate is machine-checkable. The PR is marked ready for operator re-review.
 
+**Reconciliation addendum (this revision).** A post-re-review
+content-consistency audit still found residual defects in the `da4d9f6`
+revision: one normative contradiction (§2.3 "terminal where indicated" vs
+Finding 3), stale superseded dispositions in the §15/§16 history tables, and
+closed-schema gaps (`change_proposed` absent from the §2.1 inventory with no
+`CHANGE_PROPOSED_KEYS`; `APPROVAL_INVALIDATED_KEYS` undefined; orphaned
+`MANIFEST_SEALED_KEYS`; stale generic `manifest_hash`/`manifest_generation`
+field names; PID-probe residue in `CHANGE_RECOVERY_STARTED_KEYS`). All are
+fixed in this revision; the closed-schema consistency audit (§2.6) is the
+authoritative completeness check.
