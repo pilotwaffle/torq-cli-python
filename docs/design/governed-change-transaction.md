@@ -2,8 +2,13 @@
 
 **Status:** Draft for operator review. Design only — **no implementation is
 included**. Resolves blocker decisions D1–D3.
-**Branch:** `design/governed-change-transaction`, based exactly on
-`origin/main` `72e86932168f93b8c77a65b4da76b9f06008d27b`.
+**Provenance:** designed against `origin/main`
+`72e86932168f93b8c77a65b4da76b9f06008d27b` and reconciled onto `main` via
+PR #55 after PR #54 squash-merged the pre-Review-7 revision. The original
+design history (initial design, Review 7 revision, independent re-review) is
+archived on the historical branch `design/governed-change-transaction`
+(commits `5260f5e`, `03c5d8e`, `da4d9f6`); this document is the internally
+authoritative revision and does not depend on that branch.
 **Product intent:** SPEC.md §1.1, §7 Step 1. **Authoritative for implemented
 behavior:** `src/torq_cli/safety/{approval,workspace,receipts}.py`,
 `src/torq_cli/application/{orchestrator,e2e,run_command}.py`,
@@ -21,11 +26,11 @@ behavior:** `src/torq_cli/safety/{approval,workspace,receipts}.py`,
 
 ## 0. The three events (read first)
 
-| Event | Receipt (schema v3) | Meaning | Producer |
+| Event | Receipt (schema v3) | Meaning | Producer (writer role; §2.6) |
 |---|---|---|---|
-| **approval_granted** | `action_resolved` (resolution=`approved`) | A verified actor authorized the proposal. **Nothing is written to the primary tree.** `action_resolved` is **non-terminal** for an approval. | operator gateway → broker |
-| **apply_started** | `change_apply_started` | The transaction has begun under the per-primary apply lease; journal prepared and hashed. Outcome unknown. | broker (trusted process) |
-| **change_applied** | `change_applied` | The transaction committed: every operation applied, final primary tree hash re-verified, manifest result hash matched. **This is the terminal success transition.** | broker |
+| **approval_granted** | `action_resolved` (resolution=`approved`) | A verified actor authorized the proposal. **Nothing is written to the primary tree.** `action_resolved` is **non-terminal** for an approval. | `operator_gateway` (submitted to the broker process) |
+| **apply_started** | `change_apply_started` | The transaction has begun under the per-primary apply lease; journal prepared and hashed. Outcome unknown. | `applier` (inside the broker process) |
+| **change_applied** | `change_applied` | The transaction committed: every operation applied, final primary tree hash re-verified, manifest `result_tree_hash` matched. **Non-terminal — the mandatory verified-success prerequisite for `run_decision(completed)`.** | `applier` (inside the broker process) |
 
 **Invariant E0 (approval ≠ application):** an `approval_granted` MUST NOT be
 reportable as, or imply, successful application. `completed` is forbidden
@@ -58,22 +63,61 @@ state machine in §2.
 
 ## 2. Receipt schema v3 (Decision D1)
 
-`receipt_schema_version = "3.0.0"`. **Major** because approval and
+`schema_version = "3.0.0"` — using the **existing** receipt/manifest
+`schema_version` field (Review 7, Finding 2). **No parallel
+`receipt_schema_version` is introduced.** Major version because approval and
 terminalization semantics change incompatibly: approval is no longer terminal.
+Certificate schema versions remain separate (they describe certificate
+structure, not receipt lifecycle). Verification dispatches from the existing
+receipt/manifest `schema_version`; mixed receipt versions in one chain remain
+invalid.
 
-### 2.1 Lifecycle transitions (schema v3)
+### 2.1 Lifecycle transitions (schema v3) — `run_decision` is the ONLY terminal
 
 ```
-action_opened
-action_resolved              # non-terminal when resolution=approved
-change_apply_started
-change_applied               # terminal success
-change_apply_failed
-change_recovery_started
-change_recovery_completed
-change_recovery_required     # leaves the chain unsealed until FS state is proven
-run_decision                 # terminal (completed|blocked|failed)
+change_proposed             # non-terminal — proposal lifecycle transition (§2.5)
+action_opened               # non-terminal
+action_resolved             # non-terminal (even when resolution=approved)
+approval_invalidated        # non-terminal (Review 7, Finding 8) — pre-apply authz denial
+change_apply_started        # non-terminal
+change_applied              # NON-TERMINAL — mandatory verified-success prerequisite for completed
+change_apply_failed         # non-terminal evidence
+change_recovery_started     # non-terminal
+change_recovery_completed   # non-terminal
+change_recovery_required    # non-terminal — keeps the run open and unsealed
+run_decision                # THE ONLY terminal run transition (completed|blocked|failed)
+seal
 ```
+
+**`run_decision` is the only terminal run transition (Review 7, Finding 3).**
+Every other lifecycle transition — `change_proposed`, `action_opened`,
+`action_resolved`, `approval_invalidated`, `change_apply_started`,
+`change_applied`, `change_apply_failed`, `change_recovery_started`,
+`change_recovery_completed`, `change_recovery_required` — is **non-terminal**.
+`change_applied` is verified-success evidence and the mandatory prerequisite
+for `run_decision(completed)` — it is not itself terminal. Recovery
+transitions are non-terminal until a final `run_decision`.
+`change_recovery_required` keeps the run open and unsealed.
+
+**Proposal ordering (mandatory, §2.5):**
+
+```
+builder or repair output
+→ derive and encrypt change manifest
+→ change_proposed
+→ final G2A audit of that exact generation
+→ action_opened
+```
+
+A repair that changes output produces another `change_proposed` with the same
+`change_set_id` and an incremented `change_manifest_generation`; approval for
+the earlier generation is invalidated (§8.3).
+
+Every governed transaction lifecycle event is declared in `TRANSITION_RULES`.
+`CURRENT_AUDIT_TRANSITIONS` is changed **only** for genuinely non-lifecycle
+observed evidence; **no** lifecycle transition is accepted through the generic
+audit-event exception. The closed-schema consistency audit (§2.6) covers every
+transition above.
 
 ### 2.2 Resolution behavior
 
@@ -112,78 +156,213 @@ state is uncertain.
 The design mandates changes to (each specified at implementation time, not
 hand-waved):
 - **`TRANSITION_RULES`** — new `TransitionRule(writer_role, transition,
-  evidence_basis, precondition)` rows for each §2.1 transition. `change_applied`
-  and the recovery transitions are terminal where indicated.
-- **Audit-transition declarations** — extend the closed
-  `CURRENT_AUDIT_TRANSITIONS` set.
+  evidence_basis, precondition)` rows for each §2.1 transition (complete rows
+  in §2.6). `evidence_basis` is exactly one of the closed enum values
+  `observed` / `derived` / `submitted` — never prose; the descriptive proof
+  inputs belong in the payload/precondition documentation. Writer roles and
+  bases follow the §2.6 authority matrix; there is no `broker` writer role
+  (the broker is a process boundary, not a receipt authority identity).
+  `run_decision` is the ONLY terminal lifecycle transition;
+  `change_proposed`, `action_opened`, `action_resolved`,
+  `approval_invalidated`, `change_apply_started`, `change_applied`,
+  `change_apply_failed`, `change_recovery_started`,
+  `change_recovery_completed`, and `change_recovery_required` are all
+  **non-terminal**. `change_applied` is verified-success evidence and the
+  mandatory prerequisite for `run_decision(completed)`, not a terminal
+  transition.
+- **Lifecycle vs audit-event ownership** — every governed transaction
+  lifecycle event is declared in `TRANSITION_RULES` (the rows above).
+  `CURRENT_AUDIT_TRANSITIONS` is changed **only** for genuinely non-lifecycle
+  observed evidence; no lifecycle transition is accepted through the generic
+  audit-event exception.
 - **Payload-key allowlists** — new bounded whitelists alongside
   `ACTION_OPENED_KEYS`/`ACTION_RESOLVED_KEYS`/`RUN_DECISION_KEYS` for each new
   transition (e.g. `CHANGE_APPLIED_KEYS`).
 - **Local payload validators** — `validate_receipt_payload` branches for each
   new transition's bounded fields.
-- **Lifecycle validators** — `validate_v3_receipt_contract`: `completed` is
-  forbidden without a valid `change_applied` referencing the approved manifest;
-  `action_resolved(approved)` is non-terminal; terminalization only via
-  `change_applied`/`change_apply_failed`→recovery→`run_decision`.
-- **⚠ Load-bearing v2 rewrite (review R1.2):** making `action_resolved(approved)`
-  non-terminal is **not** achievable by adding transitions alone. The v2 code at
-  `run_evidence.py:1116-1168` maps an approved action to `mapped_decision=
-  "completed"` via `action_outcomes[action_id]["approved"]` (sourced from
+- **Lifecycle validators** — `validate_v3_receipt_contract`: `run_decision` is
+  the only terminal run transition (Review 7, Finding 3). `completed` is
+  forbidden without a valid `change_applied` (a non-terminal prerequisite)
+  referencing the approved change manifest (§4-change_set). `change_proposed`,
+  `action_resolved(approved)`, `approval_invalidated`,
+  `change_apply_started`, `change_applied`, `change_apply_failed`, and all
+  recovery transitions are **non-terminal**. `change_recovery_required`
+  keeps the chain unsealed until a final `run_decision`.
+- **⚠ Load-bearing v2 rewrite (review R1.2; precision gaps closed in re-review
+  Vector 3):** making `action_resolved(approved)` non-terminal is **not**
+  achievable by adding transitions alone. The v2 code at `run_evidence.py:1116-
+  1168` maps an approved action to `mapped_decision="completed"` via
+  `action_outcomes[action_id]["approved"]` (sourced from
   `orchestrator.py:1273-1276`'s `outcome_map {"approved":"completed"}`), and the
   operator-gateway `run_decision` branch then sets `terminal_decision=True`.
-  `validate_v3_receipt_contract` MUST change two things: (i) `outcome_map` for
-  approval transitions no longer maps to `completed` (Phase A removes this), and
-  (ii) the operator-gateway `run_decision` terminal-decision logic at
-  `run_evidence.py:1149-1168` must NOT fire on an approval — `terminal_decision`
-  is set only by `change_applied`/`change_apply_failed`→recovery→terminal
-  `run_decision`. Without naming and rewriting this exact path, an implementer
-  could add all the new transitions and approval would still collapse to
-  terminal. This is the single most important v3 verifier change.
+  `validate_v3_receipt_contract` MUST change **three** coupled things in that
+  `1149-1168` window: (i) `outcome_map` for approval transitions no longer maps
+  to `completed`; (ii) the operator-gateway `run_decision` terminal-decision
+  logic must make `run_decision` — not `change_applied` — the sole terminal run
+  transition; (iii) the outcome-comparison at **`run_evidence.py:1156-1157`**
+  (`resolved_action[1] != payload.get("decision")`) must be reworked — once
+  `outcome_map` stops mapping `approved→completed`, that comparison fires
+  `operator_decision_outcome_mismatch` unless updated to the v3 non-terminal
+  approval model. Additionally, the **writer_role for v3
+  `run_decision(completed)`** must be pinned (the `applier` writer role, R1.1),
+  and the `validate_v3` branch that emits `completed` — whether operator_gateway
+  *or* the generic `run_decision` branch at `run_evidence.py:1168-1280` — MUST
+  enforce the `change_applied` prerequisite (the generic v2 branch sets
+  `terminal_decision=True` for `completed` at `:1259-1261` with no such
+  prerequisite). The seal-time `validate_v3(sealed=True)` terminal-state
+  validator (next bullet) is an independent backstop.
 - **Terminal-state validators** — enforce §2.2 ordering and the no-seal-while-
   uncertain rule: `seal()` (`receipts.py:1654` calls `validate_*_receipt_contract
-  (..., sealed=True)`) is rejected if the last non-recovery transition is
-  `change_recovery_required` or `change_apply_started`; sealing is permitted
-  only after `change_applied` or `change_recovery_completed`→terminal
-  `run_decision`.
+  (..., sealed=True)`) is rejected if the chain ends in `change_recovery_required`
+  or any non-terminal transition without a final `run_decision`; sealing is
+  permitted only after a terminal `run_decision`.
+- **Schema cross-check (re-review Vector 2):** the manifest's `schema_version`
+  MUST equal the receipts' `schema_version`; any mismatch rejects as
+  `version_inconsistency` (the existing finding). Dispatch pins to the receipts'
+  value (`versions[0]`), so a `2.0.0`-receipts/`3.0.0`-manifest store cannot
+  mis-route to `validate_v3`.
+- **Transition preconditions (re-review Vector 8):** each new `TransitionRule`
+  carries an explicit `precondition` (complete rows in §2.6). In particular
+  `approval_invalidated` has precondition `action_resolved(approved) in chain
+  AND no change_apply_started in chain` — it is permitted only after
+  `action_resolved(approved)` and forbidden once the FS transaction has begun
+  (§6.2); `change_applied` has precondition `valid change_apply_started
+  referencing the same (change_set_id, change_manifest_generation,
+  change_manifest_hash) tuple`; and `change_proposed` carries the
+  generation/ordering precondition (§2.5). These are machine-enforced by the
+  lifecycle validator, not just prose.
 - **Payload-key allowlists (review R1.6) — concretely specified:** each new
   transition gets an exact `*_KEYS` frozenset (matching the codebase pattern at
-  `run_evidence.py:138-140,282-302`) and a `validate_receipt_payload` branch:
-  - `CHANGE_APPLY_STARTED_KEYS = {journal_hash, journal_sequence,
-    manifest_hash, prior_tree_hash}`
-  - `CHANGE_APPLIED_KEYS = {manifest_hash, manifest_generation,
-    post_tree_hash, files_written, applied_subject_id, applied_assurance_level,
+  `run_evidence.py:138-140,282-302`) and a `validate_receipt_payload` branch.
+  Every field that identifies the governed change proposal uses the canonical
+  names `change_set_id` / `change_manifest_generation` /
+  `change_manifest_hash`; the stale generic names `manifest_hash` /
+  `manifest_generation` never appear in change payloads, and the receipt-store
+  `_manifest_generation` never appears in a change-proposal or apply payload.
+  Every governed transaction lifecycle receipt carries `provider_dispatch`
+  with value exactly **false** (E13; a true value is rejected as
+  `provider_dispatch_forbidden` — the provider never receives an apply
+  capability, §3). Fields referencing `ReceiptChain.write_artifact()` output
+  (`change_manifest_artifact`, `actor_artifact`) validate as `_ARTIFACT_PATH`
+  — bounded relative artifact paths with traversal rejection and artifact-hash
+  verification — never as opaque IDs:
+  - `CHANGE_PROPOSED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, change_manifest_artifact,
+    change_manifest_artifact_hash, workspace_tree_hash, result_tree_hash,
+    provider_dispatch}` — full definition, validators, and ordering in §2.5.
+    This frozenset replaces the orphaned `MANIFEST_SEALED_KEYS` (removed):
+    manifest sealing is proven by `change_proposed`, and the G2A binding
+    remains the final G2A receipt's work (§8.3), so no separate
+    `manifest_sealed` transition exists.
+  - `APPROVAL_INVALIDATED_KEYS = {action_id, change_set_id,
+    change_manifest_generation, change_manifest_hash, subject_id,
+    policy_version, reason, provider_dispatch}` — full definition and rules
+    in §6.2.
+  - `CHANGE_APPLY_STARTED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, journal_hash, journal_sequence, prior_tree_hash,
+    provider_dispatch}`
+  - `CHANGE_APPLIED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, journal_hash, prior_tree_hash, post_tree_hash,
+    operation_count, applied_subject_id, applied_assurance_level,
     actor_artifact, actor_artifact_hash, authorization_policy,
-    authorization_result}`
-  - `CHANGE_APPLY_FAILED_KEYS = {manifest_hash, reason, recoverable}`
-  - `CHANGE_RECOVERY_STARTED_KEYS = {abandoned_run_id, abandoned_pid,
-    probe_method, operator_subject_id}` (operator-acknowledged)
-  - `CHANGE_RECOVERY_COMPLETED_KEYS = {outcome, restored_tree_hash,
-    journal_reconciled: bool}`
-  - `CHANGE_RECOVERY_REQUIRED_KEYS = {manifest_hash, uncertain_since_sequence}`
-  - `MANIFEST_SEALED_KEYS = {manifest_hash, manifest_generation,
-    workspace_tree_hash, g2a_binding}`
-  - `VERIFIED_ACTOR_KEYS` = the §6.1 actor field set, all `_OPAQUE_ID`/enum.
+    authorization_result, provider_dispatch}` — bounded `operation_count`
+    plus the authenticated `journal_hash` replace any unbounded file list;
+    per-operation detail lives in the journal, not the receipt.
+  - `CHANGE_APPLY_FAILED_KEYS = {change_set_id, change_manifest_generation,
+    change_manifest_hash, journal_hash, reason, recoverable,
+    provider_dispatch}` — `reason` bounded enum; `recoverable` bool.
+  - `CHANGE_RECOVERY_STARTED_KEYS = {abandoned_run_id, change_set_id,
+    change_manifest_generation, change_manifest_hash, journal_hash, lock_key,
+    operator_subject_id, recovery_reason, provider_dispatch}`
+    (operator-acknowledged). `lock_key` is the `primary_path_hash` naming the
+    kernel lock (§3.2); `recovery_reason` is a bounded enum
+    (`abandoned_journal`, `interrupted_apply`, `uncertain_fs_state`). PID,
+    executable path, and process-start data are **not** receipt fields — they
+    may be written to a separate diagnostic artifact only, and never control
+    lock ownership or recovery authorization (§3.2.1).
+  - `CHANGE_RECOVERY_COMPLETED_KEYS = {change_set_id,
+    change_manifest_generation, change_manifest_hash, journal_hash, outcome,
+    restored_tree_hash, result_tree_hash, journal_reconciled,
+    provider_dispatch}` — `outcome` is a bounded enum with outcome-dependent
+    hash requirements: `restored` REQUIRES `restored_tree_hash` (equal to the
+    pre-apply `primary_tree_hash`) and forbids `result_tree_hash`;
+    `completed_verified` REQUIRES `result_tree_hash` (equal to the
+    `change_applied` `post_tree_hash`) and forbids `restored_tree_hash`.
+    `journal_reconciled` is bool.
+  - `CHANGE_RECOVERY_REQUIRED_KEYS = {change_set_id,
+    change_manifest_generation, change_manifest_hash, journal_hash,
+    uncertain_since_sequence, provider_dispatch}`
+  - `VERIFIED_ACTOR_KEYS` = the §6.1 actor field set, all
+    `_OPAQUE_ID`/`_ARTIFACT_PATH`/enum.
+  In every frozenset above, `provider_dispatch` MUST be exactly false.
   The floor validator (`_oversized_value`, `run_evidence.py:396`) alone is
   insufficient — every transition MUST have its exact whitelist or the receipt
-  becomes a bounded-but-open signed-prose channel.
-- **Receipt schema version dispatch (review R1.4)** — `verify_receipt_store`
-  (`receipts.py:1695`) branches on the chain's `schema_version`
-  (`receipts.py:1721-1756`): a chain stamped `3.0.0` routes to
+  becomes a bounded-but-open signed-prose channel. The closed-schema
+  consistency audit (§2.6) confirms every lifecycle transition now has one.
+- **Modified existing schemas — exact schema-v3 allowlists (not
+  descriptions):**
+  - `ACTION_OPENED_KEYS_V3 = {action_id, type, scope, target, summary,
+    allowed_resolutions, caused_by_sequence, change_set_id,
+    change_manifest_generation, change_manifest_hash,
+    change_manifest_artifact_hash, workspace_tree_hash, result_tree_hash,
+    g2a_receipt_hash, g2a_attempt_id, repair_cycle, provider_dispatch}` —
+    binds the exact approved target (§8.3 tuple + G2A binding); the approved
+    outcome no longer maps directly to `completed` (R1.2).
+  - `ACTION_RESOLVED_KEYS_V3 = {action_id, resolution, opened_sequence,
+    change_set_id, change_manifest_generation, change_manifest_hash,
+    subject_id, assurance_level, actor_artifact, actor_artifact_hash,
+    provider_dispatch}` — `resolver_identity` removed; `subject_id` +
+    `assurance_level` mandatory (§6.1).
+  - `RUN_DECISION_KEYS_V3` — decision-specific subsets:
+    - `completed`: `{decision, outcome, change_set_id,
+      change_manifest_generation, change_manifest_hash,
+      change_applied_sequence, result_tree_hash, provider_dispatch}` —
+      rejected without a valid `change_applied` at `change_applied_sequence`
+      (E2).
+    - `failed` after apply/recovery: `{decision, outcome, change_set_id,
+      change_manifest_generation, change_manifest_hash,
+      terminal_receipt_sequence, reason, provider_dispatch}` —
+      `terminal_receipt_sequence` names the causative `change_apply_failed` /
+      `change_recovery_completed` receipt; `reason` is a bounded enum.
+    - `blocked` after **direct rejection**: `{decision, outcome,
+      action_sequence, reason, provider_dispatch}` — writer
+      `operator_gateway`; `action_sequence` names the causative
+      `action_resolved(rejected)` receipt; `reason` is a bounded enum.
+    - `blocked|failed` after **approval invalidation**: `{decision, outcome,
+      change_set_id, change_manifest_generation, change_manifest_hash,
+      approval_invalidated_sequence, reason, provider_dispatch}` — writer
+      `applier` (the applier owns the causative invalidation evidence, and
+      there is no new operator submission after invalidation);
+      `approval_invalidated_sequence` names the causative
+      `approval_invalidated` receipt; the change tuple MUST match the
+      invalidated approval; `reason` is a bounded enum; `provider_dispatch`
+      is false; no apply, journal, backup, apply-failure, or recovery receipt
+      may precede this terminal path. `blocked` versus `failed` is selected by
+      policy, but both decisions are written by `applier` —
+      `operator_gateway` must not write a derived decision from an
+      applier-owned invalidation.
+- **Schema-version dispatch (Review 7, Finding 2)** — `verify_receipt_store`
+  (`receipts.py:1695`) branches on the **existing** receipt/manifest
+  `schema_version` (`receipts.py:1721-1756`): a chain stamped `3.0.0` routes to
   `validate_v3_receipt_contract`; `2.0.0` retains `validate_v2_receipt_contract`
-  unchanged. `_writer_contract_finding` (`receipts.py:117-122`) dispatches to the
-  matching payload validator. The portable/external-trust verifier path
-  (`receipts.py:1768`) gains the same branch. **`receipt_schema_version` is a
-  new per-chain field distinct from the existing manifest `schema_version`**
-  (review R1.3) — recorded in the sealed manifest head, set at chain creation,
-  immutable; mixed-version chains are rejected (`mixed_receipt_schema_version`,
-  specialized from today's `version_inconsistency` at `receipts.py:1753`). During
-  migration, v2-capable and v3-capable runs coexist by stamping their chains;
-  a v2 chain is never extended with v3 transitions.
+  unchanged. **No parallel `receipt_schema_version` field is introduced** — the
+  existing field is authoritative. `_writer_contract_finding`
+  (`receipts.py:117-122`) dispatches to the matching payload validator. The
+  portable/external-trust verifier path (`receipts.py:1768`) gains the same
+  branch. Certificate schema versions remain separate (certificate structure).
+  Mixed receipt versions in one chain remain invalid (today's
+  `version_inconsistency` at `receipts.py:1753`). During migration, v2 and v3
+  runs coexist by stamping their chains; a v2 chain is never extended with v3
+  transitions.
 - **Portable verification** — the offline verifier (`verify_receipt_store`)
   gains v3 rules; v3 receipts remain exportable and third-party-verifiable.
-- **Certificate compatibility** — if a new writer role (e.g. an `applier`
-  broker role) is introduced, the run certificate's writer-key set and
-  `_CERTIFICATE_SCHEMA_VERSION` are bumped; existing keys are preserved.
+- **Certificate compatibility — introducing `applier` is a contract change:**
+  the `applier` writer role requires ALL of: addition to `_WRITER_ROLES`; an
+  applier signing key in the run certificate; a `_CERTIFICATE_SCHEMA_VERSION`
+  bump; broker capability authorization for the role; and portable-verifier
+  support for the new role. Existing keys are preserved. There is no separate
+  `broker` writer role — the broker is a process boundary, not a receipt
+  authority identity (§2.6).
 - **Mutation coverage** — new named mutants (§11) cover each new invariant.
 - **Schema-v2 backward verification** — see §2.4.
 
@@ -197,9 +376,165 @@ Schema-v2 evidence MUST remain:
   cannot be extended with v3 apply transitions. A run that began under v2 and
   needs governed apply must be re-run under v3.
 
-`receipt_schema_version` is recorded in the sealed manifest head and checked at
-verify dispatch. Mixed-version chains are rejected
-(`mixed_receipt_schema_version`).
+`schema_version` (the existing field) is `3.0.0` for v3 receipts and their
+terminal manifest, recorded at chain creation and checked at verify dispatch
+(Review 7, Finding 2). Mixed-version chains are rejected
+(`version_inconsistency`, the existing finding).
+
+### 2.5 `change_proposed` — the proposal lifecycle transition
+
+`change_proposed` is a governed, **non-terminal** lifecycle transition that
+proves the change-manifest artifact was created, encrypted, hashed, and made
+immutable for its generation. It replaces any separate manifest-sealing event:
+sealing the manifest is not a distinct state-machine state, so there is **no
+`manifest_sealed` transition** (and no `MANIFEST_SEALED_KEYS`). The G2A
+binding remains the final G2A receipt's work (§8.3).
+
+**Mandatory ordering (§2.1):**
+
+```
+builder or repair output
+→ derive and encrypt change manifest
+→ change_proposed
+→ final G2A audit of that exact generation
+→ action_opened
+```
+
+**Repair:** a repair that changes output produces another `change_proposed`
+with the same `change_set_id` and an incremented
+`change_manifest_generation`; approval targeting the earlier generation is
+invalidated (§8.3).
+
+**Transition authority (`TRANSITION_RULES` row):**
+
+```
+TransitionRule(
+  writer_role="orchestrator",    # governed orchestrator derives the manifest
+  transition="change_proposed",
+  evidence_basis="derived",      # closed enum: observed | derived | submitted
+  precondition="change_manifest_generation == max recorded generation + 1
+                (or 1 for the first proposal of the change_set_id) AND
+                no action_opened exists for this (change_set_id,
+                change_manifest_generation)")
+```
+
+The derivation's proof inputs — the sealed `workspace_tree_hash` and the
+recomputed `change_manifest_artifact_hash` — are bound in the payload below
+and checked by the validators; they are payload/precondition facts, not
+`evidence_basis` prose. Manifest derivation runs inside the broker process
+boundary; the broker is not a receipt writer role (§2.6).
+
+**Payload — exact closed allowlist (`CHANGE_PROPOSED_KEYS`); all fields
+mandatory, using bounded IDs, hashes, artifact paths, and integers consistent
+with the existing closed receipt-schema conventions:**
+
+```
+CHANGE_PROPOSED_KEYS = {
+  change_set_id,                 # _OPAQUE_ID — immutable per proposal lineage
+  change_manifest_generation,    # bounded positive integer, begins at 1
+  change_manifest_hash,          # sha256:… (§8.2 domain-separated)
+  change_manifest_artifact,      # _ARTIFACT_PATH — encrypted artifact path
+  change_manifest_artifact_hash, # sha256:… recomputed on load
+  workspace_tree_hash,           # sha256:… captured at workspace seal
+  result_tree_hash,              # sha256:… == workspace_tree_hash in v1 (§8.1)
+  provider_dispatch,             # bool — MUST be false (E13)
+}
+```
+
+**Field validators (`validate_receipt_payload` branch):** `change_set_id`
+validates as `_OPAQUE_ID` (`run_evidence.py:64`); `change_manifest_artifact`
+validates as `_ARTIFACT_PATH` — a bounded relative artifact path with
+traversal rejection, and the stored artifact hash is verified against
+`change_manifest_artifact_hash`; every `*_hash` field validates as a
+`sha256:` digest; `change_manifest_generation` validates as a bounded
+positive integer; `provider_dispatch` validates as bool with value exactly
+false (a true value is rejected as `provider_dispatch_forbidden` — the
+provider never receives an apply capability, §3).
+
+**Lifecycle-order rule:** `action_opened` is rejected unless a
+`change_proposed` referencing the exact `(change_set_id,
+change_manifest_generation, change_manifest_hash)` tuple precedes it and the
+final successful G2A audit binds that same generation (§8.3).
+
+**Sealed-state rule:** `change_proposed` is non-terminal; a chain ending in
+`change_proposed` (or any other non-terminal transition) cannot seal without a
+final `run_decision` (§2.3 terminal-state validator).
+
+**Tests / mutants:** §11.1 generation-ordering and repair tests; mutants
+**M45** (generation/ordering bypass) and **M47** (`provider_dispatch=true`
+accepted).
+
+### 2.6 Closed-schema consistency audit (reconciliation revision)
+
+Mechanical enumeration of every schema-v3 governed **receipt** transition —
+**11 receipt transitions, audited one row at a time — plus the `seal` chain
+operation, audited separately** (`seal` is not a receipt and has no
+`TRANSITION_RULES` row). Every `evidence_basis` is the exact closed enum
+(`observed` / `derived` / `submitted`) — never prose. There is **no `broker`
+writer role**: the broker is a process boundary, not a receipt authority
+identity. The audit confirms that there is **no** transition defined only in
+prose, **no** payload allowlist without a transition, **no** lifecycle
+transition routed through `CURRENT_AUDIT_TRANSITIONS`, **no** stale generic
+`manifest_hash`/`manifest_generation` field in any change payload, and **no**
+terminal transition other than `run_decision`.
+
+**Authority matrix (writer role × evidence basis):**
+
+| Transition | Writer role | Evidence basis |
+|---|---|---|
+| `change_proposed` | `orchestrator` | `derived` |
+| `action_opened` | `orchestrator` | `derived` |
+| `action_resolved` | `operator_gateway` | `submitted` |
+| `approval_invalidated` | `applier` | `derived` |
+| `change_apply_started` | `applier` | `observed` |
+| `change_applied` | `applier` | `observed` |
+| `change_apply_failed` | `applier` | `observed` |
+| `change_recovery_started` | `applier` | `observed` |
+| `change_recovery_completed` | `applier` | `observed` |
+| `change_recovery_required` | `applier` | `observed` |
+| `run_decision(completed)` | `applier` | `derived` |
+| `run_decision(failed)` after apply/recovery | `applier` | `derived` |
+| `run_decision(blocked)` after direct rejection | `operator_gateway` | `derived` |
+| `run_decision(blocked\|failed)` after approval invalidation | `applier` | `derived` |
+
+`action_opened` stays with the `orchestrator` — the governed orchestrator
+creates the audited proposal and opens the action; `operator_gateway`
+resolves the action, it does not open it. Terminal blocked-decision authority
+is split by causation: after a **direct operator rejection**,
+`run_decision(blocked)` is written by `operator_gateway` (`derived`); after an
+**applier-owned `approval_invalidated`**, the terminal
+`run_decision(blocked|failed)` is written by `applier` (`derived`) — there is
+no new operator submission once the applier invalidates the approval, so the
+applier owns the causative evidence and the derived terminal decision;
+`operator_gateway` must not write a derived decision from an applier-owned
+invalidation. Every post-apply decision is written by `applier`.
+
+| Transition | Writer role | Evidence basis | Precondition | `*_KEYS` allowlist | Field validators | Lifecycle-order rule | Sealed-state rule | Test | Named mutant |
+|---|---|---|---|---|---|---|---|---|---|
+| `change_proposed` | `orchestrator` | `derived` | generation == max+1 (or 1); no `action_opened` for the tuple | `CHANGE_PROPOSED_KEYS` (§2.5) | `_OPAQUE_ID`/`_ARTIFACT_PATH`/sha256/bounded int/bool=false | precedes G2A audit and `action_opened` | non-terminal | §11.1 ordering/repair tests | M45, M47 |
+| `action_opened` | `orchestrator` | `derived` | preceding `change_proposed` + final successful G2A audit for the exact tuple | `ACTION_OPENED_KEYS_V3` (§2.3) | bounded ID/enum/sha256/bounded int/bool=false; approved no longer maps to `completed` | after `change_proposed` + G2A | non-terminal | E0/E2 tests | M31, M33 |
+| `action_resolved` | `operator_gateway` | `submitted` | `action_opened` for the same `action_id` | `ACTION_RESOLVED_KEYS_V3` (§2.3) | `_OPAQUE_ID`/`_ARTIFACT_PATH`/sha256/enum/bool=false | after `action_opened` | non-terminal even when approved | §6.1 identity tests | M31, M43 |
+| `approval_invalidated` | `applier` | `derived` | `action_resolved(approved)` in chain AND no `change_apply_started` | `APPROVAL_INVALIDATED_KEYS` (§6.2) | `_OPAQUE_ID`/sha256/bounded int/enum reason/bool=false | followed by terminal `run_decision(blocked\|failed)` written by `applier` | non-terminal; no seal from here | §6.2/§11.1 denial tests | M46, M48 |
+| `change_apply_started` | `applier` | `observed` | `action_resolved(approved)` for the same tuple + authz recheck allowed + generation == max + journal hashed | `CHANGE_APPLY_STARTED_KEYS` (§2.3) | sha256/bounded int/bool=false | only after approval of the max generation | non-terminal | §11.1 crash/durability tests | M34 |
+| `change_applied` | `applier` | `observed` | valid `change_apply_started` for the same tuple; recomputed primary hash == `result_tree_hash` | `CHANGE_APPLIED_KEYS` (§2.3) | sha256/`_OPAQUE_ID`/`_ARTIFACT_PATH`/enum/bounded int/bool=false | after `change_apply_started`; at most one per run (E4) | NON-terminal prerequisite for `completed` | E0/E2 tests | M33, M36 |
+| `change_apply_failed` | `applier` | `observed` | `change_apply_started` in chain | `CHANGE_APPLY_FAILED_KEYS` (§2.3) | sha256/bounded enum reason/bool/bool=false | after `change_apply_started` | non-terminal | §9.5 rollback tests | — (covered by E5) |
+| `change_recovery_started` | `applier` | `observed` | kernel lock acquirable (§3.2.1) + operator acknowledgment | `CHANGE_RECOVERY_STARTED_KEYS` (§2.3) | `_OPAQUE_ID`/sha256/bounded int/enum/bool=false | only after abandonment | non-terminal | §9.5 recovery tests | — (lock authority: §3.2.1) |
+| `change_recovery_completed` | `applier` | `observed` | `change_recovery_started` in chain | `CHANGE_RECOVERY_COMPLETED_KEYS` (§2.3) | sha256/enum/bool/bool=false; outcome-dependent required hash (`restored` ⇒ `restored_tree_hash`; `completed_verified` ⇒ `result_tree_hash`) | after `change_recovery_started`; followed by `run_decision` | non-terminal | §9.5/E5 tests | — |
+| `change_recovery_required` | `applier` | `observed` | `change_apply_started` in chain + uncertain FS state | `CHANGE_RECOVERY_REQUIRED_KEYS` (§2.3) | sha256/bounded int/bool=false | keeps the chain open | non-terminal; **seal rejected** until a final `run_decision` | §9.5 no-seal-while-uncertain test | — |
+| `run_decision` | decision-specific (authority matrix): `applier` (`completed`; `failed` after apply/recovery; `blocked\|failed` after invalidation); `operator_gateway` (`blocked` after direct rejection) | `derived` | `completed` ⇒ valid `change_applied` at `change_applied_sequence`; `failed` ⇒ causative apply/recovery receipt; `blocked` ⇒ causative `action_resolved(rejected)` (gateway path) or `approval_invalidated` (applier path, full change tuple + `approval_invalidated_sequence`) | `RUN_DECISION_KEYS_V3` decision subset (§2.3) | enum + decision-specific prerequisite + bool=false | THE ONLY terminal transition | terminal; enables seal | E0/E2 + §6.2 authority tests | M33, M48 |
+
+**`seal` — audited separately (chain operation, not a receipt; no
+`TRANSITION_RULES` row):** performed by the seal machinery inside the broker
+process boundary (not a receipt writer role); precondition: the chain ends in
+a terminal `run_decision`; never permitted while the chain ends in
+`change_recovery_required` or any other non-terminal transition; validator
+`validate_v3_receipt_contract(sealed=True)`; tests: §9.5 seal-resume.
+
+**Audit result:** **11 governed receipt transitions audited + 1 seal
+operation audited separately.** 11/11 receipt rows carry an exact writer
+role, evidence-basis enum, precondition, payload allowlist, validator set,
+ordering rule, sealed-state rule, test reference, and named mutant where
+security-relevant; every defect class listed above is empty.
 
 ---
 
@@ -254,58 +589,74 @@ immutable `GovernedRunContext`, and crosses the process boundary as a **spawn
 argument** (not an RPC parameter). No approval RPC accepts or can mutate
 `primary_root`. This is Phase-A work and is mandatory before any v3 apply.
 
-### 3.2 Per-primary apply lease (cross-process exclusion)
+### 3.2 Per-primary apply lease — kernel-held lock (Review 7, Finding 1)
 
-A process-local `RLock` is insufficient. The design uses a per-primary OS lock:
+A process-local `RLock` is insufficient, and `O_CREAT|O_EXCL` + stored-PID
+probing is **also insufficient**: a process can exit and its PID can be reused
+before the requesting broker probes (`pidfd_open`/`OpenProcess`/libproc would
+then pin the *replacement* process and a dead owner would appear live).
+
+**Authoritative exclusion is a kernel-held per-primary file lock.** The owning
+broker keeps the file descriptor / handle **open for the entire apply/recovery
+transaction**; process termination automatically releases the kernel lock.
 
 ```text
-ApplyLease
+ApplyLease (kernel-held)
   canonical_primary_path
-  primary_path_hash           # sha256(canonical primary path)
-  owning_run_id
-  owning_process_id
-  acquired_at
-  lease_version               # journal/lease schema version
+  primary_path_hash           # sha256(canonical primary path) -> lock filename
+  owning_run_id               # diagnostic only — NOT ownership authority
+  owning_process_id           # diagnostic only — NOT ownership authority
+  acquired_at                 # diagnostic only
+  lease_version               # diagnostic only
 ```
 
-Stored under `<governance_state_root>/locks/<primary_path_hash>`. Requirements:
-- **atomic exclusive acquisition** (`O_CREAT|O_EXCL`, 0600);
-- **usable across processes** (file lock, not in-memory);
-- **shared by every TORQ run targeting the same primary** (keyed by primary,
-  not run);
-- **stale-owner detection that never silently steals a live lock** — see
-  §3.2.1 for the concrete per-platform kernel liveness probe. A live owner is
-  never stolen; only an *abandoned* owner is recoverable, via explicit recovery.
-- **explicit recovery for an abandoned owner** (`change_recovery_started`
-  receipt, operator-acknowledged);
+Stored under `<governance_state_root>/locks/<primary_path_hash>`. Lock primitive:
+- **POSIX:** `fcntl` record lock (`F_SETLK` exclusive on a byte range) or
+  `flock(LOCK_EX)` on the lock fd. The fd is held open by the owning broker for
+  the whole transaction; on process exit the kernel releases it.
+- **Windows:** `LockFileEx(LOCKFILE_EXCLUSIVE_LOCK)` on the lock handle; the
+  handle is held open; on process exit the kernel releases it.
 
-### 3.2.1 Stale-owner liveness — concrete per-platform probe (reviews R2.3, 5-1)
-
-The earlier "kernel-authenticated broker peer-PID channel" was a placeholder.
-The intra-broker Pipe/authkey (`evidence_broker.py:124,164,196,233`)
-authenticates a caller *to one broker*; it cannot reach a *different* broker
-that owns the lease. Stale-owner detection therefore uses a real kernel liveness
-probe against the `owning_process_id` recorded in the lease:
-
-- **Linux:** `pidfd_open(pid)` (or fall back to `kill(pid, 0)` + `/proc/<pid>`
-  owner check). `pidfd_open` is safe against PID reuse: the fd pins the kernel
-  process identity. If `pidfd_open` succeeds, the owner is alive → do not steal.
-- **macOS:** `proc_pidpath(pid)` / `proc_listallpids` (libproc) to confirm the
-  PID still resolves to a torq broker process path; combined with the lease's
-  `acquired_at` + `owning_run_id` for attribution.
-- **Windows:** `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, pid)` +
-  `GetProcessId`+`QueryFullProcessImageName`; the handle pins identity (no PID
-  reuse while held).
-
-A lease is stealable only when the probe reports the owner **dead** AND the
-recovery is operator-acknowledged (`change_recovery_started`). The probe runs
-inside the *requesting* broker; no shared memory between brokers is required.
-PID in the lease file is **never** trusted alone (PID reuse) — the kernel
-handle/fd is the authority. This mechanism is the same one used to authenticate
-the operator-gateway RPC's calling process (§6.1.1).
+Requirements:
+- **atomic exclusive acquisition across processes** (kernel-enforced, not
+  metadata-based);
+- **shared by every TORQ run targeting the same primary** (keyed by primary);
+- **no silent steal of a live owner** — the kernel lock IS the liveness proof.
+  PID, executable path, and process-start time are **diagnostic only** and must
+  never decide ownership;
+- **never steal a lock merely because metadata looks old**;
+- **explicit recovery for an abandoned journal** — recovery begins only *after*
+  the kernel lock becomes acquirable (the prior owner process is gone). The
+  abandoned journal remains on disk for recovery regardless of the lock state;
 - **bounded lock metadata**; **no dependence on shared memory between brokers**.
 
 **The lease is NOT held during model execution.**
+
+### 3.2.1 Stale-owner — kernel lock is the authority (Review 7, Finding 1)
+
+The earlier PID-probe model (`pidfd_open`/`proc_pidpath`/`OpenProcess`) is
+**removed**. Process-identity probing cannot defeat PID reuse between exit and
+probe. Instead:
+
+- **Acquisition** is `fcntl`/`flock`/`LockFileEx`. If acquisition fails with
+  `EAGAIN`/`ERROR_LOCK_VIOLATION`, another live broker holds it → do not steal.
+- **Live owner test** = "the kernel lock is held." There is no separate probe.
+- **Abandonment** = "the kernel lock is acquirable" (the prior owning process
+  has terminated and the kernel released it). An abandoned journal may then
+  exist; recovery proceeds, operator-acknowledged (`change_recovery_started`).
+- The lock file's PID/path/start-time fields are written for *diagnosis only*
+  (logging, attribution). They are never read to decide ownership.
+
+This satisfies the four required properties:
+- PID reuse cannot make a dead owner appear live (no PID-based liveness).
+- A live broker prevents a second broker from acquiring (kernel enforces).
+- Broker termination releases the lock (kernel auto-release) **and** leaves the
+  journal for recovery (journal is on disk, independent of the lock).
+- Metadata tampering does not grant ownership (kernel lock is authoritative).
+
+The per-platform process-authentication for the *operator-gateway RPC caller*
+(§6.1.1) is a separate concern (authenticating a caller to a broker) and is not
+used for lease ownership.
 
 ### 3.3 Lifecycle (lock acquisition order — deadlock-free)
 
@@ -349,6 +700,7 @@ outside the primary tree**.
 <governance_state_root>/
   evidence/           # receipt chains, artifacts
   workspaces/         # isolated builder sandboxes
+  scratch/            # builder/adapter/analysis scratch per run (§8.1)
   apply-journals/     # write-ahead journals (§9)
   apply-backups/      # prior-content backups (§9.4)
   locks/              # ApplyLease records (§3.2)
@@ -417,6 +769,10 @@ absent → provisioning → ready → sealed → released → (purged)
   primary, run_id, dirty=False)` → `WorkspaceHandle` with `pinned_tree_hash`.
 - **Ready:** builder/refiners write **only** under `handle.root` (enforced by
   `GuardedPaths(handle.root)` + the typed change channel §7). Primary untouched.
+  Builder/adapter/analysis scratch is written to
+  `<governance_state_root>/scratch/<run_id>/` (§8.1), never into the
+  workspace — the sealed workspace is the exact intended resulting primary
+  tree (E14).
 - **Sealed** (`awaiting_approval`): workspace tree hash captured into the
   `ChangeSetManifest` (§8); G2A binds it (§8.3). No further workspace writes.
 - **Released** on terminal outcome; copy retained for evidence until run seal,
@@ -454,7 +810,7 @@ Receipts carry bounded fields:
 ```text
 subject_id               # _OPAQUE_ID: [A-Za-z0-9][A-Za-z0-9:._-]{0,127}  (NOT free text)
 assurance_level          # enum {none, local_unverified, verified}  (NOT a string)
-actor_artifact           # reference to the encrypted artifact (_OPAQUE_ID)
+actor_artifact           # _ARTIFACT_PATH — bounded relative path of the encrypted artifact (traversal rejected, hash-verified)
 actor_artifact_hash      # sha256:...
 authorization_policy     # _OPAQUE_ID (policy id, not free text)
 authorization_result     # enum {allowed, denied}  (NOT a string)
@@ -466,12 +822,14 @@ authorization_result     # enum {allowed, denied}  (NOT a string)
   `authorization_result` are enums, not strings. The §2.3 work list is extended
   with explicit `VERIFIED_ACTOR_KEYS` (the actor fields above) and per-field
   validators; mutant **M43** (a `subject_id` carrying a sentence) must be killed.
-- **Process authentication (reviews 5-1, R2.3):** the broker authenticates the
-  *calling process* — not the human — via the §3.2.1 kernel liveness/probe
-  mechanism (`SO_PEERCRED`/`LOCAL_PEERCRED`/`GetNamedPipeClientProcessId`). The
-  calling process's identity is bound to the run at first RPC; a string is never
+- **RPC-caller process authentication (distinct from lease ownership):** the
+  broker authenticates the *calling process* of the operator-gateway RPC — not
+  the human — via kernel peer-credential mechanisms on the RPC socket
+  (`SO_PEERCRED`/`LOCAL_PEERCRED`/`GetNamedPipeClientProcessId`). The calling
+  process's identity is bound to the run at first RPC; a string is never
   accepted as a process identity. The human actor comes only from the encrypted
-  `VerifiedActor` artifact.
+  `VerifiedActor` artifact. **This is separate from §3.2.1** (which governs
+  lease ownership via a kernel-held lock, not PID probing).
 - The current `resolver_identity` interface becomes a **compatibility adapter**
   producing `local_unverified` (subject_id=`operator:local-session`,
   assurance_level=`local_unverified`, method=`none`). In v3, `resolver_identity`
@@ -486,12 +844,12 @@ authorization_result     # enum {allowed, denied}  (NOT a string)
 
 ### 6.2 Authorization policy
 
-`ApprovalPolicy.can_approve(actor, manifest_hash, policy_version) ->
+`ApprovalPolicy.can_approve(actor, change_manifest_hash, policy_version) ->
 AuthorizationResult{allowed: bool, reason: _OPAQUE_ID}`. Enforced at two points
 and **bound to the same tuple** (reviews 5-4): (a) the operator-gateway approval
 RPC before `action_resolved(approved)` is recorded, and (b) the broker before
 `change_apply_started` — the broker **re-runs** `can_approve(actor,
-manifest_hash, policy_version)` and aborts unless the result is `allowed` AND
+change_manifest_hash, policy_version)` and aborts unless the result is `allowed` AND
 `policy_version` equals the immutable value fixed in `GovernedRunContext` (§3.1).
 Because `policy_version` is pinned at broker startup and the manifest hash is
 load-by-generation (§8.3), the two checks see identical inputs; a role revoked
@@ -504,12 +862,56 @@ fail-closed default pattern, e.g. `workspace.py:99` `dirty_policy="refuse"`).
 `allow_local_unverified: true` is an explicit, logged, non-default development
 knob. E3 is testable as "default policy rejects `local_unverified`."
 
-**Persistent-denial terminal path (review 5-5):** a denied authorization at the
-broker gate does not leave the run stuck non-terminal forever. The lifecycle
-(§2.1) gains: broker re-check denied → `change_apply_failed` (reason
-`authorization_denied`) → `change_recovery_completed` → `run_decision(failed)` →
-seal. Alternatively the operator may explicitly `action_resolved(rejected)`.
-Every run reaches a sealed decision; no unbounded `awaiting_approval`.
+**Pre-apply authorization denial (Review 7, Finding 8):** a denied
+authorization at the broker gate **before** `change_apply_started` is NOT an
+apply failure — no journal, backup, `change_apply_started`, or recovery receipt
+is emitted, because the filesystem transaction never began. Instead:
+```
+action_resolved(approved)
+  → broker authorization recheck denied
+  → approval_invalidated                          # §2.1 transition, writer applier
+  → run_decision(blocked|failed, per policy)      # writer applier (§2.6)
+  → seal
+```
+**Exact closed allowlist (`APPROVAL_INVALIDATED_KEYS`); all fields
+mandatory:**
+```
+APPROVAL_INVALIDATED_KEYS = {
+  action_id,                   # _OPAQUE_ID
+  change_set_id,               # _OPAQUE_ID
+  change_manifest_generation,  # bounded positive integer
+  change_manifest_hash,        # sha256:… of the denied generation
+  subject_id,                  # _OPAQUE_ID (§6.1)
+  policy_version,              # _OPAQUE_ID
+  reason,                      # bounded machine reason code (enum, NOT prose)
+  provider_dispatch,           # bool — MUST be false
+}
+```
+Rules: permitted **only after** `action_resolved(approved)`; **forbidden
+after** `change_apply_started` (machine-enforced precondition, §2.3); followed
+by terminal `run_decision(blocked)` or `run_decision(failed)` according to the
+selected policy. **Both terminal decisions are written by `applier`**
+(`evidence_basis` `derived`, §2.6): the applier owns the causative
+invalidation evidence, and there is no new operator submission after the
+invalidation — `operator_gateway` must not write a derived decision from an
+applier-owned invalidation. The terminal payload is the `RUN_DECISION_KEYS_V3`
+invalidation subset (§2.3): the full change tuple (matching the invalidated
+approval) + the causative `approval_invalidated_sequence` + bounded `reason` +
+`provider_dispatch=false`. No apply, journal, backup, apply-failure, or
+recovery receipt may precede this terminal path. `approval_invalidated` itself
+emits **no** journal, backup, apply-failure, or recovery evidence. `reason`
+validates as a bounded machine reason code enum — prose is rejected.
+
+The four Review-7 properties hold: PID reuse cannot deadlock it
+(kernel lock not yet acquired at the denial point); it produces no false
+recovery evidence; it cannot be confused with a `change_apply_failed` that did
+begin the FS transaction; and it reaches a terminal `run_decision` (no stuck
+state).
+
+**Persistent-denial after apply has begun** (review 5-5): if authorization is
+somehow denied after `change_apply_started` (defense-in-depth failure), the run
+takes the §9.5 apply-failure/recovery path → `run_decision(failed)`. Every run
+reaches a sealed decision; no unbounded `awaiting_approval`.
 
 ---
 
@@ -545,18 +947,80 @@ corrupt decoded bytes and invalidate the pinned content hashes.
 
 ## 8. Canonical manifest + audit binding
 
-### 8.1 ChangeSetManifest (versioned, explicit operations)
+### 8.1 ChangeSetManifest (versioned, explicit operations) — Review 7, Finding 4 & 7
+
+The receipt-store's `_manifest_generation` (which advances as the signed
+*evidence* manifest is rewritten) is **not** the change-set generation. A
+separate, bounded change-set identity is introduced:
+
+```text
+change_set_id              # immutable per proposal lineage
+change_manifest_generation # begins at 1; advances ONLY when builder/repair
+                           # output changes the proposed change set
+change_manifest_hash       # hash of this generation's ChangeSetManifest
+```
+
+Rules (Review 7, Finding 4):
+- `change_set_id` is immutable per proposal lineage.
+- `change_manifest_generation` begins at 1 and advances only when builder/repair
+  output changes the proposed change set.
+- **Receipt-store manifest generation (`_manifest_generation`) must NEVER select
+  the approved change manifest.** The two generation counters are distinct.
+- A governed `change_proposed` receipt binds the change-set ID, generation,
+  artifact path, and artifact hash (exact closed schema
+  `CHANGE_PROPOSED_KEYS`, §2.5).
+- The final G2A receipt references that exact tuple.
+- `action_opened` references that exact tuple.
+- Broker application loads the artifact named by authenticated evidence and
+  recomputes its hash.
+- A repaired proposal creates a new change-manifest generation and invalidates
+  any approval target for the earlier generation.
 
 ```text
 ChangeSetManifest
-  schema_version            # "1.0.0"
+  schema_version            # manifest schema "1.0.0" (distinct from receipt schema_version)
   run_id
+  change_set_id             # Review 7, Finding 4
+  change_manifest_generation
   primary_tree_hash         # pinned, captured before any write
   workspace_tree_hash       # at seal
+  result_tree_hash          # Review 7, Finding 7 — expected post-apply primary hash
   operations[]              # canonical: sorted by path
-  manifest_hash            # domain-separated hash (§8.2)
   created_at
+  change_manifest_hash      # domain-separated hash of this manifest (§8.2)
 ```
+**`result_tree_hash` (Review 7, Finding 7; v1 invariant, reconciliation
+revision):** the sealed workspace IS the exact intended resulting primary
+tree. Therefore, in v1:
+
+```text
+result_tree_hash == workspace_tree_hash
+```
+
+There is **no workspace-exclusion list** in v1 — builder, adapter, and
+analysis scratch MUST live outside the sealed workspace, under
+`<governance_state_root>/scratch/<run_id>/` (§4.1), so nothing ever needs to
+be "hidden" from the derivation. Scratch inside the sealed workspace is
+rejected at audit (`workspace_scratch_at_seal`). Manifest derivation is
+concrete:
+
+1. Workspace creation produces an exact copy of the pinned primary.
+2. Builder/refiner tools modify only the workspace.
+3. Scratch is written outside the workspace
+   (`<governance_state_root>/scratch/<run_id>/`).
+4. At seal, `operations[]` are derived by comparing the initial workspace
+   inventory with the final workspace inventory.
+5. `workspace_tree_hash` is computed from the final workspace.
+6. `result_tree_hash = workspace_tree_hash`.
+7. G2A audits the operation manifest and the sealed workspace hash (§8.3).
+8. After application, the recomputed primary hash must equal both hashes
+   (§9.2 step 13).
+
+A hash alone contains no inventory — the tree is never "reconstructed from
+`primary_tree_hash`". The operation manifest comes from the workspace
+inventory diff, and post-apply success is proven by recomputing the primary
+tree hash and comparing it to `result_tree_hash`.
+
 **Initial operations:** `create`, `update`, `delete`. **Defer `rename` and
 mode changes** until cross-platform semantics are fully defined — unsupported
 operations fail closed.
@@ -564,9 +1028,10 @@ Each operation:
 ```text
 operation                 # create|update|delete
 path                      # UTF-8 forward-slash relative
-prior_content_hash        # when applicable
-result_content_hash       # when applicable
-content_artifact          # when applicable (reference to encrypted artifact)
+prior_content_hash        # per §8.2 table
+result_content_hash       # per §8.2 table
+content_artifact          # when applicable (_ARTIFACT_PATH — bounded relative
+                          # path of the encrypted artifact, hash-verified)
 content_size
 ```
 
@@ -579,21 +1044,25 @@ content_size
   {lpt1..lpt9}` — with the **extension rule**: strip the final `.`-suffix, then
   casefold-compare the stem to the device set (so `CON.txt`, `NUL.log` are
   rejected). (The earlier "CON, PRS, NUL" was a typo for PRN and incomplete.)
-- **Reject Unicode-normalization collisions** — NFC-normalize before compare
-  (unconditional; correct on all filesystems).
-- **Reject case-fold collisions (review 4-3):** case-fold compare is
-  **conditional on a real per-directory probe** (Python stdlib cannot portably
-  report case sensitivity): at apply time, create a probe file and attempt to
-  stat a case-flipped name; cache the result per-directory. On case-sensitive
-  filesystems (ext4) the probe reports sensitive → do NOT case-fold (so
-  distinct `Foo.py`/`foo.py` are not over-rejected); on case-insensitive
-  volumes (default APFS, NTFS) → case-fold compare.
+- **Reject Unicode-normalization collisions** — NFC-normalize every path.
+- **Reject case-fold collisions unconditionally (Review 7, Finding 5):** across
+  the entire change manifest, case-fold-compare normalized paths and reject any
+  collision. **No write-based case probing inside the protected primary tree**
+  — the earlier per-directory probe (create-a-file-and-stat) mutated primary
+  and was non-portable. The unconditional rule may over-reject legitimately
+  distinct `Foo.py` and `foo.py` on a case-sensitive filesystem, but it is
+  deterministic, portable, and safe. Add a test proving path validation
+  performs **no primary mutation**. Case-distinct path support is recorded as a
+  **future feature** requiring a non-mutating filesystem-capability
+  implementation.
 - **Reject duplicate operation targets.**
 - **Symlink creation/modification denied in v1** (operations are regular-file
-  bytes only) — AND enforced at apply per-target via `O_NOFOLLOW` (§9.3, review 4-5).
+  bytes only) — AND enforced at apply per-target via the handle-relative,
+  `dir_fd`-bound model (§9.3; review 4-5 superseded by Review 7 / 7-6:
+  final-component `O_NOFOLLOW` alone does not protect pathname replacement).
 - **Protected paths denied** (`GuardedPaths._PROTECTED_NAMES` + `.env.*`).
 - Canonical JSON serialization; **domain-separated hashing (review 4-1, E9) —
-  concrete construction:** `manifest_hash = "sha256:" + sha256(
+  concrete construction:** `change_manifest_hash = "sha256:" + sha256(
   b"torq-changeset-manifest-v1\0" ‖ canonical_json(manifest_without_hash)
   ).hexdigest()`. The tag `torq-changeset-manifest-v1` is distinct from the
   artifact-content hash tag (`torq-artifact-v1`) and the receipt hash domain,
@@ -618,9 +1087,12 @@ content_size
 
 The final successful G2A audit binds:
 ```text
-manifest_hash
-manifest_artifact_hash
+change_set_id              # Review 7, Finding 4
+change_manifest_generation
+change_manifest_hash
+change_manifest_artifact_hash
 workspace_tree_hash
+result_tree_hash           # Review 7, Finding 7
 g2a_receipt_hash
 g2a_attempt_id
 repair_cycle
@@ -638,15 +1110,24 @@ operator-facing approval summary displays the same manifest identifier the
 broker later loads — so the operator approves what the broker applies. This
 closes the "repaired proposal reuses an older approval" attack.
 
-**Manifest-swap defense (review 4-6):** the approval assertion artifact embeds
-`manifest_hash` AND `manifest_generation`. The broker loads the manifest **by
-generation** (the signed manifest anchor's monotonic `_manifest_generation`,
-`receipts.py:1070-1085,1087-1113` is the single source of "which generation is
-current") and **aborts** if its recomputed hash ≠ the approved `manifest_hash`.
-The signed anchor — not "whichever manifest artifact the broker finds on disk" —
-is authoritative. This closes the window where two valid manifests exist during
-a repair and approval could be re-pointed. Mutant **M38** covers reduction
-tamper; a generation-swap mutant (**M44**) covers loading the wrong generation.
+**Manifest-swap defense (Review 7, Finding 4; supersedes review 4-6):** the
+approval assertion artifact embeds `(change_set_id, change_manifest_generation,
+change_manifest_hash)` — the change-set identity, NOT the receipt-store
+`_manifest_generation`. The broker loads the change-manifest artifact named by
+the `change_proposed` receipt for that exact `(change_set_id,
+change_manifest_generation)` tuple and **aborts** if its recomputed hash ≠ the
+approved `change_manifest_hash`. The receipt-store `_manifest_generation` is
+**never** used to select the approved change manifest (Finding 4). A repaired
+proposal creates a new `change_manifest_generation` under the same
+`change_set_id` and invalidates approval for the earlier generation.
+**Broker-side latest-generation enforcement (re-review Vector 4):** at apply,
+the broker rejects any approval whose `change_manifest_generation` is not the
+maximum generation recorded in `change_proposed` receipts for that
+`change_set_id` — closing the repair-after-approval race (gen-1 approved, then
+repair creates gen-2): a stale-but-internally-consistent gen-1 artifact cannot
+be applied because its generation < max. Mutant **M38** covers reduction
+tamper; mutant **M44** (updated) covers loading the wrong `(change_set_id,
+change_manifest_generation)` tuple or confusing it with `_manifest_generation`.
 
 ---
 
@@ -674,38 +1155,69 @@ tamper; a generation-swap mutant (**M44**) covers loading the wrong generation.
 10. Perform operations one at a time, with journal progress updates after each.
 11. Flush file and directory metadata where supported (fsync files + parent dirs).
 12. Recompute the resulting primary tree hash (after stray-temp cleanup, §4.3).
-13. Compare to the manifest's expected result hash.
-14. Append `change_applied`.
-15. Append terminal `run_decision(decision=completed)` and seal.
+13. Compare to the manifest's `result_tree_hash` (Review 7, Finding 7). Mismatch
+    → rollback (§9.5) → `change_apply_failed` → recovery → `run_decision(failed)`.
+14. Append `change_applied` (NON-terminal — verified-success prerequisite).
+15. Append `run_decision(decision=completed)` — the ONLY terminal transition
+    (Review 7, Finding 3) — then seal.
 16. Mark/archive the journal as committed.
 17. Release the apply lease.
 
-### 9.3 Single-file replacement (within §9.2 step 10)
+### 9.3 Single-file replacement (within §9.2 step 10) — path-race model (Review 7, Finding 6)
 
-For each `update`/`create`:
-1. **Resolve target via `GuardedPaths`** and verify with `lstat` it is a regular
-   file with `st_nlink==1` — **immediately before** the rename (review 4-5). Use
-   `os.open(target, O_NOFOLLOW)` (the receipt writer already does this at
-   `receipts.py:208-210`; reuse it). This defends against a symlink planted at
-   the target between lease+hash-revalidation (§9.2 step 3/6) and apply —
-   `os.replace` onto an `O_NOFOLLOW`-opened regular file cannot follow an
-   attacker symlink out of the tree.
-2. Write reserved temp (`.torq-apply-<run_id>-<nonce>.tmp`) in target's parent
-   dir (§4.3), with `O_NOFOLLOW|O_CREAT|O_EXCL`.
+**⚠ The earlier claim that `O_NOFOLLOW` on the target makes a later
+pathname-based `os.replace` safe is RETRACTED (Finding 6).** The opened
+descriptor is not used by `os.replace`, and parent path components may change
+after validation. The design now uses a handle/directory-fd-relative model:
+
+**POSIX (preferred, Review 7 Finding 6):**
+1. **Open the primary root directory once** (`open(primary, O_DIRECTORY|O_NOFOLLOW)`).
+2. **Traverse to each target's parent with handle-relative operations** using
+   `O_DIRECTORY | O_NOFOLLOW` at each component (`openat`, `fstatat`,
+   `O_NOFOLLOW` on every component denies symlink traversal mid-path).
+3. Use **`dir_fd`-relative `open`, `unlink`, and rename** (`renameat2`/
+   `os.rename` with `src_dir_fd`/`dst_dir_fd`) where Python and the platform
+   support them, so operations are bound to the validated directory handle, not
+   a re-resolved pathname.
+4. **Revalidate directory identity before and after each operation** (`fstat`
+   the dir fd; compare `st_dev`/`st_ino`).
+
+**Windows:**
+- Handle-based directory and target validation using reparse-point-safe flags
+  (`FILE_FLAG_BACKUP_SEMANTICS` for dirs, `FILE_FLAG_OPEN_REPARSE_POINT` to
+  detect—not follow—reparse points), then a replacement API whose destination is
+  bound to the validated handle model (`ReplaceFile`/`MoveFileEx` with the
+  validated handle-derived path).
+
+**Honest residual (Finding 6):** where the standard library cannot provide
+equivalent protection (e.g. older Python without `dir_fd` support, or a
+filesystem that does not provide `renameat2`), the design states the residual
+threat honestly and **fails closed under a policy requiring strong path-race
+resistance** (`strong_path_race_required`). It does **not** claim the
+final-component `O_NOFOLLOW` check eliminates malicious concurrent
+parent-directory replacement. A test (or explicit platform limitation) covers
+parent-directory swap attacks, not only a final-target symlink.
+
+**Within that model**, for each `update`/`create`:
+1. Resolve target's parent via the handle-relative traversal above; verify the
+   target with `fstatat(parent_fd, target, …, AT_SYMLINK_NOFOLLOW)` (re-review
+   Vector 6 — use the validated `parent_fd`, NOT `AT_FDCWD`, so verification and
+   the rename share the same validated handle and a symlink planted at the
+   target is caught) as a regular file `st_nlink==1` immediately before the
+   rename.
+2. Write reserved temp (`.torq-apply-<run_id>-<nonce>.tmp`) in the validated
+   parent dir (§4.3), with `O_NOFOLLOW|O_CREAT|O_EXCL` (`openat`).
 3. **Write-ahead ordering (review R3.1):** record `{op, path, sha256, sequence}`
-   in the journal **and fsync the journal BEFORE** `os.replace` — not after.
-   This eliminates the mid-fsync window where the journal is stale relative to
-   the bytes: on recovery, either the journal has the op (so replay knows it may
-   be applied — verify by hash) or it does not (so the bytes were never
-   replaced). The discriminator R3.1 asked for is "journal precedes rename."
+   in the journal **and fsync the journal BEFORE** the rename. Recovery
+   discriminator: "journal precedes rename."
 4. fsync temp + parent (reuse `_fsync_directory`, `receipts.py:151-194`, with
    its Windows error-code tolerance 1/5/87 — review R3.3; do NOT reimplement).
-5. `os.replace(temp, target)`.
+5. `renameat(temp_fd, target_fd)` (or `os.rename` with `*_dir_fd`).
 6. fsync target + parent (again via `_fsync_directory`).
 
-For a `delete`: `lstat`+`O_NOFOLLOW` verify, backup bytes (§9.4), journal
+For a `delete`: handle-relative `fstatat` verify, backup bytes (§9.4), journal
 write-ahead (`{op:"delete", path, prior_sha256, sequence}`), fsync journal,
-`os.unlink(target)`, fsync parent. Rollback restores bytes for `update`/`delete`
+`unlinkat(target)`, fsync parent. Rollback restores bytes for `update`/`delete`
 and `unlink`s for `create` (per the §8.2 table).
 
 ### 9.4 Backups (review R3.5)
@@ -756,7 +1268,7 @@ neither alone. Boundaries and behavior:
   archive the journal on recovery entry.
 
 **Double-apply prevention (E4):** every operation is keyed by
-`(manifest_hash, path)` and idempotent — re-applying an already-applied op is a
+`(change_manifest_hash, path)` and idempotent — re-applying an already-applied op is a
 no-op because the `result_content_hash` already matches. A second
 `change_applied` for the same run is forbidden by the lifecycle validator.
 
@@ -772,9 +1284,12 @@ no-op because the `result_content_hash` already matches. A second
   `O_BINARY` fidelity (covered by mutant M23); a new mutant covers the apply
   fsync (§11).
 - File modes: advisory on Windows, enforced on POSIX (existing pattern).
-- PID in lock/lease: advisory only; never used to decide a process is dead (PID
-  reuse). Stale-owner detection uses the kernel-authenticated broker peer-PID
-  channel (§6.1), not PID liveness.
+- PID/path/start-time in the lease file: **diagnostic only** — never used to
+  decide ownership or process liveness (PID reuse). Stale-owner detection uses
+  the **kernel-held per-primary lock** (§3.2.1): "the lock is held" is the sole
+  liveness authority. The operator-gateway RPC-caller peer-PID channel (§6.1)
+  authenticates a caller *to one broker* and is **never** used for lease
+  ownership.
 - Path separators: manifest paths POSIX; resolved via `PurePath.as_posix()`.
 
 ---
@@ -797,6 +1312,19 @@ no-op because the `result_content_hash` already matches. A second
 - `test_governance_state_inside_primary_fails_closed` (§4.2).
 - `test_stray_apply_temp_cleaned_before_final_hash` (§4.3).
 - `test_double_apply_is_idempotent_per_operation` (E4 double-apply).
+- `test_change_proposed_precedes_action_opened_and_binds_exact_generation` (§2.5).
+- `test_repair_emits_new_change_proposed_with_incremented_generation` (§2.5).
+- `test_approval_invalidated_forbidden_after_change_apply_started` (§6.2, M46).
+- `test_approval_invalidated_emits_no_journal_backup_or_recovery_evidence` (§6.2).
+- `test_approval_invalidated_terminal_decision_is_applier_owned` (§6.2, M48) —
+  rejects: `operator_gateway`/`run_decision(blocked)` caused by
+  `approval_invalidated`; an applier decision missing the full change tuple;
+  and a decision referencing the wrong `approval_invalidated_sequence`.
+- `test_governed_receipts_reject_provider_dispatch_true` (E13, M47).
+- `test_builder_scratch_outside_sealed_workspace_and_result_equals_workspace`
+  (E14, §8.1) — scratch lands in `<governance_state_root>/scratch/<run_id>/`,
+  a workspace containing scratch at seal is rejected, and
+  `result_tree_hash == workspace_tree_hash`.
 - Schema-v2 back-compat: `test_v2_chain_verifies_under_v2_rules`, `test_v2_chain_cannot_be_extended_with_v3_transitions`.
 
 ### 11.2 Named mutants (extend M31+)
@@ -815,36 +1343,75 @@ no-op because the `result_content_hash` already matches. A second
 - **M41** allow a `delete` op carrying `result_content_hash` → killed by the
   per-op hash-requirement test (§8.2 table).
 - **M42** plant a symlink at the apply target between revalidation and replace
-  → killed by the `O_NOFOLLOW`/`lstat` apply test (§9.3).
+  → killed by the handle-relative apply test (`fstatat(parent_fd, …,
+  AT_SYMLINK_NOFOLLOW)` + parent-directory swap attack, §9.3).
 - **M43** a `subject_id` carrying prose/control chars accepted → killed by the
   opaque-token validator test (§6.1, proof 4).
 - **M44** broker loads the wrong manifest generation on recovery → killed by the
   generation-swap test (§8.3).
+- **M45** accept `change_proposed` with a non-monotonic
+  `change_manifest_generation`, or `action_opened` without a preceding
+  `change_proposed` for the exact tuple → killed by the §2.5
+  generation-ordering tests.
+- **M46** accept `approval_invalidated` after `change_apply_started`, or emit
+  journal/backup/recovery evidence for it → killed by the §6.2 precondition
+  and no-recovery-evidence tests.
+- **M47** accept any governed lifecycle receipt with `provider_dispatch=true`
+  → killed by the provider-dispatch sentinel test (E13).
+- **M48** swap the invalidation terminal writer back to `operator_gateway`
+  (accept `operator_gateway`/`run_decision(blocked|failed)` after
+  `approval_invalidated`) → killed **semantically** by
+  `test_approval_invalidated_terminal_decision_is_applier_owned`: the test
+  asserts the writer-role/authority contract of the terminal decision, not
+  just receipt acceptance, so the swap is caught even though the payload
+  shape is unchanged (§6.2, §2.6).
 
 ---
 
-## 12. Phased migration
+## 12. Phased migration (Review 7, Finding 9 — dark launch)
 
-**Phase A — Plumbing (no apply).** `primary` + `GovernedRunContext` threaded
-through broker; `governance_state_root` with containment fail-closed; typed
-change-artifact channel for one provider; `ChangeSetManifest` built and sealed
-(without apply). `awaiting_approval` emits the manifest hash. No
-`change_applied`; `completed`-on-approval mapping **removed** in the same phase
-(approval yields a non-terminal `action_resolved(approved)` awaiting apply —
-Phase A runs therefore cannot reach `completed`, which is honest: apply isn't
-implemented yet). This avoids shipping a `manifest_sealed` that promises
-application it can't deliver.
+**Phase A — disabled plumbing (dark).** Add `governance_state_root` + run-context
+plumbing (`primary`, `GovernedRunContext`), the typed change-artifact channel,
+and manifest derivation **behind a disabled capability flag**. **Preserve current
+schema-v2 behavior unchanged.** **Do not expose or accept schema-v3 approval** —
+no user can create a half-supported v3 run. The v2 `approved→completed` mapping
+stays in place (do NOT remove it while no apply engine exists, Finding 9). No
+`change_proposed`/v3 transitions are emitted.
 
-**Phase B — The transaction (core).** Schema v3 lifecycle; broker apply; per-
-primary lease; journal + recovery; receipts; mutants M31–M40. `completed`
-restored, gated on `change_applied`.
+**Phase B — complete schema-v3 transaction.** Land schema-v3 lifecycle, broker
+apply, the **kernel-held per-primary lock** (§3.2), journal, and recovery
+**together** as one end-to-end unit. **Capability gate (concrete predicate,
+re-review Vector 9):** v3 is enabled only when this predicate is true,
+evaluated at run creation *and* re-checked at `change_apply_started`:
+```text
+v3_enabled =
+    kernel_lock_available              # §3.2 fcntl/flock/LockFileEx adapter present
+  AND journal_recovery_implemented     # §9 write-ahead journal + recovery
+  AND verified_actor_provider_present  # minimal signed local credential (below)
+  AND dir_fd_relative_apply_supported  # §9.3 *at/dir_fd apply on this platform
+  AND v3_lifecycle_validator_present   # validate_v3_receipt_contract (§2.3)
+```
+Enforcement: v3 chain stamping and every v3 transition are **unreachable**
+unless `v3_enabled` is true (the `applier` writer role is not certified, the v3
+`TransitionRule` rows are inert, and the schema-3.0.0 dispatch path refuses).
+If any component is missing, the run fails closed
+(`v3_end_to_end_gate_not_satisfied`) and falls back to v2 behavior. v3 is off
+by default. `completed` is gated on `change_applied`. **Minimal verified actor
+(Finding 9):** include a **minimal signed local/operator credential provider**
+in Phase B so production policy can require `assurance_level >= verified` —
+without it, v3 apply is development-only. Mutants M31–M44. Keep v2 verification
+read-only. **Do not permit new v2 governed mutation runs once v3 is
+production-ready**, unless explicitly supported as legacy behavior.
 
-**Phase C — Hardening.** Dirty-primary policy; workspace purge cadence;
-additional provider adapters for the typed channel; verified-actor IdP (§6)
-beyond `local_unverified`.
+**Phase C — production identity & hardening.** Full IdP (OIDC/SAML) per SPEC §7
+Step 3, replacing the Phase-B minimal local credential provider. Dirty-primary
+policy; workspace purge cadence; additional provider adapters for the typed
+channel.
 
-Identity (full RBAC/OIDC, SPEC §7 Step 3) layers on the §6 seam and is out of
-scope here.
+**Consequence made explicit (Finding 9):** until a verified actor provider
+exists, v3 apply is development-only. Phase B includes the minimal signed
+local/operator credential provider so this is not "development-only forever";
+OIDC/SAML remains Phase C.
 
 ---
 
@@ -862,6 +1429,14 @@ scope here.
 - **E9** manifest hash domain-separated from content/artifact hashes.
 - **E10** mutable TORQ state never inside primary (containment fail-closed).
 - **E11** receipts + journal + recomputed tree must all agree for `completed`.
+- **E12** `change_proposed` precedes G2A audit and `action_opened`; repair
+  increments `change_manifest_generation` under an immutable `change_set_id`;
+  generations are monotonic from 1 (§2.5).
+- **E13** no governed lifecycle receipt carries `provider_dispatch=true`
+  (the provider never receives an apply capability, §3).
+- **E14** `result_tree_hash == workspace_tree_hash` in v1; no scratch inside
+  the sealed workspace — builder/adapter/analysis scratch lives in
+  `<governance_state_root>/scratch/<run_id>/` (§8.1).
 
 ---
 
@@ -884,22 +1459,27 @@ PR**, not folded into implementation:
 
 ---
 
-## 15. Independent review findings and dispositions
+## 15. Independent review findings and dispositions (historical record)
 
 Six independent reviews ran against this document and the `72e8693` code. Every
 finding is recorded with severity · evidence · disposition · section changed ·
-remaining risk. The two initially-blocking facets — (a) the "kernel-authenticated
+remaining risk. **This section is a historical record of each review round:
+dispositions describe the document as of that round, and several are
+superseded by Review 7 (§17), the independent re-review (§18), or the
+reconciliation closed-schema pass (§2.5/§2.6). Superseded rows carry an
+explicit note; they must not be read as the normative design, which is
+§1–§14.** The two initially-blocking facets — (a) the "kernel-authenticated
 peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 (proof 4) — are resolved in §3.2.1, §3.1.1, and §6.1.
 
 ### Review 1 — Receipt schema v3 and lifecycle
 | ID | Sev | Finding | Disposition | Section | Remaining risk |
 |---|---|---|---|---|---|
-| R1.1 | High | writer_role for apply/recovery transitions unspecified | Resolved: §2.3 states a new `applier` broker role is required (not conditional), with certificate bump | §2.3 | Implementer must pin one role per transition at build time |
-| R1.2 | **Critical** | non-terminal approval requires rewriting `run_evidence.py:1149-1168` operator-gateway terminal logic | Resolved: §2.3 now names the exact code path + the two required changes (outcome_map removal + terminal-decision rewrite) | §2.3 | Load-bearing; if missed, approval still collapses to terminal |
-| R1.3 | High | `receipt_schema_version` field invented, not in code | Resolved: §2.3 states it is a new per-chain field, distinct from manifest `schema_version`, set at creation | §2.3 | Migration tooling must stamp it |
+| R1.1 | High | writer_role for apply/recovery transitions unspecified | Resolved: §2.3 states a new `applier` role is required (not conditional), with certificate bump (reconciliation revision: `applier` is a writer role; the broker is a process boundary, not a receipt authority identity — §2.6) | §2.3, §2.6 | Implementer must pin one role per transition at build time |
+| R1.2 | **Critical** | non-terminal approval requires rewriting `run_evidence.py:1149-1168` operator-gateway terminal logic | Resolved (updated by re-review Vector 3): §2.3 names the exact code path + the **three** coupled changes (outcome_map removal + terminal-decision rewrite + `run_evidence.py:1156-1157` outcome-compare rework) and pins the `applier` writer_role | §2.3 | Load-bearing; if missed, approval still collapses to terminal |
+| R1.3 | High | `receipt_schema_version` field invented, not in code | Resolved — (superseded by Review 7 / 7-2): **no parallel field**; the existing `schema_version` is authoritative (§2) | §2.3 | None (field abolished) |
 | R1.4 | High | v3 dispatch unspecified | Resolved: §2.3 specifies the `verify_receipt_store` branch, portable verifier path, v2/v3 coexistence by stamping | §2.3 | None |
-| R1.6 | High | all 7 new transitions lack payload whitelists | Resolved: §2.3 lists exact `*_KEYS` frozensets for every new transition + validators | §2.3 | None |
+| R1.6 | High | all 7 new transitions lack payload whitelists | Resolved: §2.3 lists exact `*_KEYS` frozensets for every new transition + validators (completed by the reconciliation revision §2.5/§2.6: `CHANGE_PROPOSED_KEYS` + `APPROVAL_INVALIDATED_KEYS` added; orphaned `MANIFEST_SEALED_KEYS` removed; stale generic manifest field names normalized) | §2.3, §2.5, §2.6 | None |
 | R1.7 | Medium | `change_recovery_required` terminality rule unspecified | Resolved: §2.3 terminal-state validator bullet | §2.3 | None |
 
 ### Review 2 — Broker/process ownership and per-primary locking
@@ -907,7 +1487,7 @@ peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 |---|---|---|---|---|---|
 | R2.1 | **Critical** | broker has no `primary` parameter today | Resolved: §3.1.1 specifies the concrete `RunController`/`EvidenceBrokerProcess.start`/`_broker_process_main` signature changes | §3.1.1 | Phase-A plumbing; primary must enter at `_handle_run` only |
 | R2.2 | High | lease shared only if `governance_state_root` shared across runs | Resolved: §4.2 default is a single shared user-data dir; cross-root exclusion is documented as a precondition | §3.2, §4.2 | Multi-user hosts with per-user roots need a shared lock location |
-| R2.3 | **Critical** | "peer-PID channel" cannot do cross-broker liveness | Resolved: §3.2.1 specifies concrete per-platform probes (`pidfd_open`/`proc_pidpath`/`OpenProcess`) | §3.2.1 | macOS libproc availability |
+| R2.3 | **Critical** | "peer-PID channel" cannot do cross-broker liveness | Resolved (superseded by Review 7 / 7-1): §3.2.1 — the kernel-held per-primary lock (`fcntl`/`flock`/`LockFileEx`) is the sole liveness authority; the PID-probe model is removed. RPC-caller peer-PID (§6.1) authenticates a caller to a broker, never lease ownership. | §3.2.1 | None |
 | R2.4 | Medium | "build/audit concurrently" overstated | Resolved: §3.3 concurrency caveat — serialization at provisioning is keyed by primary | §3.3 | None |
 | R2.6 | Low | §5 over-states current `WorkspaceManager` lock metadata | Resolved: §5 note clarifies it is new Phase-A work | §5 | None |
 
@@ -927,28 +1507,28 @@ peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 |---|---|---|---|---|---|
 | 4-1 | High | domain-separation hand-waved | Resolved: §8.2 gives the exact tag construction `torq-changeset-manifest-v1\0…` | §8.2 | M37 pins it |
 | 4-2 | High | device-name list incomplete/typo | Resolved: §8.2 inherits `receipts.py:61-65` set + extension rule | §8.2 | None |
-| 4-3 | Medium | case-fold over-rejects / under-detects | Resolved: §8.2 — conditional on a real per-directory probe; NFC unconditional | §8.2 | Probe cost |
+| 4-3 | Medium | case-fold over-rejects / under-detects | Resolved — (superseded by Review 7 / 7-5): the write-based per-directory probe is **removed**; unconditional case-fold rejection, NFC, no primary mutation (§8.2) | §8.2 | Over-rejects case-distinct paths on case-sensitive FS (accepted; deterministic + safe) |
 | 4-4 | Medium | `result_content_hash` ambiguous per op | Resolved: §8.2 per-op requirement table + M41 | §8.2 | None |
-| 4-5 | High | apply TOCTOU vs planted symlink | Resolved: §9.3 — `lstat`+`O_NOFOLLOW` per target before replace + M42 | §9.3 | None |
+| 4-5 | High | apply TOCTOU vs planted symlink | Resolved — (superseded by Review 7 / 7-6): final-component `O_NOFOLLOW` alone is insufficient; handle-relative `dir_fd`-bound apply (§9.3) + M42 | §9.3 | Documented residual under `strong_path_race_required` (§9.3) |
 | 4-6 | Medium | manifest-swap window during repair | Resolved: §8.3 — load-by-generation, abort on hash mismatch + M44 | §8.3 | None |
 | 4-7 | Low | containment check via `resolve()` follows symlinks | Resolved: §4.2 uses `os.path.realpath` + symlink rejection | §4.2 | None |
 
 ### Review 5 — Actor identity and authorization
 | ID | Sev | Finding | Disposition | Section | Remaining risk |
 |---|---|---|---|---|---|
-| 5-1 | **Critical (blocker)** | peer-PID mechanism asserted, absent in code | Resolved: §3.2.1 + §6.1 specify concrete per-platform probes | §3.2.1, §6.1 | None |
+| 5-1 | **Critical (blocker)** | peer-PID mechanism asserted, absent in code | Resolved — (superseded by Review 7 / 7-1): the **kernel-held lock** is the sole liveness authority; PID probes removed (§3.2.1). §6.1 keeps peer-credential **RPC-caller** authentication only, never lease ownership | §3.2.1, §6.1 | None |
 | 5-2 | **Critical (blocker)** | `subject_id` unconstrained re-opens injection (proof 4) | Resolved: §6.1 pins `subject_id` to `_OPAQUE_ID`, enums for `assurance_level`/`authorization_result`, `VERIFIED_ACTOR_KEYS` + M43 | §6.1, §2.3 | None |
 | 5-3 | Medium | `local_unverified` gate not default-deny | Resolved: §6.2 default-deny rule | §6.2 | None |
-| 5-4 | High | TOCTOU between gateway and broker authz | Resolved: §6.2 — both checks bound to `(actor, manifest_hash, policy_version)` with `policy_version` pinned at startup | §6.2 | None |
+| 5-4 | High | TOCTOU between gateway and broker authz | Resolved: §6.2 — both checks bound to `(actor, change_manifest_hash, policy_version)` with `policy_version` pinned at startup | §6.2 | None |
 | 5-5 | Medium | denied authz leaves run stuck forever | Resolved: §6.2 persistent-denial terminal path | §6.2, §2.1 | None |
 | 5-6 | Low | `resolver_identity`/`subject_id` collision in migration | Resolved: §6.1 — `resolver_identity` removed in v3, replaced by `subject_id`+`assurance_level` | §6.1 | None |
 
 ### Review 6 — Adversarial final (the 8 proofs)
 | Proof | Verdict | Note |
 |---|---|---|
-| 1 approval recorded without application | PREVENTS (Phase A/B) | Phase A removes `approved→completed`; Phase B gates on `change_applied`. Live in code today until Phase A ships. |
+| 1 approval recorded without application | PREVENTS (Phase B onward) | Per Finding 9 the v2 `approved→completed` mapping **stays in place** during Phase A and is displaced when Phase B lands the complete v3 gate; live in code today until Phase B ships. |
 | 2 completion after partial application | PREVENTS | §9.5 + E11 receipt/journal/tree agreement |
-| 3 two runs concurrently apply one primary | PREVENTS | §3.2 per-primary lease (conditional on 5-1 probe) |
+| 3 two runs concurrently apply one primary | PREVENTS | §3.2/§3.2.1 kernel-held per-primary lock (5-1 probe superseded by Review 7 / 7-1) |
 | 4 actor forged through a string | PREVENTS (after 5-2 fix) | §6.1 `_OPAQUE_ID` + enum + M43; today's `resolver_identity` string is replaced |
 | 5 repaired proposal reuses older approval | PREVENTS | §8.3 manifest invalidation + load-by-generation (conditional on 4-6 fix) |
 | 6 mutable evidence pollutes primary hash | PREVENTS | §4 governance-state-outside-primary + containment fail-closed |
@@ -962,17 +1542,22 @@ is resolved via §6.1 + §3.2.1.
 
 ## 16. Residual risks (after revisions)
 
-1. **Phase A is mandatory before any v3 approval is accepted.** Until Phase A
-   removes `approved→completed`, today's code still records approval as
-   completed (proof 1, live). The design's correctness assumes Phase A ships first.
+1. **Phase A is mandatory before any v3 approval is accepted.** Per Finding 9
+   the v2 `approved→completed` mapping stays in place through Phase A and is
+   displaced only when Phase B lands the complete v3 gate — until then,
+   today's code still records approval as completed (proof 1, live). The
+   design's correctness assumes Phase A (then Phase B) ships before any v3
+   approval is accepted.
 2. **The identity story is `local_unverified` until a real IdP lands.** §6
    codifies `local_unverified` honestly (default-denied in production), but a
    verified human actor requires the future IdP (SPEC §7 Step 3). The
-   process-authentication (§3.2.1/§6.1) authenticates the *calling process*, not
-   the human — that gap is intentional and documented, not closed.
-3. **macOS liveness probe** depends on libproc availability; the Linux/Windows
-   probes are stdlib/OS-API. A fallback (operator-acknowledged recovery only) is
-   acceptable if libproc is unavailable.
+   process-authentication (§6.1, RPC-caller peer-PID) authenticates the *calling
+   process* of the gateway RPC, not the human — that gap is intentional and
+   documented, not closed. (Lease ownership is the kernel lock, §3.2.1, not
+   process auth.)
+3. **macOS lock primitive** — choose `fcntl` vs `flock` at implementation; both
+   auto-release on process exit. (The earlier libproc liveness-probe residual is
+   removed; ownership is kernel-lock-based.)
 4. **Cross-user hosts** with per-user `governance_state_root` defaults break
    per-primary lease sharing (R2.2). Mandate a shared lock location on multi-user
    hosts, or document single-operator use.
@@ -980,3 +1565,77 @@ is resolved via §6.1 + §3.2.1.
    `TransitionRule` row, and the `validate_v3_receipt_contract` rewrite
    (especially §2.3 R1.2) are implementation work; this document specifies them
    but they do not exist in code.
+
+---
+
+## 17. Review 7 — Operator architecture review (nine findings)
+
+Recorded with severity · evidence · disposition · changed section · residual
+risk. **Historical record of the Review-7 round.** All nine were resolved in
+the sections cited; the revised doc subsequently passed independent re-review
+(§18), followed by the reconciliation closed-schema consistency pass
+(§2.5/§2.6).
+
+| ID | Sev | Finding | Disposition | Section | Residual risk |
+|---|---|---|---|---|---|
+| 7-1 | **Critical** | PID-probed lease ownership fails under PID reuse (process exits, PID reused before probe → dead owner appears live) | Resolved: §3.2/§3.2.1 — kernel-held lock (`fcntl`/`flock`/`LockFileEx`), fd held for whole transaction, auto-released on exit; PID/path/start-time are diagnostic only | §3.2, §3.2.1 | macOS `fcntl` vs `flock` semantics choice at impl |
+| 7-2 | High | parallel `receipt_schema_version` invented; existing `schema_version` is authoritative | Resolved: §2/§2.3/§2.4 — use existing `schema_version="3.0.0"`; cert schema stays separate; dispatch from existing field | §2, §2.3, §2.4 | None |
+| 7-3 | **Critical** | `change_applied` wrongly called terminal; `run_decision` must be the only terminal | Resolved: §2.1/§2.3/§9.2 — `run_decision` is the sole terminal; `change_applied`/recovery are non-terminal prerequisites; lifecycle not added to `CURRENT_AUDIT_TRANSITIONS` | §2.1, §2.3, §9.2 | None |
+| 7-4 | High | `_manifest_generation` confusion could select the wrong approved manifest | Resolved: §8.1/§8.3 — separate `change_set_id` + `change_manifest_generation`; `_manifest_generation` never selects the change manifest; `change_proposed` binds the tuple; M44 updated | §8.1, §8.3 | None |
+| 7-5 | Medium | write-based case probing mutates primary and is non-portable | Resolved: §8.2 — removed; NFC + unconditional case-fold reject; case-distinct support recorded as future feature; no-mutation test added | §8.2 | Over-rejects distinct paths on case-sensitive FS (accepted; deterministic+safe) |
+| 7-6 | **Critical** | `O_NOFOLLOW`+`os.replace` does not defeat parent-dir replacement | Resolved: §9.3 — handle/`dir_fd`-relative model (`openat`/`renameat`/`O_DIRECTORY\|O_NOFOLLOW` per component, `fstat` revalidation); honest residual + `strong_path_race_required` fail-closed policy | §9.3 | Older Python/FS without `dir_fd` → fail closed (documented) |
+| 7-7 | High | no expected final tree hash in manifest → success unverifiable | Resolved: §8.1/§8.3/§9.2 — `result_tree_hash` added; §9.2 step 13 compares to it (reconciliation revision: v1 invariant `result_tree_hash == workspace_tree_hash`; arbitrary workspace exclusion removed — scratch lives outside the workspace, §8.1/E14) | §8.1, §8.3, §9.2 | None |
+| 7-8 | High | pre-apply authz denial wrongly routed to apply-failure/recovery | Resolved: §2.1/§6.2 — `approval_invalidated` transition (no journal/backup/recovery emitted); exact `APPROVAL_INVALIDATED_KEYS` schema in §6.2; binds action/change-set/subject/policy/reason | §2.1, §6.2 | None |
+| 7-9 | High | phased rollout could half-enable v3; identity consequence unstated | Resolved: §12 — dark launch: Phase A disabled plumbing (v2 unchanged); Phase B complete v3 + capability gate + **minimal signed local credential provider**; Phase C full IdP. v3 off until end-to-end gate present | §12 | None |
+
+---
+
+## 18. Independent re-review — nine vectors (all PREVENTED; doc defects fixed)
+
+A focused re-review attempted to break each of the nine Review-7 attack vectors
+against the revised doc + `72e8693` code. **Result: all nine PREVENTED at the
+mechanism level — none flipped to ALLOWS.** The re-review found doc-precision
+defects (not security holes); all are fixed in this revision:
+
+| Vector | Re-review verdict | Disposition in this revision |
+|---|---|---|
+| 1 PID-reuse lock ownership | PREVENTS; §10/§15-R2.3/§16.3 described removed PID-probe | Fixed: §10/§15-R2.3/§16.3 now cite the kernel lock (§3.2.1) as sole authority; RPC peer-PID is caller-auth only |
+| 2 schema-dispatch disagreement | PREVENTS; precision gap | Fixed: §2.3 schema cross-check (manifest vs receipts `schema_version` must match; dispatch pins to receipts' value) |
+| 3 completion before terminal decision | PREVENTS; R1.2 missed 3rd change + writer_role | Fixed: §2.3 R1.2 now lists 3 coupled changes incl. `run_evidence.py:1156-1157`, pins `applier` writer_role, requires the generic branch enforce `change_applied` |
+| 4 proposal selection via generation confusion | PREVENTS; broker max-gen un-named | Fixed: §8.3 broker rejects approval whose generation < max in `change_proposed` receipts |
+| 5 case-probe primary mutation | PREVENTS (clean) | No change needed; NFC + unconditional casefold, in-memory, no mutation |
+| 6 parent-dir replacement | PREVENTS; `AT_FDCWD` inconsistency | Fixed: §9.3 uses `fstatat(parent_fd, …)` so verification + rename share the validated handle |
+| 7 success without `result_tree_hash` | PREVENTS; derivation hand-waved | Fixed: §8.1 concrete derivation; final revision: exclusion removed — v1 invariant `result_tree_hash == workspace_tree_hash` with scratch outside the workspace (§8.1/E14) |
+| 8 false recovery on pre-apply authz denial | PREVENTS; precondition unstated | Fixed: §2.3 `approval_invalidated` precondition `no change_apply_started` is machine-enforced |
+| 9 partially enabled v3 in rollout | PREVENTS (Phase A triple-backstopped); Phase B gate hand-waved | Fixed: §12 concrete `v3_enabled` predicate (5 components) evaluated at run creation + `change_apply_started`; fail-closed `v3_end_to_end_gate_not_satisfied` |
+
+**Overall re-review verdict: SOUND** — all nine vectors prevented; the Phase B
+gate is machine-checkable. The PR is marked ready for operator re-review.
+
+**Reconciliation addendum (this revision).** A post-re-review
+content-consistency audit still found residual defects in the `da4d9f6`
+revision: one normative contradiction (§2.3 "terminal where indicated" vs
+Finding 3), stale superseded dispositions in the §15/§16 history tables, and
+closed-schema gaps (`change_proposed` absent from the §2.1 inventory with no
+`CHANGE_PROPOSED_KEYS`; `APPROVAL_INVALIDATED_KEYS` undefined; orphaned
+`MANIFEST_SEALED_KEYS`; stale generic `manifest_hash`/`manifest_generation`
+field names; PID-probe residue in `CHANGE_RECOVERY_STARTED_KEYS`). All are
+fixed in this revision; the closed-schema consistency audit (§2.6) is the
+authoritative completeness check.
+
+**Contract-finalization addendum (final independent review).** A final
+independent closed-schema review then found contract-level defects the
+mechanical audit missed: prose `evidence_basis` values (only the closed enum
+`observed`/`derived`/`submitted` is permitted); an undefined `broker` writer
+role (the broker is a process boundary, not a receipt authority identity);
+`action_opened` mis-attributed to the operator gateway (it stays
+`orchestrator`/`derived`); artifact references validated as opaque IDs
+instead of `_ARTIFACT_PATH`; the arbitrary `workspace_excluded` derivation
+(replaced by the v1 invariant `result_tree_hash == workspace_tree_hash` with
+scratch under `<governance_state_root>/scratch/<run_id>/`); incomplete
+apply/recovery payloads (missing change tuples, `journal_hash`,
+`provider_dispatch`); missing exact v3 allowlists for `action_opened` /
+`action_resolved` / `run_decision`; and a `12/12` audit count that treated
+`seal` as a receipt transition. All are fixed in this revision; §2.6 is the
+authoritative audit — 11 governed receipt transitions audited + 1 seal
+operation audited separately.
