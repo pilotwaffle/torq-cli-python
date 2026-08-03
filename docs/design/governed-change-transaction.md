@@ -144,25 +144,45 @@ hand-waved):
   approved)`, `change_apply_started`, `change_applied`, `change_apply_failed`,
   and all recovery transitions are **non-terminal**. `change_recovery_required`
   keeps the chain unsealed until a final `run_decision`.
-- **⚠ Load-bearing v2 rewrite (review R1.2):** making `action_resolved(approved)`
-  non-terminal is **not** achievable by adding transitions alone. The v2 code at
-  `run_evidence.py:1116-1168` maps an approved action to `mapped_decision=
-  "completed"` via `action_outcomes[action_id]["approved"]` (sourced from
+- **⚠ Load-bearing v2 rewrite (review R1.2; precision gaps closed in re-review
+  Vector 3):** making `action_resolved(approved)` non-terminal is **not**
+  achievable by adding transitions alone. The v2 code at `run_evidence.py:1116-
+  1168` maps an approved action to `mapped_decision="completed"` via
+  `action_outcomes[action_id]["approved"]` (sourced from
   `orchestrator.py:1273-1276`'s `outcome_map {"approved":"completed"}`), and the
   operator-gateway `run_decision` branch then sets `terminal_decision=True`.
-  `validate_v3_receipt_contract` MUST change two things: (i) `outcome_map` for
-  approval transitions no longer maps to `completed`, and (ii) the
-  operator-gateway `run_decision` terminal-decision logic at
-  `run_evidence.py:1149-1168` must make `run_decision` — not `change_applied` —
-  the sole terminal run transition, with `change_applied` as a verified
-  prerequisite for `completed`. Without naming and rewriting this exact path, an
-  implementer could add all the new transitions and approval would still
-  collapse to terminal. This is the single most important v3 verifier change.
+  `validate_v3_receipt_contract` MUST change **three** coupled things in that
+  `1149-1168` window: (i) `outcome_map` for approval transitions no longer maps
+  to `completed`; (ii) the operator-gateway `run_decision` terminal-decision
+  logic must make `run_decision` — not `change_applied` — the sole terminal run
+  transition; (iii) the outcome-comparison at **`run_evidence.py:1156-1157`**
+  (`resolved_action[1] != payload.get("decision")`) must be reworked — once
+  `outcome_map` stops mapping `approved→completed`, that comparison fires
+  `operator_decision_outcome_mismatch` unless updated to the v3 non-terminal
+  approval model. Additionally, the **writer_role for v3
+  `run_decision(completed)`** must be pinned (the `applier` broker role, R1.1),
+  and the `validate_v3` branch that emits `completed` — whether operator_gateway
+  *or* the generic `run_decision` branch at `run_evidence.py:1168-1280` — MUST
+  enforce the `change_applied` prerequisite (the generic v2 branch sets
+  `terminal_decision=True` for `completed` at `:1259-1261` with no such
+  prerequisite). The seal-time `validate_v3(sealed=True)` terminal-state
+  validator (next bullet) is an independent backstop.
 - **Terminal-state validators** — enforce §2.2 ordering and the no-seal-while-
   uncertain rule: `seal()` (`receipts.py:1654` calls `validate_*_receipt_contract
   (..., sealed=True)`) is rejected if the chain ends in `change_recovery_required`
   or any non-terminal transition without a final `run_decision`; sealing is
   permitted only after a terminal `run_decision`.
+- **Schema cross-check (re-review Vector 2):** the manifest's `schema_version`
+  MUST equal the receipts' `schema_version`; any mismatch rejects as
+  `version_inconsistency` (the existing finding). Dispatch pins to the receipts'
+  value (`versions[0]`), so a `2.0.0`-receipts/`3.0.0`-manifest store cannot
+  mis-route to `validate_v3`.
+- **Transition preconditions (re-review Vector 8):** each new `TransitionRule`
+  carries an explicit `precondition`. In particular `approval_invalidated` /
+  `change_apply_blocked` has precondition `no change_apply_started in chain`
+  (it is forbidden once the FS transaction has begun), and `change_applied` has
+  precondition `valid change_apply_started referencing the same change manifest`.
+  These are machine-enforced by the lifecycle validator, not just prose.
 - **Payload-key allowlists (review R1.6) — concretely specified:** each new
   transition gets an exact `*_KEYS` frozenset (matching the codebase pattern at
   `run_evidence.py:138-140,282-302`) and a `validate_receipt_payload` branch:
@@ -639,14 +659,29 @@ ChangeSetManifest
   created_at
   manifest_hash             # domain-separated hash (§8.2)
 ```
-**`result_tree_hash` (Review 7, Finding 7):** the broker MUST compare the
-recomputed post-apply primary hash to `result_tree_hash`. **Default derivation
-rule: `result_tree_hash == workspace_tree_hash`** — the sealed workspace
-represents the exact intended resulting primary state. If excluded/intentionally-
-retained files make equality impossible, the manifest derivation rules MUST
-explicitly compute the expected primary result rather than assume equality; the
-default is equality, and a manifest that violates the stated derivation rule is
-rejected at audit.
+**`result_tree_hash` (Review 7, Finding 7; derivation made concrete, re-review
+Vector 7):** the broker MUST compare the recomputed post-apply primary hash to
+`result_tree_hash`. The manifest carries an explicit **exclusion list** of
+workspace-relative paths that are builder scratch/intermediates not destined for
+primary (default empty). The derivation is a concrete algorithm, not an
+assumption:
+```text
+result_tree_hash = H( virtual_tree =
+    primary_tree_with_operations_applied
+    — workspace_excluded_paths )
+```
+Concretely: at manifest build, compute the expected result by starting from
+`primary_tree_hash`'s tree, applying each `operations[]` entry (create/update/
+delete) with its `result_content_hash`, then excluding any `workspace_excluded`
+paths. The default `workspace_excluded = []` makes `result_tree_hash ==
+workspace_tree_hash` **only when the workspace contains exactly the primary tree
+plus the operation results** — because builders may leave scratch files in the
+workspace, the manifest builder MUST either (a) record scratch paths in
+`workspace_excluded` and use the algorithm above, or (b) ensure the workspace is
+clean of non-destined files before seal (workspace-cleaning step). A manifest
+that asserts `result_tree_hash == workspace_tree_hash` while the workspace
+contains un-excluded scratch is rejected at audit (`result_hash_derivation_invalid`).
+This removes the false-failure trap where legitimate applies would roll back.
 
 **Initial operations:** `create`, `update`, `delete`. **Defer `rename` and
 mode changes** until cross-platform semantics are fully defined — unsupported
@@ -743,10 +778,15 @@ change_manifest_generation)` tuple and **aborts** if its recomputed hash ≠ the
 approved `change_manifest_hash`. The receipt-store `_manifest_generation` is
 **never** used to select the approved change manifest (Finding 4). A repaired
 proposal creates a new `change_manifest_generation` under the same
-`change_set_id` and invalidates approval for the earlier generation. Mutant
-**M38** covers reduction tamper; mutant **M44** (updated) covers loading the
-wrong `(change_set_id, change_manifest_generation)` tuple or confusing it with
-`_manifest_generation`.
+`change_set_id` and invalidates approval for the earlier generation.
+**Broker-side latest-generation enforcement (re-review Vector 4):** at apply,
+the broker rejects any approval whose `change_manifest_generation` is not the
+maximum generation recorded in `change_proposed` receipts for that
+`change_set_id` — closing the repair-after-approval race (gen-1 approved, then
+repair creates gen-2): a stale-but-internally-consistent gen-1 artifact cannot
+be applied because its generation < max. Mutant **M38** covers reduction
+tamper; mutant **M44** (updated) covers loading the wrong `(change_set_id,
+change_manifest_generation)` tuple or confusing it with `_manifest_generation`.
 
 ---
 
@@ -821,8 +861,11 @@ parent-directory swap attacks, not only a final-target symlink.
 
 **Within that model**, for each `update`/`create`:
 1. Resolve target's parent via the handle-relative traversal above; verify the
-   target with `fstatat(AT_FDCWD…, AT_SYMLINK_NOFOLLOW)` as a regular file
-   `st_nlink==1` immediately before the rename.
+   target with `fstatat(parent_fd, target, …, AT_SYMLINK_NOFOLLOW)` (re-review
+   Vector 6 — use the validated `parent_fd`, NOT `AT_FDCWD`, so verification and
+   the rename share the same validated handle and a symlink planted at the
+   target is caught) as a regular file `st_nlink==1` immediately before the
+   rename.
 2. Write reserved temp (`.torq-apply-<run_id>-<nonce>.tmp`) in the validated
    parent dir (§4.3), with `O_NOFOLLOW|O_CREAT|O_EXCL` (`openat`).
 3. **Write-ahead ordering (review R3.1):** record `{op, path, sha256, sequence}`
@@ -902,9 +945,12 @@ no-op because the `result_content_hash` already matches. A second
   `O_BINARY` fidelity (covered by mutant M23); a new mutant covers the apply
   fsync (§11).
 - File modes: advisory on Windows, enforced on POSIX (existing pattern).
-- PID in lock/lease: advisory only; never used to decide a process is dead (PID
-  reuse). Stale-owner detection uses the kernel-authenticated broker peer-PID
-  channel (§6.1), not PID liveness.
+- PID/path/start-time in the lease file: **diagnostic only** — never used to
+  decide ownership or process liveness (PID reuse). Stale-owner detection uses
+  the **kernel-held per-primary lock** (§3.2.1): "the lock is held" is the sole
+  liveness authority. The operator-gateway RPC-caller peer-PID channel (§6.1)
+  authenticates a caller *to one broker* and is **never** used for lease
+  ownership.
 - Path separators: manifest paths POSIX; resolved via `PurePath.as_posix()`.
 
 ---
@@ -965,15 +1011,28 @@ stays in place (do NOT remove it while no apply engine exists, Finding 9). No
 
 **Phase B — complete schema-v3 transaction.** Land schema-v3 lifecycle, broker
 apply, the **kernel-held per-primary lock** (§3.2), journal, and recovery
-**together** as one end-to-end unit. Add a **capability/version gate** that
-enables v3 only when the entire end-to-end gate is present; v3 is off by default
-and enabled atomically. `completed` is gated on `change_applied`. **Minimal
-verified actor (Finding 9):** include a **minimal signed local/operator
-credential provider** in Phase B so production policy can require
-`assurance_level >= verified` — without it, v3 apply is development-only.
-Mutants M31–M44. Keep v2 verification read-only. **Do not permit new v2 governed
-mutation runs once v3 is production-ready**, unless explicitly supported as
-legacy behavior.
+**together** as one end-to-end unit. **Capability gate (concrete predicate,
+re-review Vector 9):** v3 is enabled only when this predicate is true,
+evaluated at run creation *and* re-checked at `change_apply_started`:
+```text
+v3_enabled =
+    kernel_lock_available              # §3.2 fcntl/flock/LockFileEx adapter present
+  AND journal_recovery_implemented     # §9 write-ahead journal + recovery
+  AND verified_actor_provider_present  # minimal signed local credential (below)
+  AND dir_fd_relative_apply_supported  # §9.3 *at/dir_fd apply on this platform
+  AND v3_lifecycle_validator_present   # validate_v3_receipt_contract (§2.3)
+```
+Enforcement: v3 chain stamping and every v3 transition are **unreachable**
+unless `v3_enabled` is true (the `applier` writer role is not certified, the v3
+`TransitionRule` rows are inert, and the schema-3.0.0 dispatch path refuses).
+If any component is missing, the run fails closed
+(`v3_end_to_end_gate_not_satisfied`) and falls back to v2 behavior. v3 is off
+by default. `completed` is gated on `change_applied`. **Minimal verified actor
+(Finding 9):** include a **minimal signed local/operator credential provider**
+in Phase B so production policy can require `assurance_level >= verified` —
+without it, v3 apply is development-only. Mutants M31–M44. Keep v2 verification
+read-only. **Do not permit new v2 governed mutation runs once v3 is
+production-ready**, unless explicitly supported as legacy behavior.
 
 **Phase C — production identity & hardening.** Full IdP (OIDC/SAML) per SPEC §7
 Step 3, replacing the Phase-B minimal local credential provider. Dirty-primary
@@ -1046,7 +1105,7 @@ peer-PID channel" being a placeholder and (b) `subject_id` being unconstrained
 |---|---|---|---|---|---|
 | R2.1 | **Critical** | broker has no `primary` parameter today | Resolved: §3.1.1 specifies the concrete `RunController`/`EvidenceBrokerProcess.start`/`_broker_process_main` signature changes | §3.1.1 | Phase-A plumbing; primary must enter at `_handle_run` only |
 | R2.2 | High | lease shared only if `governance_state_root` shared across runs | Resolved: §4.2 default is a single shared user-data dir; cross-root exclusion is documented as a precondition | §3.2, §4.2 | Multi-user hosts with per-user roots need a shared lock location |
-| R2.3 | **Critical** | "peer-PID channel" cannot do cross-broker liveness | Resolved: §3.2.1 specifies concrete per-platform probes (`pidfd_open`/`proc_pidpath`/`OpenProcess`) | §3.2.1 | macOS libproc availability |
+| R2.3 | **Critical** | "peer-PID channel" cannot do cross-broker liveness | Resolved (superseded by Review 7 / 7-1): §3.2.1 — the kernel-held per-primary lock (`fcntl`/`flock`/`LockFileEx`) is the sole liveness authority; the PID-probe model is removed. RPC-caller peer-PID (§6.1) authenticates a caller to a broker, never lease ownership. | §3.2.1 | None |
 | R2.4 | Medium | "build/audit concurrently" overstated | Resolved: §3.3 concurrency caveat — serialization at provisioning is keyed by primary | §3.3 | None |
 | R2.6 | Low | §5 over-states current `WorkspaceManager` lock metadata | Resolved: §5 note clarifies it is new Phase-A work | §5 | None |
 
@@ -1107,11 +1166,13 @@ is resolved via §6.1 + §3.2.1.
 2. **The identity story is `local_unverified` until a real IdP lands.** §6
    codifies `local_unverified` honestly (default-denied in production), but a
    verified human actor requires the future IdP (SPEC §7 Step 3). The
-   process-authentication (§3.2.1/§6.1) authenticates the *calling process*, not
-   the human — that gap is intentional and documented, not closed.
-3. **macOS liveness probe** depends on libproc availability; the Linux/Windows
-   probes are stdlib/OS-API. A fallback (operator-acknowledged recovery only) is
-   acceptable if libproc is unavailable.
+   process-authentication (§6.1, RPC-caller peer-PID) authenticates the *calling
+   process* of the gateway RPC, not the human — that gap is intentional and
+   documented, not closed. (Lease ownership is the kernel lock, §3.2.1, not
+   process auth.)
+3. **macOS lock primitive** — choose `fcntl` vs `flock` at implementation; both
+   auto-release on process exit. (The earlier libproc liveness-probe residual is
+   removed; ownership is kernel-lock-based.)
 4. **Cross-user hosts** with per-user `governance_state_root` defaults break
    per-primary lease sharing (R2.2). Mandate a shared lock location on multi-user
    hosts, or document single-operator use.
@@ -1142,9 +1203,26 @@ independent re-review (§18) before the PR is marked ready.
 
 ---
 
-## 18. Independent re-review (pending)
+## 18. Independent re-review — nine vectors (all PREVENTED; doc defects fixed)
 
-A focused re-review against the nine Review-7 attack vectors is run after this
-revision is pushed; its verdict and any new findings are recorded here. The PR
-remains draft and is not marked ready until this re-review passes.
+A focused re-review attempted to break each of the nine Review-7 attack vectors
+against the revised doc + `72e8693` code. **Result: all nine PREVENTED at the
+mechanism level — none flipped to ALLOWS.** The re-review found doc-precision
+defects (not security holes); all are fixed in this revision:
+
+| Vector | Re-review verdict | Disposition in this revision |
+|---|---|---|
+| 1 PID-reuse lock ownership | PREVENTS; §10/§15-R2.3/§16.3 described removed PID-probe | Fixed: §10/§15-R2.3/§16.3 now cite the kernel lock (§3.2.1) as sole authority; RPC peer-PID is caller-auth only |
+| 2 schema-dispatch disagreement | PREVENTS; precision gap | Fixed: §2.3 schema cross-check (manifest vs receipts `schema_version` must match; dispatch pins to receipts' value) |
+| 3 completion before terminal decision | PREVENTS; R1.2 missed 3rd change + writer_role | Fixed: §2.3 R1.2 now lists 3 coupled changes incl. `run_evidence.py:1156-1157`, pins `applier` writer_role, requires the generic branch enforce `change_applied` |
+| 4 proposal selection via generation confusion | PREVENTS; broker max-gen un-named | Fixed: §8.3 broker rejects approval whose generation < max in `change_proposed` receipts |
+| 5 case-probe primary mutation | PREVENTS (clean) | No change needed; NFC + unconditional casefold, in-memory, no mutation |
+| 6 parent-dir replacement | PREVENTS; `AT_FDCWD` inconsistency | Fixed: §9.3 uses `fstatat(parent_fd, …)` so verification + rename share the validated handle |
+| 7 success without `result_tree_hash` | PREVENTS; derivation hand-waved | Fixed: §8.1 concrete algorithm + explicit `workspace_excluded` list; rejects `result==workspace` when scratch present |
+| 8 false recovery on pre-apply authz denial | PREVENTS; precondition unstated | Fixed: §2.3 `approval_invalidated` precondition `no change_apply_started` is machine-enforced |
+| 9 partially enabled v3 in rollout | PREVENTS (Phase A triple-backstopped); Phase B gate hand-waved | Fixed: §12 concrete `v3_enabled` predicate (5 components) evaluated at run creation + `change_apply_started`; fail-closed `v3_end_to_end_gate_not_satisfied` |
+
+**Overall re-review verdict: SOUND** — all nine vectors prevented; the doc is
+now internally consistent and the Phase B gate is machine-checkable. The PR is
+marked ready for operator re-review.
 
