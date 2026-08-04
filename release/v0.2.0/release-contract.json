@@ -1,0 +1,57 @@
+{
+  "contract_schema_version": "1.0.0",
+  "package": {
+    "distribution_name": "torq-cli",
+    "import_name": "torq_cli",
+    "version": "0.2.0",
+    "supported_python_versions": ["3.11", "3.12", "3.13"]
+  },
+  "candidate": {
+    "sha": null,
+    "branch": "main",
+    "sha_policy": "pinned_by_release_execution_authorization"
+  },
+  "intended_tag": "v0.2.0",
+  "paths": {
+    "release_notes": "docs/releases/torq-cli-v0.2.0.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "required_ci_jobs": [
+    "quality-linux-py311",
+    "quality-linux-py312",
+    "quality-linux-py313",
+    "quality-macos-py311",
+    "quality-macos-py312",
+    "quality-macos-py313",
+    "quality-windows-py311",
+    "quality-windows-py312",
+    "quality-windows-py313",
+    "headless-linux-py311",
+    "linux-systemd-experimental-evidence"
+  ],
+  "required_artifacts": {
+    "wheel": "torq_cli-0.2.0-py3-none-any.whl",
+    "sdist": "torq_cli-0.2.0.tar.gz",
+    "sha256sums": "SHA256SUMS",
+    "release_evidence": "release-evidence.json",
+    "sbom": "sbom.cdx.json",
+    "provenance": "provenance.json"
+  },
+  "policies": {
+    "pypi_publication_permitted": false,
+    "production_trust_claimed": false,
+    "tag_or_release_creation_permitted": false,
+    "dirty_tree_permitted": false,
+    "non_main_release_permitted": false,
+    "cross_commit_artifact_substitution_permitted": false
+  },
+  "required_trust_disclaimer_tokens": [
+    "trust-disclaimer:windows-only-production-containment",
+    "trust-disclaimer:macos-fail-closed-pending-native-product",
+    "trust-disclaimer:linux-experimental-harness-only",
+    "trust-disclaimer:local-signer-not-production-hardened",
+    "trust-disclaimer:receipt-anchor-not-independent",
+    "trust-disclaimer:no-workspace-sandbox",
+    "trust-disclaimer:implementation-unauthorized"
+  ]
+}
