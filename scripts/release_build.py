@@ -82,12 +82,22 @@ def verify_source_state(
     porcelain: str | None = None,
     on_main: bool | None = None,
 ) -> dict:
-    """Fail closed on dirty tree, wrong head, or non-main candidate."""
+    """Fail closed on dirty tree, wrong head, or non-main candidate.
+
+    "Dirty" means any change to tracked content (``git status --porcelain
+    --untracked-files=no``). Untracked local-tooling files cannot enter the
+    wheel or sdist (both package tracked content only); the release workflow
+    additionally runs on a fresh checkout, which is clean by construction.
+    """
     expected = validate_expected_sha(expected_sha)
     head = head_sha if head_sha is not None else _git("rev-parse", "HEAD")
     if head != expected:
         _fail("candidate_sha_not_head", f"head={head} expected={expected}")
-    dirty = porcelain if porcelain is not None else _git("status", "--porcelain")
+    dirty = (
+        porcelain
+        if porcelain is not None
+        else _git("status", "--porcelain", "--untracked-files=no")
+    )
     if dirty and not contract["policies"].get("dirty_tree_permitted", False):
         _fail("working_tree_dirty", dirty.splitlines()[0])
     pinned = contract["candidate"].get("sha")
