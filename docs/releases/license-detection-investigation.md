@@ -13,7 +13,7 @@ separate operator review.
 | Blob size | 11,303 bytes |
 | Canonical Apache-2.0 size | 11,358 bytes (apache.org `LICENSE-2.0.txt`, fetched 2026-08-03) |
 | GitHub detection | key `other`, name `Other` |
-| Declared intent | `pyproject.toml` license classifiers: `License :: OSI Approved :: Apache Software License`; `license = "Apache-2.0"` |
+| Declared intent | `pyproject.toml`: `license = "Apache-2.0"` and `license-files = ["LICENSE"]`; **no license classifier is present** in `[project].classifiers` |
 | Encoding/line-endings | clean UTF-8, LF; no BOM; no CRLF |
 
 ## Detection cause: substantive legal-text differences
@@ -47,8 +47,13 @@ hence `Other`.
 - The differences are not cosmetic: items 1–3 change license wording. The
   legal meaning is **not** proven preserved, so no automated fix is
   appropriate under R0 constraints.
-- The declared intent across `pyproject.toml`, `SECURITY.md`, and the README
-  is Apache-2.0.
+- The repository's declared licensing intent is Apache-2.0, evidenced by
+  `pyproject.toml` (`license = "Apache-2.0"`, `license-files = ["LICENSE"]`),
+  `CHANGELOG.md` ("Apache-2.0 license (`LICENSE`) and corresponding project
+  metadata"), and `CONTRIBUTING.md` (contributions agreed to be licensed under
+  Apache-2.0). The `LICENSE` file itself differs substantively from the
+  canonical Apache-2.0 text. `SECURITY.md` and `README.md` contain no license
+  declaration and are not cited as evidence.
 
 ## Recommendation (requires separate operator review)
 
