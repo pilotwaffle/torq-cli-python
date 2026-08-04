@@ -1,10 +1,10 @@
 # TORQ CLI 0.2.0 release candidate notes
 
-Status: prepared from the merged baseline commit `8212efe` and its documentation
-descendants.
-Do not interpret this file as a tag, signature, GitHub release, protected-main
-CI result, or published-artifact attestation. Those release actions remain to
-be performed and recorded.
+Status: prepared from the protected-`main` release candidate commit
+`35f7990f904f4a648a659702f03168d6febc709a`.
+Do not interpret this file as a tag, signature, GitHub release, or
+published-artifact attestation. Those release actions remain to be performed
+and recorded.
 
 ## Feature release
 
@@ -70,11 +70,37 @@ candidate.
 
 ## Release gate still required
 
-Before publication: run the complete test, Ruff, strict mypy, package-build,
-installed-wheel smoke, platform ownership/evidence, and protected-main CI
-gates; review the diff; create and verify the signed `v0.2.0` tag; publish wheel,
-source distribution, and signed checksums; then verify clean re-downloads. No
-step in this paragraph is claimed complete by these candidate notes.
+This release candidate is scoped to release trust pack **R0**, whose boundary is
+defined in `docs/releases/release-trust-model.md`. R0 produces **CI provenance
+only** (trust level 1). Package signing (level 2) and git tag signing (level 3)
+are explicitly **not performed in R0** and must not be claimed for v0.2.0.
+
+Completed and recorded for candidate `35f7990f904f4a648a659702f03168d6febc709a`:
+
+- All eleven contract-required protected-`main` CI jobs succeeded on this exact
+  commit (test, Ruff, strict mypy, and the nine-way quality matrix, plus
+  `headless-linux-py311` and `linux-systemd-experimental-evidence`).
+- The non-publishing `release-build` workflow built the wheel and source
+  distribution from this exact commit, verified artifact metadata, recorded
+  SHA-256 hashes, and clean-installed each artifact.
+- `release-evidence.json` records the workflow run identifiers, candidate SHA,
+  builder script blob SHA, contract digest, and artifact hashes.
+  `provenance.json` records the workflow run identifiers, candidate SHA, and
+  artifact hashes.
+
+Required before publication, and **not** claimed complete by these notes:
+
+- An exact-SHA Release Execution authorization naming this candidate commit and
+  the exact artifact SHA-256 hashes recorded by the release build.
+- Creating the `v0.2.0` tag and GitHub release, and publishing the wheel and
+  source distribution.
+- Verifying clean re-downloads of the published bytes.
+
+Publication-time integrity note: CI provenance proves the artifacts attached to
+the identified build run came from this commit. It does **not** prove that bytes
+distributed later are those same bytes. Under R0 that gap is closed by
+publishing the exact hashed artifacts recorded above and verifying them after
+download — not by a signature, because none exists at this trust level.
 
 ## Trust-boundary disclaimers (release contract tokens)
 

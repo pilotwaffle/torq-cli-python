@@ -9,6 +9,14 @@ this file is the canonical cumulative record.
 
 ## [Unreleased]
 
+Nothing yet. Everything below is part of the unreleased 0.2.0 candidate.
+
+## [0.2.0] — unreleased candidate (release-preparation changes)
+
+These changes were made after the 0.2.0 feature work below and before any
+0.2.0 tag or release existed. `v0.2.0` has never been tagged or published, so
+they are part of 0.2.0 rather than a later version.
+
 ### Added
 - Apache-2.0 license (`LICENSE`) and corresponding project metadata.
 - `CHANGELOG.md`, `CONTRIBUTING.md`, and `docs/security/threat-model.md`.
@@ -36,6 +44,13 @@ this file is the canonical cumulative record.
   pin rootdir, forces the worktree `src` first on `sys.path`, and aborts
   fail-closed if a tested module resolves outside the worktree. Regression
   test added (`tests/test_named_mutants_isolation.py`).
+- `LICENSE` restored to the canonical Apache-2.0 text. The previously committed
+  file diverged from the official wording in sections 5, 6, and 9, which left
+  GitHub unable to classify the license. The file is now byte-identical to
+  https://www.apache.org/licenses/LICENSE-2.0.txt (11358 bytes, SHA-256
+  `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`) and the
+  repository is classified `apache-2.0`. The project's declared Apache-2.0
+  intent is unchanged.
 
 ### Security
 - `.torq-run-identities/`, `*.key`, `*.pem`, and `.tmp-tests/` are now
