@@ -75,3 +75,29 @@ installed-wheel smoke, platform ownership/evidence, and protected-main CI
 gates; review the diff; create and verify the signed `v0.2.0` tag; publish wheel,
 source distribution, and signed checksums; then verify clean re-downloads. No
 step in this paragraph is claimed complete by these candidate notes.
+
+## Trust-boundary disclaimers (release contract tokens)
+
+These tokens are mandated by the v0.2.0 release contract
+(`release/v0.2.0/release-contract.json`). Each names a documented capability
+boundary; they are stable machine-checked markers, not prose to be rewritten.
+
+- `trust-disclaimer:windows-only-production-containment` — production process
+  containment (Job Objects) is production-enabled on Windows only.
+- `trust-disclaimer:macos-fail-closed-pending-native-product` — macOS fails
+  closed for live process containment pending a signed/notarized native
+  product.
+- `trust-disclaimer:linux-experimental-harness-only` — the Linux
+  user-systemd/cgroup-v2 harness is experimental; Linux production chat is
+  unavailable pending a distinct-identity system broker.
+- `trust-disclaimer:local-signer-not-production-hardened` — the bundled local
+  signer is tamper-resistant but not a production-hardened signing authority
+  (`production_signing_identity_exportable` unresolved).
+- `trust-disclaimer:receipt-anchor-not-independent` — the receipt anchor is
+  same-volume and not independently operated
+  (`production_receipt_anchor_not_independent` unresolved).
+- `trust-disclaimer:no-workspace-sandbox` — a workspace sandbox is not
+  implemented in v0.2.0 (SPEC §7 Step 1 tracked work).
+- `trust-disclaimer:implementation-unauthorized` — the governed change
+  transaction design is canonical on main; its implementation has not been
+  authorized.

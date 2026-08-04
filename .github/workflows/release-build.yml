@@ -1,0 +1,68 @@
+name: release-build
+
+# Non-publishing release artifact builder (release trust pack R0B).
+#
+# Builds the v0.2.0 wheel and sdist exactly once from one exact protected-main
+# SHA, verifies metadata and hashes, clean-installs each artifact, and records
+# release evidence, an SBOM, and a CI-provenance record. Outputs stay workflow
+# artifacts during R0: this workflow creates NO tag, NO GitHub release, and
+# publishes NOTHING. CI provenance is a distinct trust level from package
+# signing, tag signing, and TORQ production receipt signing (see
+# docs/releases/release-trust-model.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Exact protected-main SHA to build from (40 lowercase hex). Must match HEAD after checkout."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-release-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected_sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with: {python-version: "3.11"}
+      - run: python -m pip install -e ".[dev]"
+      - name: Verify candidate SHA is the protected-main SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          supplied="${{ inputs.expected_sha }}"
+          printf '%s' "$supplied" | grep -Eq '^[0-9a-f]{40}$' \
+            || { echo "expected_sha is not 40 lowercase hex chars" >&2; exit 1; }
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$supplied" ]; then
+            echo "checkout head $head != expected $supplied" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$supplied" origin/main \
+            || { echo "expected_sha is not on origin/main" >&2; exit 1; }
+      - name: Snapshot existing tags
+        shell: bash
+        run: git tag --list | sort > "$RUNNER_TEMP/tags-before.txt"
+      - name: Build and verify release artifacts (non-publishing)
+        run: python scripts/release_build.py --expected-sha "${{ inputs.expected_sha }}"
+      - name: Confirm no publication side effects
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag --list | sort > "$RUNNER_TEMP/tags-after.txt"
+          diff "$RUNNER_TEMP/tags-before.txt" "$RUNNER_TEMP/tags-after.txt" \
+            || { echo "release-build must not create tags" >&2; exit 1; }
+          test -z "$(git status --porcelain --untracked-files=no)" \
+            || { echo "release-build must not modify tracked files" >&2; exit 1; }
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-artifacts-v0.2.0
+          path: dist-release/
+          if-no-files-found: error
