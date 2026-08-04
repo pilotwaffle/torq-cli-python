@@ -14,6 +14,8 @@ run-planned -> observed transition rule.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -277,13 +279,37 @@ def _run(root: Path, mutation: Mutation) -> subprocess.CompletedProcess[str]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the named mutants.")
+    parser.add_argument(
+        "--json-summary",
+        default=None,
+        help="Optional path to write a report-only JSON summary. The gate "
+        "behavior and exit codes are unchanged with or without this flag.",
+    )
+    args = parser.parse_args()
     temporary_parent = Path(os.environ.get("TORQ_T06B_MUTANT_ROOT", str(DEFAULT_MUTANT_ROOT)))
     temporary_parent.mkdir(parents=True, exist_ok=True)
     killed = 0
+    survived: list[str] = []
     applicable = tuple(mutation for mutation in MUTATIONS if mutation.applies_here())
     skipped = tuple(m.identifier for m in MUTATIONS if not m.applies_here())
     if skipped:
         print(f"named_mutants: skipping {', '.join(skipped)} (not observable on {os.name})")
+
+    def _write_summary() -> None:
+        if not args.json_summary:
+            return
+        summary = {
+            "total": len(MUTATIONS),
+            "applicable": len(applicable),
+            "killed": killed,
+            "survived": survived,
+            "invalid": list(skipped),
+        }
+        Path(args.json_summary).write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
     try:
         for mutation in applicable:
             with tempfile.TemporaryDirectory(dir=temporary_parent, prefix=f"{mutation.identifier}-") as directory:
@@ -299,9 +325,12 @@ def main() -> int:
                 if result.returncode == 0:
                     print(f"{mutation.identifier} survived")
                     print(result.stdout)
+                    survived.append(mutation.identifier)
+                    _write_summary()
                     return 1
                 killed += 1
         print(f"named_mutants: {killed}/{len(applicable)} killed")
+        _write_summary()
         return 0 if killed == len(applicable) else 1
     finally:
         try:
