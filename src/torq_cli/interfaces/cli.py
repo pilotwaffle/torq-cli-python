@@ -34,7 +34,7 @@ from torq_cli.connectors.native_credentials import (
     NativeCredentialStore,
     native_store_for_current_platform,
 )
-from torq_cli.connectors.status import inspect_harness
+from torq_cli.connectors.status import inspect_harness, parse_inspect_documents
 from torq_cli.domain.credential_backend import BackendUnavailable
 from torq_cli.domain.models import ResultEnvelope
 from torq_cli.domain.provider_matrix import PROVIDERS, load_provider_matrix
@@ -547,11 +547,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             expected_raw = json.loads(Path(args.expected).read_text(encoding="utf-8"))
             actual_raw = json.loads(Path(args.actual).read_text(encoding="utf-8"))
-            expected = {
-                str(agent): (str(binding[0]), str(binding[1]))
-                for agent, binding in expected_raw.items()
-            }
-            report = inspect_harness(expected, actual_raw)
+            expected, actual = parse_inspect_documents(expected_raw, actual_raw)
+            report = inspect_harness(expected, actual)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "status": "blocked", "finding": str(exc), "agents": {}}, sort_keys=True))
+            return 3
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+            print(json.dumps({"ok": False, "status": "blocked", "finding": "inspect_input_invalid", "agents": {}}, sort_keys=True))
+            return 3
         except Exception:
             report = {"ok": False, "status": "internal_error", "agents": {}}
             print(json.dumps(report, sort_keys=True))
