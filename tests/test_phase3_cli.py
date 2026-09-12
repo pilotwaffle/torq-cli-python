@@ -27,3 +27,49 @@ def test_harness_inspect_cli_flags_mismatch_and_unattestable(tmp_path, capsys) -
     assert output["agents"]["g1d"]["status"] == "mismatch"
     assert output["agents"]["g2a"]["status"] == "unattestable"
     assert code == 3
+
+def test_harness_inspect_string_valued_binding_is_blocked(tmp_path, capsys) -> None:
+    expected = tmp_path / "expected.json"
+    actual = tmp_path / "actual.json"
+    expected.write_text(json.dumps({"demo": "local"}), encoding="utf-8")
+    actual.write_text(json.dumps({"demo": "local"}), encoding="utf-8")
+    code = main(["harness", "inspect", "--expected", str(expected), "--actual", str(actual)])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert output["status"] == "blocked"
+    assert output["finding"] == "inspect_expected_binding_invalid:demo"
+    assert output["ok"] is False
+
+
+def test_harness_inspect_non_mapping_actual_is_blocked(tmp_path, capsys) -> None:
+    expected = tmp_path / "expected.json"
+    actual = tmp_path / "actual.json"
+    expected.write_text(json.dumps({"g1d": ["claude", "fable-5"]}), encoding="utf-8")
+    actual.write_text(json.dumps({"g1d": "local"}), encoding="utf-8")
+    code = main(["harness", "inspect", "--expected", str(expected), "--actual", str(actual)])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert output["finding"] == "inspect_actual_binding_invalid:g1d"
+
+
+def test_harness_inspect_missing_actual_key_is_unattestable(tmp_path, capsys) -> None:
+    expected = tmp_path / "expected.json"
+    actual = tmp_path / "actual.json"
+    expected.write_text(json.dumps({"g1d": ["claude", "fable-5"]}), encoding="utf-8")
+    actual.write_text(json.dumps({}), encoding="utf-8")
+    code = main(["harness", "inspect", "--expected", str(expected), "--actual", str(actual)])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert output["agents"]["g1d"]["status"] == "unattestable"
+
+
+def test_harness_inspect_happy_path(tmp_path, capsys) -> None:
+    expected = tmp_path / "expected.json"
+    actual = tmp_path / "actual.json"
+    expected.write_text(json.dumps({"g1d": ["claude", "fable-5"]}), encoding="utf-8")
+    actual.write_text(json.dumps({"g1d": {"provider": "claude", "model": "fable-5"}}), encoding="utf-8")
+    code = main(["harness", "inspect", "--expected", str(expected), "--actual", str(actual)])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert output["ok"] is True
+    assert output["agents"]["g1d"]["status"] == "matched"
