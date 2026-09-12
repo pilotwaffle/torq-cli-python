@@ -1,0 +1,32 @@
+name: Bug report
+description: Something failed, blocked, or behaved unexpectedly
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: TORQ version
+      placeholder: "torq --version, e.g. 0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Windows, Linux, macOS]
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Command and output
+      description: Exact command run and the JSON output (redact credential material)
+      render: console
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true

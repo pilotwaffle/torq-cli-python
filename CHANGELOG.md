@@ -9,7 +9,19 @@ this file is the canonical cumulative record.
 
 ## [Unreleased]
 
-Nothing yet. Everything below is part of the unreleased 0.2.0 candidate.
+### Added
+- `torq demo`: zero-configuration dry-run trial. Scaffolds a valid run identity
+  and attestation documents from the packaged registry and policy, optionally
+  executes a real dry-run (`--run`), and leaves a verifiable run directory.
+  No provider is contacted.
+
+### Changed
+- README rewritten around the visitor: pitch, comparison table, quickstart,
+  real command transcript, platform-support matrix, and links to the threat
+  model and roadmap.
+- Community onboarding: GitHub issue templates (bug, feature, security
+  contact link) and ROADMAP.md.
+
 
 ## [0.2.0] — unreleased candidate (release-preparation changes)
 
