@@ -159,6 +159,13 @@ def _parser() -> argparse.ArgumentParser:
     fleet.add_argument("--chat-model")
     fleet.add_argument("--credential-file")
     fleet.add_argument("--claude-bin", default="claude")
+    demo = sub.add_parser(
+        "demo",
+        help="Scaffold a zero-config dry-run demo (no providers contacted)",
+    )
+    demo.add_argument("--goal", default="")
+    demo.add_argument("--run-root", default="./torq-demo-runs")
+    demo.add_argument("--run", action="store_true", help="execute the dry-run after scaffolding")
     trust = sub.add_parser("trust")
     trust_sub = trust.add_subparsers(dest="trust_command", required=True)
     trust_sub.add_parser("readiness")
@@ -320,6 +327,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         envelope = import_boundary.output_rejected()
         return 5 if _print_envelope(envelope, compact=True) else 2
     args = _parser().parse_args(argv)
+    if args.command == "demo":
+        from torq_cli.application.demo import demo_command
+
+        return demo_command(args.goal, Path(args.run_root), args.run)
     if args.command == "trust":
         trust_report = evaluate_production_trust()
         print(json.dumps(trust_report.to_dict(), sort_keys=True))

@@ -1,0 +1,10 @@
+site_name: TORQ CLI
+repo_url: https://github.com/pilotwaffle/torq-cli-python
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Architecture: architecture/governed-orchestration.md
+  - Security: security/threat-model.md
+docs_dir: docs

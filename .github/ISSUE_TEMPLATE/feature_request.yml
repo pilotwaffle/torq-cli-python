@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a capability or an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem you are trying to solve
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety / governance implications
+      description: TORQ fails closed by design. Does this change what is attested, contained, or evidenced?
