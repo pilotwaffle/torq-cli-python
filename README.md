@@ -8,6 +8,14 @@
 
 TORQ executes multi-stage agent plans (design → review → build → adversarial audit) inside a governed boundary. It validates the machine and role profile before any provider is touched, refuses live execution unless both the operator and the policy opt in, never lets an agent commit, push, or merge, and writes a tamper-evident receipt chain for every run.
 
+## See the dashboard in action
+
+**[Watch the 92-second dashboard demo](https://github.com/pilotwaffle/torq-cli-python/releases/download/dashboard-demo-2026-09-17/torq-dashboard-demo-2026-09-17.mp4)** — plan a task, review changes and checks, request a correction, accept, apply, and continue.
+
+[![TORQ dashboard showing a reviewed and applied candidate](https://github.com/pilotwaffle/torq-cli-python/releases/download/dashboard-demo-2026-09-17/torq-dashboard-demo-poster.png)](https://github.com/pilotwaffle/torq-cli-python/releases/download/dashboard-demo-2026-09-17/torq-dashboard-demo-2026-09-17.mp4)
+
+Recorded September 17, 2026 with an **offline test provider**. The dashboard, structural checks, signed receipts, and file application are real; no live AI service is called. [Demo details and verification report](https://github.com/pilotwaffle/torq-cli-python/releases/tag/dashboard-demo-2026-09-17).
+
 ## Why TORQ
 
 | | TORQ | Typical agent CLI |
