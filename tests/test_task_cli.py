@@ -23,6 +23,7 @@ def test_task_only_fleet_launch_derives_state_roots_without_run_root(
     project.mkdir()
     native = tmp_path / "claude.exe"
     native.write_bytes(b"native-placeholder")
+    native.chmod(0o700)
     captured = {}
 
     def server(projector, **kwargs):
@@ -44,7 +45,7 @@ def test_task_only_fleet_launch_derives_state_roots_without_run_root(
         ]
     )
     output = capsys.readouterr().out
-    assert result == 0
+    assert result == 0, output
     assert '"status": "serving"' in output and "view=task" in output
     assert captured["task_service"] is not None
 
