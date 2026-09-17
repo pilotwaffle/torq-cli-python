@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from torq_cli.adapters.candidate_provider import (
     CandidateProviderCommandFactory,
     OUTPUT_CONTRACT,
     parse_candidate_output,
+    trusted_python_executable,
 )
 from torq_cli.application.task_store import TaskStore
 from torq_cli.safety.task_workspace import (
@@ -19,6 +21,10 @@ from torq_cli.safety.task_workspace import (
     snapshot_source,
     validate_relative_path,
 )
+
+
+def test_trusted_running_interpreter_resolves_alias_before_native_validation() -> None:
+    assert trusted_python_executable() == str(Path(sys.executable).resolve(strict=True))
 
 
 def test_candidate_output_is_duplicate_free_finite_and_plan_bound() -> None:

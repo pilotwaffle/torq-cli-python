@@ -77,7 +77,7 @@ class CandidateProviderCommandFactory:
             binary = _native_executable(self.claude_binary)
         elif self.provider in {"deepseek", "kimi", "qwen", "zai"}:
             bridge = Path(__file__).with_name("chat_bridge.py")
-            _native_executable(Path(sys.executable))
+            binary = trusted_python_executable()
             if bridge.is_symlink() or not bridge.is_file():
                 raise ValueError("task_provider_bridge_unsafe")
             if self.vault is None:
@@ -85,7 +85,6 @@ class CandidateProviderCommandFactory:
             # Resolve the credential now without disclosing it. Authentication is
             # still unknown until the provider accepts an actual request.
             claude_compatible_environment(self.provider, self.vault, self.base_environment)
-            binary = str(Path(sys.executable).resolve())
         else:
             raise ValueError("task_provider_unsupported")
         return {"provider": self.provider, "model": self.model, "binary": binary, "authentication": "not_checked"}
@@ -118,7 +117,7 @@ class CandidateProviderCommandFactory:
             if self.vault is None:
                 raise ValueError("task_credential_source_required")
             bridge = Path(__file__).with_name("chat_bridge.py").resolve()
-            argv = (_native_executable(Path(sys.executable)), "-I", "-S", str(bridge))
+            argv = (trusted_python_executable(), "-I", "-S", str(bridge))
             environment = claude_compatible_environment(
                 self.provider, self.vault, self.base_environment
             )
@@ -196,7 +195,10 @@ def parse_candidate_output(
 
 def trusted_python_executable() -> str:
     """Return the interpreter identity only at the audited adapter boundary."""
-    return _native_executable(Path(sys.executable))
+    # Virtual environments and hosted CI commonly expose the already-running
+    # interpreter through a symlink. Resolve that trusted process identity
+    # before applying the native-target checks used for child execution.
+    return _native_executable(Path(sys.executable).resolve(strict=True))
 
 
 __all__ = [
