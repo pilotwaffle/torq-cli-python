@@ -144,6 +144,19 @@ def _canonical_for_verification(value: Mapping[str, Any]) -> bytes:
         ).encode()
 
 
+def _nested_artifact_references(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    detail = payload.get("detail")
+    if not isinstance(detail, Mapping):
+        return ()
+    if payload.get("review_contract") == "torq-candidate-review-v1" and payload.get("event") == "candidate_accepted":
+        reference = detail.get("review_artifact")
+        return (reference,) if isinstance(reference, Mapping) else ()
+    if payload.get("apply_contract") == "torq-candidate-apply-v1" and payload.get("event") == "apply_prepared":
+        reference = detail.get("journal_artifact")
+        return (reference,) if isinstance(reference, Mapping) else ()
+    return ()
+
+
 def _canonical_json(value: Mapping[str, Any]) -> str:
     return _canonical(value).decode("ascii")
 
@@ -844,6 +857,10 @@ class FileRunKeyStore:
             _restrict_private_key(self.private_key_path)
             return key
 
+    def load_signing_key(self) -> bytes:
+        """Load the installation signing key without creating or chmod-ing it."""
+        return self._read_regular_key(self.private_key_path)
+
     @staticmethod
     def _get_or_create_secret(path: Path) -> bytes:
         try:
@@ -987,6 +1004,53 @@ class ReceiptChain:
         )
         if self._rollback_protected:
             self._initialize_or_resume_anchored_store()
+
+    @classmethod
+    def open_existing(
+        cls,
+        evidence_root: Path,
+        run_id: str,
+        keys: FileRunKeyStore,
+        *,
+        profile_version: str,
+        policy_version: str,
+    ) -> ReceiptChain:
+        """Open one covered existing chain without creating identity or evidence."""
+        if not _valid_run_id(run_id):
+            raise ValueError("run_id_invalid")
+        root = evidence_root / run_id
+        if root.resolve(strict=True).parent != evidence_root.resolve(strict=True):
+            raise ValueError("run_id_invalid")
+        verification = verify_receipt_store(root)
+        if verification.status != "verified":
+            raise ValueError("receipt_store_not_writable:" + str(verification.finding or verification.status))
+        manifest = json.loads((root / "terminal-manifest.json").read_text(encoding="utf-8"))
+        certificate_path = root / _RUN_CERTIFICATE_NAME
+        certificate = json.loads(certificate_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, Mapping)
+            or not isinstance(certificate, Mapping)
+            or certificate.get("certificate_schema_version") not in _ROLLBACK_CERTIFICATE_SCHEMA_VERSIONS
+        ):
+            raise ValueError("receipt_store_not_writable:certificate_invalid")
+        self = cls.__new__(cls)
+        self.run_id = run_id
+        self.root = root
+        self.receipts_path = root / "receipts.jsonl"
+        self.key = keys.load_signing_key()
+        self._commit_observer = None
+        self.run_keys = keys.load_run_keys(run_id)
+        self.certificate_path = certificate_path
+        self.profile_version = profile_version
+        self.policy_version = policy_version
+        self.registry = PatternRegistry.default()
+        self._lock = RLock()
+        self._sequence = int(manifest["receipt_count"])
+        self._previous = manifest.get("terminal_receipt_hash")
+        self._sealed = bool(manifest.get("sealed"))
+        self._manifest_generation = int(manifest["manifest_generation"])
+        self._rollback_protected = True
+        return self
 
     def _pin_signing_identity(self, evidence_root: Path) -> None:
         public_key = Ed25519PrivateKey.from_private_bytes(self.key).public_key().public_bytes_raw()
@@ -1288,6 +1352,16 @@ class ReceiptChain:
                         or self.hash_file(artifact) != payload.get("artifact_hash")
                     ):
                         raise ValueError("uncovered_tail_artifact_invalid")
+                if isinstance(payload, Mapping):
+                    resolved_root = self.root.resolve()
+                    for reference in _nested_artifact_references(payload):
+                        artifact = (resolved_root / str(reference.get("artifact"))).resolve(strict=False)
+                        if (
+                            not artifact.is_relative_to(resolved_root)
+                            or not artifact.exists()
+                            or self.hash_file(artifact) != reference.get("artifact_hash")
+                        ):
+                            raise ValueError("uncovered_tail_artifact_invalid")
                 previous = receipt_hash
             lifecycle_finding = validate_v2_receipt_contract(receipts, sealed=False)
             if lifecycle_finding is not None:
@@ -1799,6 +1873,14 @@ def verify_receipt_store(
                     return StoreVerification("tampered", "artifact_path_escape")
                 if not artifact.exists() or ReceiptChain.hash_file(artifact) != payload.get("artifact_hash"):
                     return StoreVerification("tampered", "artifact_hash_mismatch")
+            if isinstance(payload, Mapping):
+                resolved_root = root.resolve()
+                for reference in _nested_artifact_references(payload):
+                    artifact = (resolved_root / str(reference.get("artifact"))).resolve(strict=False)
+                    if not artifact.is_relative_to(resolved_root):
+                        return StoreVerification("tampered", "artifact_path_escape")
+                    if not artifact.exists() or ReceiptChain.hash_file(artifact) != reference.get("artifact_hash"):
+                        return StoreVerification("tampered", "artifact_hash_mismatch")
             previous = receipt_hash
             receipts.append(envelope)
 
@@ -2089,3 +2171,34 @@ def read_verified_artifact(
         run_id.encode("utf-8"),
     )
     return plain
+
+
+def read_verified_prefix_artifact(
+    evidence_root: Path,
+    run_id: str,
+    artifact_relative: str,
+) -> bytes:
+    """Read an artifact from an authenticated covered unsealed recovery prefix."""
+    if not _valid_run_id(run_id):
+        raise ValueError("run_id_invalid")
+    run_root = evidence_root / run_id
+    verification = verify_receipt_store(run_root)
+    if verification.status != "verified":
+        raise ValueError("artifact_store_not_verified")
+    manifest = json.loads((run_root / "terminal-manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("sealed") is not False:
+        raise ValueError("artifact_store_not_recovery_prefix")
+    target = (run_root / artifact_relative).resolve(strict=True)
+    if not target.is_relative_to(run_root.resolve()):
+        raise ValueError("artifact_path_escape")
+    metadata = target.stat(follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or target.is_symlink():
+        raise ValueError("artifact_file_unsafe")
+    payload = target.read_bytes()
+    if not payload.startswith(_ARTIFACT_FORMAT) or len(payload) < 38:
+        raise ValueError("artifact_format_invalid")
+    keys = FileRunKeyStore(evidence_root).load_run_keys(run_id)
+    offset = len(_ARTIFACT_FORMAT)
+    return AESGCM(keys.artifact).decrypt(
+        payload[offset : offset + 12], payload[offset + 12 :], run_id.encode("utf-8")
+    )

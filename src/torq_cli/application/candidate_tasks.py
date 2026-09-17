@@ -46,6 +46,8 @@ CHECK_PROFILE_ID = "structural-v1"
 CHECK_PROFILE_VERSION = "1.0.0"
 PLAN_CONTRACT = "torq-candidate-plan-v1"
 INPUT_CONTRACT = "torq-candidate-input-v1"
+PLAN_CONTRACT_V2 = "torq-candidate-plan-v2"
+INPUT_CONTRACT_V2 = "torq-candidate-input-v2"
 
 
 class ProcessOwner(Protocol):
@@ -104,6 +106,11 @@ class CandidateTaskService:
         owner_factory: Callable[..., ProcessOwner] | None = None,
         python_executable: Path | None = None,
         acquire_lock: bool = True,
+        project_gate: Callable[[Path], None] | None = None,
+        input_bundle_provider: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        plan_transformer: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        draft_saved_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
+        draft_deleted_observer: Callable[[str], None] | None = None,
     ) -> None:
         if not projects or len(projects) > 32:
             raise ValueError("task_projects_invalid")
@@ -133,6 +140,11 @@ class CandidateTaskService:
         self.model = model
         self.owner_factory = owner_factory or cast(Callable[..., ProcessOwner], OwnedProcess)
         self.python_executable = (python_executable or Path(trusted_python_executable())).resolve()
+        self.project_gate = project_gate
+        self.input_bundle_provider = input_bundle_provider
+        self.plan_transformer = plan_transformer
+        self.draft_saved_observer = draft_saved_observer
+        self.draft_deleted_observer = draft_deleted_observer
         self._lock = threading.RLock()
         self._owner: ProcessOwner | None = None
         self._active_task: str | None = None
@@ -232,6 +244,8 @@ class CandidateTaskService:
             if isinstance(self.provider_factory, CandidateProviderCommandFactory):
                 self.provider_factory.preflight()
             snapshot_source(next(iter(self.projects.values())).root, ())
+            if self.project_gate is not None:
+                self.project_gate(next(iter(self.projects.values())).root)
             execution = True
         except (OSError, ValueError):
             execution = False
@@ -280,17 +294,22 @@ class CandidateTaskService:
         self._project(project_id)
         safe_inputs = [validate_relative_path(item) for item in input_paths]
         safe_outputs = [validate_relative_path(item) for item in output_paths]
-        return self.store.put_draft(
+        saved = self.store.put_draft(
             project_id,
             goal=goal,
             input_paths=safe_inputs,
             output_paths=safe_outputs,
             expected_revision=expected_revision,
         )
+        if self.draft_saved_observer is not None:
+            self.draft_saved_observer(project_id, saved)
+        return saved
 
     def delete_draft(self, project_id: str, *, expected_revision: int) -> None:
         self._project(project_id)
         self.store.delete_draft(project_id, expected_revision=expected_revision)
+        if self.draft_deleted_observer is not None:
+            self.draft_deleted_observer(project_id)
 
     def review_plan(
         self,
@@ -301,6 +320,8 @@ class CandidateTaskService:
         output_paths: Sequence[str],
     ) -> dict[str, Any]:
         project = self._project(project_id)
+        if self.project_gate is not None:
+            self.project_gate(project.root)
         draft = self.draft(project_id)
         if draft is None or not draft["goal"] or draft["revision"] != draft_revision:
             raise ValueError("task_draft_revision_stale")
@@ -334,6 +355,8 @@ class CandidateTaskService:
             "helper_hash": _hash_file(helper),
             "limits": {"files": 32, "file_bytes": 65536, "total_bytes": 2097152},
         }
+        if self.plan_transformer is not None:
+            body = dict(self.plan_transformer(body))
         return self.store.save_plan(body)
 
     def start(self, *, request_id: str, plan_hash: str) -> dict[str, Any]:
@@ -350,9 +373,24 @@ class CandidateTaskService:
         plan = plans.get(plan_hash)
         if not isinstance(plan, dict) or digest_json(plan) != plan_hash:
             raise ValueError("task_plan_unknown")
-        draft = self.draft(str(plan["project_id"]))
-        if draft is None or draft["revision"] != plan["draft_revision"] or draft["goal"] != plan["goal"]:
-            raise ValueError("task_plan_stale")
+        if plan.get("contract") == PLAN_CONTRACT:
+            draft = self.draft(str(plan["project_id"]))
+            if draft is None or draft["revision"] != plan["draft_revision"] or draft["goal"] != plan["goal"]:
+                raise ValueError("task_plan_stale")
+        elif (
+            plan.get("contract") == PLAN_CONTRACT_V2
+            and isinstance(plan.get("lineage"), Mapping)
+            and plan["lineage"].get("mode") == "continuation"
+        ):
+            draft = self.draft(str(plan["project_id"]))
+            if draft != {
+                "project_id": plan["project_id"],
+                "goal": plan["goal"],
+                "input_paths": plan["input_paths"],
+                "output_paths": plan["output_paths"],
+                "revision": plan["draft_revision"],
+            }:
+                raise ValueError("task_plan_stale")
         self._revalidate_plan(plan)
         request = {"plan_hash": plan_hash, "project_id": plan["project_id"]}
         with self._lock:
@@ -419,7 +457,7 @@ class CandidateTaskService:
 
     def _revalidate_plan(self, plan: Mapping[str, Any]) -> SourceSnapshot:
         if (
-            plan.get("contract") != PLAN_CONTRACT
+            plan.get("contract") not in {PLAN_CONTRACT, PLAN_CONTRACT_V2}
             or plan.get("provider") != self.provider
             or plan.get("model") != self.model
             or plan.get("check_profile_id") != CHECK_PROFILE_ID
@@ -427,6 +465,8 @@ class CandidateTaskService:
         ):
             raise ValueError("task_plan_identity_invalid")
         project = self._project(str(plan["project_id"]))
+        if self.project_gate is not None:
+            self.project_gate(project.root)
         base = snapshot_source(project.root, [str(item) for item in plan["input_paths"]])
         verify_output_scope(
             project.root,
@@ -501,7 +541,14 @@ class CandidateTaskService:
             base = self._revalidate_plan(plan)
             chain = ReceiptChain(self.evidence_root, task_id, FileRunKeyStore(self.evidence_root), profile_version="candidate-v1", policy_version="candidate-v1")
             broker = EvidenceBroker(chain)
-            input_bundle = {"contract": INPUT_CONTRACT, "plan": dict(plan), "files": base.bundle()}
+            if plan.get("contract") == PLAN_CONTRACT_V2:
+                if self.input_bundle_provider is None:
+                    raise ValueError("candidate_child_context_unavailable")
+                input_bundle = dict(self.input_bundle_provider(plan))
+                if input_bundle.get("contract") != INPUT_CONTRACT_V2 or input_bundle.get("plan") != dict(plan):
+                    raise ValueError("candidate_child_context_invalid")
+            else:
+                input_bundle = {"contract": INPUT_CONTRACT, "plan": dict(plan), "files": base.bundle()}
             input_text = canonical_json(input_bundle)
             input_hash = digest_bytes(input_text.encode("utf-8"))
             artifact, cipher_hash, content_hash = self._artifact(broker, "accepted-input", input_text)
@@ -662,6 +709,11 @@ class CandidateTaskService:
             generated = next(body for body in bodies if body["event"] == "candidate_generated")
             checked = next(body for body in bodies if body["event"] == "candidate_check_completed")
             ready = next(body for body in bodies if body["event"] == "candidate_ready")
+            ready_sequence = next(
+                row["sequence"]
+                for row in receipts
+                if row.get("payload", {}).get("event") == "candidate_ready"
+            )
             input_plain = read_verified_artifact(self.evidence_root, task_id, str(started["artifact"]))
             candidate_plain = read_verified_artifact(self.evidence_root, task_id, str(generated["artifact"]))
             check_plain = read_verified_artifact(self.evidence_root, task_id, str(checked["artifact"]))
@@ -674,6 +726,20 @@ class CandidateTaskService:
             ):
                 raise ValueError("task_artifact_content_hash_mismatch")
             input_bundle = json.loads(input_plain)
+            if input_bundle.get("contract") == INPUT_CONTRACT_V2:
+                from torq_cli.domain.task_review import resolve_task_review
+
+                resolved = resolve_task_review(self.evidence_root, task_id, int(ready_sequence))
+                review_check = resolved.envelope["review"]["checks"]
+                return {
+                    "verified": True,
+                    "ready_sequence": ready_sequence,
+                    "candidate_files": sorted(resolved.result_files, key=str.casefold),
+                    "check": {
+                        "profile": review_check["profile_id"],
+                        "exit_code": review_check["exit_code"],
+                    },
+                }
             if input_bundle.get("contract") != INPUT_CONTRACT or not isinstance(input_bundle.get("plan"), dict):
                 raise ValueError("task_input_artifact_invalid")
             plan = input_bundle["plan"]
@@ -752,7 +818,7 @@ class CandidateTaskService:
                 for operation in expected_ops
             ):
                 raise ValueError("task_candidate_content_mismatch")
-            return {"verified": True, "candidate_files": [item.path for item in disk.entries], "check": {"profile": CHECK_PROFILE_ID, "exit_code": checked["exit_code"]}}
+            return {"verified": True, "ready_sequence": ready_sequence, "candidate_files": [item.path for item in disk.entries], "check": {"profile": CHECK_PROFILE_ID, "exit_code": checked["exit_code"]}}
         except (OSError, ValueError, KeyError, StopIteration, json.JSONDecodeError):
             return {"state": "untrusted", "finding": "task_result_verification_failed", "verified": False}
 

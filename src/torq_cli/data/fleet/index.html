@@ -93,6 +93,70 @@
     </main>
 
     <main id="task-view" class="task-view" tabindex="-1" hidden>
+      <section id="task-recovery-panel" class="task-recovery-panel" role="status" aria-live="polite" hidden>
+        <div><strong id="task-recovery-title">Project recovery required</strong><p id="task-recovery-message"></p><p>Pause other editors and tools writing this project while applying or recovering. This includes writes made through atomic saves.</p></div>
+        <button id="task-recover" type="button" class="review-apply-button" hidden>Recover this project</button>
+      </section>
+      <section id="task-review-view" class="review-view" aria-labelledby="review-title" hidden>
+        <header class="review-header">
+          <button id="review-back" class="quiet-button" type="button">Back to tasks</button>
+          <div class="review-heading">
+            <p class="workspace-context">Verified candidate review</p>
+            <h1 id="review-title">Candidate review</h1>
+            <p id="review-goal" hidden></p>
+            <p id="review-identity" class="sr-only"></p>
+          </div>
+          <span id="review-state" class="task-state">Loading</span>
+        </header>
+        <p id="review-alert" class="review-alert" role="status" aria-live="polite"></p>
+        <div class="review-tabs" role="tablist" aria-label="Candidate evidence">
+          <button id="review-tab-plan" role="tab" aria-selected="true" aria-controls="review-panel-plan" tabindex="0" data-review-tab="plan">Plan</button>
+          <button id="review-tab-changes" role="tab" aria-selected="false" aria-controls="review-panel-changes" tabindex="-1" data-review-tab="changes">Changes <span id="review-change-count"></span></button>
+          <button id="review-tab-checks" role="tab" aria-selected="false" aria-controls="review-panel-checks" tabindex="-1" data-review-tab="checks">Checks</button>
+        </div>
+        <div class="review-workspace">
+          <div class="review-evidence">
+            <section id="review-panel-plan" role="tabpanel" aria-labelledby="review-tab-plan" tabindex="0"></section>
+            <section id="review-panel-changes" role="tabpanel" aria-labelledby="review-tab-changes" tabindex="0" hidden>
+              <nav id="review-files" class="review-files" aria-label="Changed files"></nav>
+              <article id="review-diff" class="review-diff"></article>
+            </section>
+            <section id="review-panel-checks" role="tabpanel" aria-labelledby="review-tab-checks" tabindex="0" hidden></section>
+          </div>
+          <aside class="review-actions" aria-labelledby="review-actions-title">
+            <h2 id="review-actions-title">Next step</h2>
+            <section class="review-primary-decision">
+              <h3>Accept candidate</h3>
+              <p>Records your approval of these exact reviewed files. It does not modify your project.</p>
+              <button id="review-accept" type="button" class="workspace-primary" disabled>Accept reviewed candidate</button>
+            </section>
+            <section id="review-apply-section" hidden>
+              <h3>Apply to project</h3>
+              <p id="review-apply-copy">Changes the configured project using the reviewed files listed here. Pause other editors and tools writing this project while applying or recovering. This includes writes made through atomic saves.</p>
+              <button id="review-apply" type="button" class="review-apply-button">Apply to project</button>
+            </section>
+            <section id="review-continue-section" hidden>
+              <h3>Continue working</h3>
+              <p>Start a fresh task from the project’s current source.</p>
+              <button id="review-continue" type="button" class="quiet-button">Continue after apply</button>
+            </section>
+            <hr>
+            <details id="review-correction-section" class="review-correction-details">
+              <summary>Request a correction</summary>
+              <section>
+                <label for="review-correction"><span>Describe what should change in the next candidate.</span></label>
+                <textarea id="review-correction" rows="5" maxlength="16384" placeholder="For example: keep the existing error message and add a test for empty input."></textarea>
+                <p id="review-correction-status" class="task-status"></p>
+                <button id="review-correction-plan" type="button" class="quiet-button">Review correction plan</button>
+                <div id="review-child-plan" class="review-child-plan" hidden></div>
+                <button id="review-start-revision" type="button" class="workspace-primary" hidden>Start revision</button>
+              </section>
+            </details>
+            <details class="review-details"><summary>Evidence identifiers</summary><dl id="review-hashes"></dl></details>
+          </aside>
+        </div>
+      </section>
+      <div id="task-compose-view">
       <section class="task-hero">
         <p class="workspace-context">Bounded execution</p>
         <h1>What would you like to build?</h1>
@@ -131,9 +195,16 @@
         <section class="task-card task-history" aria-labelledby="task-history-title">
           <span class="task-step">History</span>
           <h2 id="task-history-title">Recent candidates</h2>
+          <form id="task-history-search" class="task-history-search" role="search">
+            <label class="sr-only" for="task-history-query">Search candidate history</label>
+            <input id="task-history-query" type="search" maxlength="200" placeholder="Search titles, goals, or projects">
+            <button type="submit" class="quiet-button">Search</button>
+          </form>
           <div id="task-history-list" class="task-empty">No candidate history yet.</div>
+          <button id="task-history-more" type="button" class="quiet-button task-history-more" hidden>Load more history</button>
         </section>
       </section>
+      </div>
     </main>
 
     <section class="governance-rail" aria-labelledby="rail-title">

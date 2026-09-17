@@ -98,8 +98,26 @@ state directory. Start authorizes one tools-off provider request. TORQ writes th
 returned UTF-8 contents to a separate candidate, then runs the fixed
 `structural-v1` check for Python syntax, strict JSON, and UTF-8 text. The policy
 accepts at most 32 files, 64 KiB per file, and 2 MiB total. It does not run unit
-tests, execute generated code, or modify the configured project. Candidate
-application remains a later governed step.
+tests or execute generated code. Building a candidate leaves the configured
+project unchanged.
+
+Open **Review candidate** to inspect its Plan, exact Changes, and signed Checks.
+Request a correction to build a separate child candidate, or **Accept reviewed
+candidate** to record approval without changing files. **Apply to project** is a
+separate action that writes only those approved contents. After application,
+**Continue after apply** opens a fresh task draft from the current source.
+History remains readable after the project changes.
+
+Application supports UTF-8 file creation and replacement in existing directories.
+It verifies source freshness and file identity, preserves supported permissions,
+and rejects unsafe links or unsupported metadata. An interrupted application
+blocks new work on that project until verified recovery completes; ambiguous or
+externally changed files remain blocked rather than being overwritten. These
+actions do not commit, push, merge, or run project tests.
+
+Pause other editors, autosave, formatters, and tools writing this project during
+Apply or recovery. TORQ serializes its own installations and rejects observed
+file changes, but cannot prevent an external write racing the final file rename.
 
 ## Safety model
 

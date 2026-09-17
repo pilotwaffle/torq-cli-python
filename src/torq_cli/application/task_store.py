@@ -181,6 +181,13 @@ class TaskStore:
                     raise ValueError("task_request_replay_conflict")
                 return dict(data["tasks"][prior["task_id"]]), False
             task_id = "run-task-" + secrets.token_hex(12)
+            ordinals = [
+                item["history_ordinal"] for item in data["tasks"].values()
+                if isinstance(item, dict)
+                and isinstance(item.get("history_ordinal"), int)
+                and not isinstance(item["history_ordinal"], bool)
+                and item["history_ordinal"] > 0
+            ]
             task = {
                 **dict(request_body),
                 "task_id": task_id,
@@ -188,6 +195,7 @@ class TaskStore:
                 "request_digest": request_digest,
                 "state": "reserved",
                 "provider_dispatch": False,
+                "history_ordinal": max(ordinals, default=0) + 1,
                 "finding": None,
             }
             data["requests"][request_id] = {"request_digest": request_digest, "task_id": task_id}
