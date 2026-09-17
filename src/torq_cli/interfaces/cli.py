@@ -22,6 +22,7 @@ from torq_cli.application import import_v5_config, import_v5_console
 from torq_cli.application.chat_projection import reduce_chat_projection
 from torq_cli.application.chat_runtime import ChatRuntimeCoordinator
 from torq_cli.application.candidate_tasks import CandidateTaskService, TaskProject
+from torq_cli.application.candidate_review import CandidateReviewService
 from torq_cli.application.workspace import classify_workspace_root
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.live_runtime import build_live_runtime
@@ -405,6 +406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if args.serve:
             task_service = None
+            review_service = None
             task_runtime_root = None
             try:
                 chat_controller = None
@@ -537,6 +539,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         provider=args.task_provider,
                         model=args.task_model,
                     )
+                    review_service = CandidateReviewService(
+                        tasks=task_service,
+                        state_root=task_state_root,
+                        common_authority_root=task_parent / "primary-authority",
+                    )
 
                 server = create_fleet_server(
                     projector,
@@ -546,6 +553,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     chat_snapshot_provider=chat_snapshot_provider,
                     workspace_chat_provider=args.chat_provider,
                     task_service=task_service,
+                    review_service=review_service,
                 )
             except (OSError, ValueError) as exc:
                 if task_service is not None:

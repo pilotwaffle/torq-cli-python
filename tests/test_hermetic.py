@@ -77,6 +77,8 @@ def test_production_imports_forbid_subprocess() -> None:
                 "torq_cli/safety/chat_evidence.py",
                 "torq_cli/safety/task_workspace.py",
                 "torq_cli/safety/state_lock.py",
+                "torq_cli/safety/primary_marker.py",
+                "torq_cli/safety/primary_transaction.py",
             )
         ):
             # The evidence broker owns the authenticated local-only IPC
@@ -89,8 +91,10 @@ def test_production_imports_forbid_subprocess() -> None:
                 local_allow = {"sys"}
             else:
                 local_allow = {"os"}
-        elif source_path.as_posix().endswith("torq_cli/application/task_store.py"):
-            # Durable task CAS/reservations need atomic replace and fsync.
+        elif source_path.as_posix().endswith(
+            ("torq_cli/application/task_store.py", "torq_cli/application/review_store.py")
+        ):
+            # Durable task and review CAS/reservations need atomic replace and fsync.
             local_allow = {"os"}
         elif source_path.as_posix().endswith("torq_cli/connectors/native_credentials.py"):
             # DISPLAY/WAYLAND_DISPLAY are explicit session-type facts only;

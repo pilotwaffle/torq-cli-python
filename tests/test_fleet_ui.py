@@ -100,6 +100,17 @@ def test_fleet_ui_shell_is_public_but_contains_no_run_data(tmp_path: Path) -> No
         "task-review",
         "task-start",
         "task-stop",
+        "review-back",
+        "review-tab-plan",
+        "review-tab-changes",
+        "review-tab-checks",
+        "review-correction-plan",
+        "review-start-revision",
+        "review-accept",
+        "review-apply",
+        "review-continue",
+        "task-recover",
+        "task-history-more",
     }
     assert 'href="#fleet-board"' in markup
     assert 'aria-live="polite"' in markup
@@ -158,6 +169,34 @@ def test_task_ui_is_bundled_and_names_bounded_candidate_behavior() -> None:
     assert "caps.active_task_id" in javascript
     assert "data-task-id" in javascript
     assert '@media (max-width: 760px)' in css
+    assert 'role="tablist" aria-label="Candidate evidence"' in html
+    assert 'Accept copy' not in html
+    assert "It does not modify your project" in html
+    assert "Apply to project" in html
+    assert '<details id="review-correction-section"' in html
+    assert "ReviewGate" in javascript
+    assert "/api/v1/task-history?q=" in javascript
+    assert "diff_complete===false" in javascript
+    assert 'event.key==="ArrowDown"' in javascript
+    assert "project tests were not run" in javascript
+    assert "task_review_source_stale" in javascript
+    assert "live.can_accept===true" in javascript
+    assert "live.can_apply===true" in javascript
+    assert "formatNewlineMetadata" in javascript
+    assert 'check.termination==="confirmed_empty"' in javascript
+    assert "formatCheckOutput" in javascript
+    assert "candidate_continuation_draft_occupied" in javascript
+    assert "draft=envelope.draft||envelope" in javascript
+    assert "/api/v1/task-recovery/" in javascript
+    assert "RecoveryGate" in javascript
+    assert "forgetAfterDefiniteRejection" in javascript
+    assert "HistoryGate" in javascript
+    assert "next_cursor" in javascript
+    assert "applicationApplied" in javascript
+    assert "Pause other editors and tools writing this project while applying or recovering." in html
+    assert "overflow-x: clip" in css
+    assert "@media (max-width: 340px)" in css
+    assert ".review-view [hidden] { display: none !important; }" in css
 
 
 def _contrast(first: str, second: str) -> float:

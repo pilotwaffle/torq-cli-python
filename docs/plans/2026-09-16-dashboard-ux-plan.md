@@ -1,6 +1,6 @@
 # TORQ task workspace: dashboard review and implementation plan
 
-Status: bounded P0/P1 and separately approved candidate-only P2 implemented on 2026-09-16; P3 remains unimplemented. See `2026-09-16-dashboard-p2-contract.md` and the P2 verification receipts. Scope: TORQ CLI in E:/Torq-CLI.
+Status: bounded P0/P1 and candidate-only P2 implemented on 2026-09-16; bounded P3 review, refinement, explicit Apply, recovery, and continuation implemented and locally verified on 2026-09-17. See `2026-09-16-dashboard-p3-contract.md` and the P3 G1D/G1R/G2A receipts. GitHub CI and merge remain delivery gates. The original research and roadmap below are historical, broader product direction, not a claim of arbitrary execution or full competitor parity. Scope: TORQ CLI in E:/Torq-CLI.
 
 Historical P0/P1 correction: that increment delivered only the opt-in Workspace,
 truthful root/provider/session capability metadata, collection guidance, and

@@ -7,6 +7,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from torq_cli.domain.evidence_transitions import transition_authority_finding
+from torq_cli.domain.candidate_decision_evidence import (
+    validate_apply_payload,
+    validate_decision_receipt_contract,
+    validate_review_payload,
+)
 from torq_cli.domain.run_plan import (
     PLAN_CONTRACT,
     initial_plan_body,
@@ -403,6 +408,12 @@ def validate_receipt_payload(
         task_finding = validate_task_audit_payload(payload)
         if task_finding is not None:
             return task_finding
+        review_finding = validate_review_payload(payload)
+        if review_finding is not None:
+            return review_finding
+        apply_finding = validate_apply_payload(payload)
+        if apply_finding is not None:
+            return apply_finding
     if transition in ATTEMPT_TRANSITIONS:
         if not isinstance(payload.get("role"), str):
             return "attempt_role_invalid"
@@ -810,6 +821,9 @@ def validate_v2_receipt_contract(
     task_finding = validate_task_receipt_contract(receipts, sealed=sealed)
     if task_finding is not None:
         return task_finding
+    decision_finding = validate_decision_receipt_contract(receipts, sealed=sealed)
+    if decision_finding is not None:
+        return decision_finding
     attempts: dict[str, dict[str, Any]] = {}
     ordinals: dict[str, int] = {}
     repairs: dict[str, tuple[str, int, int]] = {}

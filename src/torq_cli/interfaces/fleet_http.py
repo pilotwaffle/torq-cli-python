@@ -154,6 +154,7 @@ class _Session:
     issued_at: float
     last_seen: float
     read_only: bool = False
+    subject_id: str = ""
 
 
 class FleetSessionManager:
@@ -187,7 +188,9 @@ class FleetSessionManager:
             self._nonce_spent = True
             now = self._clock()
             token = secrets.token_urlsafe(48)
-            self._sessions[token] = _Session(token, now, now)
+            self._sessions[token] = _Session(
+                token, now, now, subject_id="session-" + secrets.token_hex(16)
+            )
             return token
 
     def authenticate(self, cookie_header: str | None, *, touch: bool = True) -> _Session | None:
@@ -255,6 +258,7 @@ class FleetSessionManager:
                 session.issued_at,
                 now,
                 read_only=session.read_only,
+                subject_id=session.subject_id,
             )
             self._read_recovery[session.token] = token
             return token
@@ -332,6 +336,18 @@ def _reject_json_constant(value: str) -> object:
     raise ValueError("context_request_non_finite")
 
 
+def _safe_finding(exc: BaseException, default: str) -> str:
+    if exc.args and isinstance(exc.args[0], str):
+        value = exc.args[0].split(":", 1)[0]
+        if (
+            value.startswith(("task_", "candidate_"))
+            and value.replace("_", "").isalnum()
+            and len(value) <= 64
+        ):
+            return value
+    return default
+
+
 class TaskHTTPService(Protocol):
     def capabilities(self) -> dict[str, Any]: ...
     def draft(self, project_id: str) -> dict[str, Any] | None: ...
@@ -343,6 +359,25 @@ class TaskHTTPService(Protocol):
     def stop(self, task_id: str) -> dict[str, Any]: ...
     def task(self, task_id: str) -> dict[str, Any]: ...
     def history(self) -> list[dict[str, Any]]: ...
+
+
+class ReviewHTTPService(Protocol):
+    def review(self, task_id: str, ready_sequence: int) -> dict[str, Any]: ...
+    def correction(self, task_id: str, ready_sequence: int) -> dict[str, Any]: ...
+    def save_correction(self, task_id: str, ready_sequence: int, *, text: str, expected_revision: int) -> dict[str, Any]: ...
+    def review_child_plan(self, task_id: str, ready_sequence: int, *, request_id: str, correction_revision: int, correction_hash: str, review_hash: str, subject_id: str) -> dict[str, Any]: ...
+    def replay_child_plan(self, task_id: str, ready_sequence: int, *, request_id: str, correction_revision: int, correction_hash: str, review_hash: str) -> dict[str, Any]: ...
+    def start_revision(self, *, request_id: str, plan_hash: str, replay_only: bool = False) -> dict[str, Any]: ...
+    def continue_task(self, *, request_id: str, application_id: str) -> dict[str, Any]: ...
+    def replay_continuation(self, *, request_id: str, application_id: str) -> dict[str, Any]: ...
+    def accept(self, *, request_id: str, task_id: str, ready_sequence: int, review_hash: str, subject_id: str) -> dict[str, Any]: ...
+    def replay_accept(self, *, request_id: str, task_id: str, ready_sequence: int, review_hash: str) -> dict[str, Any]: ...
+    def apply(self, *, request_id: str, candidate: Mapping[str, Any], acceptance: Mapping[str, Any], subject_id: str) -> dict[str, Any]: ...
+    def replay_apply(self, *, request_id: str, candidate: Mapping[str, Any], acceptance: Mapping[str, Any]) -> dict[str, Any]: ...
+    def application(self, application_id: str) -> dict[str, Any]: ...
+    def history(self, *, query: str = "", limit: int = 50, cursor: str | None = None) -> dict[str, Any]: ...
+    def recovery_status(self, project_id: str) -> dict[str, Any]: ...
+    def recover(self, project_id: str) -> dict[str, Any]: ...
 
 
 def create_fleet_server(
@@ -360,6 +395,7 @@ def create_fleet_server(
     chat_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None,
     workspace_chat_provider: str | None = None,
     task_service: TaskHTTPService | None = None,
+    review_service: ReviewHTTPService | None = None,
 ) -> ThreadingHTTPServer:
     if not _loopback_host(host):
         raise ValueError("fleet_loopback_required")
@@ -687,6 +723,59 @@ def create_fleet_server(
                 except (OSError, ValueError):
                     self._json(409, {"status": "blocked", "finding": "task_state_unavailable"})
                 return
+            review_match = re.fullmatch(
+                r"/api/v1/task-reviews/(run-task-[a-f0-9]{24})/([1-9][0-9]*)",
+                parsed.path,
+            )
+            correction_match = re.fullmatch(
+                r"/api/v1/task-reviews/(run-task-[a-f0-9]{24})/([1-9][0-9]*)/correction",
+                parsed.path,
+            )
+            application_match = re.fullmatch(
+                r"/api/v1/task-applications/(application-[a-f0-9]{24})",
+                parsed.path,
+            )
+            if review_match is not None and review_service is not None:
+                try:
+                    self._json(200, review_service.review(review_match.group(1), int(review_match.group(2))))
+                except (OSError, ValueError) as exc:
+                    self._json(409, {"status": "blocked", "finding": _safe_finding(exc, "task_review_unavailable")})
+                return
+            if correction_match is not None and review_service is not None:
+                try:
+                    self._json(200, {"correction": review_service.correction(correction_match.group(1), int(correction_match.group(2)))})
+                except (OSError, ValueError) as exc:
+                    self._json(409, {"status": "blocked", "finding": _safe_finding(exc, "task_review_unavailable")})
+                return
+            if application_match is not None and review_service is not None:
+                try:
+                    self._json(200, review_service.application(application_match.group(1)))
+                except (OSError, ValueError) as exc:
+                    self._json(409, {"status": "blocked", "finding": _safe_finding(exc, "task_application_unavailable")})
+                return
+            if parsed.path == "/api/v1/task-history" and review_service is not None:
+                values = parse_qs(parsed.query, keep_blank_values=True)
+                if set(values) - {"q", "limit", "cursor"} or any(len(item) != 1 for item in values.values()):
+                    self._json(409, {"status": "blocked", "finding": "candidate_history_query_invalid"})
+                    return
+                try:
+                    limit = int(values.get("limit", ["50"])[0])
+                    self._json(200, review_service.history(
+                        query=values.get("q", [""])[0], limit=limit,
+                        cursor=values.get("cursor", [None])[0],
+                    ))
+                except (OSError, ValueError) as exc:
+                    self._json(409, {"status": "blocked", "finding": _safe_finding(exc, "candidate_history_query_invalid")})
+                return
+            recovery_match = re.fullmatch(
+                r"/api/v1/task-recovery/([A-Za-z0-9][A-Za-z0-9._-]{0,63})", parsed.path
+            )
+            if recovery_match is not None and review_service is not None:
+                try:
+                    self._json(200, review_service.recovery_status(recovery_match.group(1)))
+                except (OSError, ValueError) as exc:
+                    self._json(409, {"status": "blocked", "finding": _safe_finding(exc, "task_apply_recovery_unavailable")})
+                return
             draft_match = re.fullmatch(r"/api/v1/tasks/drafts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})", parsed.path)
             if draft_match is not None and task_service is not None:
                 try:
@@ -863,6 +952,15 @@ def create_fleet_server(
                 r"/api/v1/tasks/drafts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/delete", path
             )
             task_stop_match = re.fullmatch(r"/api/v1/tasks/(run-task-[a-f0-9]{24})/stop", path)
+            review_correction_match = re.fullmatch(
+                r"/api/v1/task-reviews/(run-task-[a-f0-9]{24})/([1-9][0-9]*)/correction", path
+            )
+            review_child_match = re.fullmatch(
+                r"/api/v1/task-reviews/(run-task-[a-f0-9]{24})/([1-9][0-9]*)/child-plans", path
+            )
+            review_recovery_match = re.fullmatch(
+                r"/api/v1/task-recovery/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/recover", path
+            )
             if path == "/api/v1/chat/turns":
                 operation = "chat_submit"
                 service_present = chat_controller is not None
@@ -884,6 +982,27 @@ def create_fleet_server(
             elif task_stop_match is not None:
                 operation = "task_stop"
                 service_present = task_service is not None
+            elif review_correction_match is not None:
+                operation = "review_correction"
+                service_present = review_service is not None
+            elif review_child_match is not None:
+                operation = "review_child_plan"
+                service_present = review_service is not None
+            elif path == "/api/v1/task-revisions":
+                operation = "review_revision"
+                service_present = review_service is not None
+            elif path == "/api/v1/task-continuations":
+                operation = "review_continuation"
+                service_present = review_service is not None
+            elif path == "/api/v1/task-reviews/accept":
+                operation = "review_accept"
+                service_present = review_service is not None
+            elif path == "/api/v1/task-applications":
+                operation = "review_apply"
+                service_present = review_service is not None
+            elif review_recovery_match is not None:
+                operation = "review_recover"
+                service_present = review_service is not None
             elif path in {"/api/v1/context", "/api/v1/fleet/context"}:
                 operation = "context"
                 service_present = context_injector is not None
@@ -904,7 +1023,10 @@ def create_fleet_server(
                 return
             replay_only = False
             session = session_manager.claim_mutation(self.headers.get("Cookie"))
-            if session is None and operation == "task_start":
+            if session is None and operation in {
+                "task_start", "review_child_plan", "review_revision", "review_continuation",
+                "review_accept", "review_apply"
+            }:
                 recovered = session_manager.recover_rotated_session(self.headers.get("Cookie"))
                 if recovered is not None:
                     session, _ = recovered
@@ -949,6 +1071,12 @@ def create_fleet_server(
                     task_stop_match,
                     session,
                     replay_only=replay_only,
+                )
+                return
+            if operation.startswith("review_"):
+                self._review_post(
+                    operation, review_correction_match, review_child_match, review_recovery_match,
+                    session, replay_only=replay_only
                 )
                 return
             snapshot = projector.snapshot()
@@ -1321,6 +1449,140 @@ def create_fleet_server(
                 finding = str(exc).split(":", 1)[0]
                 if not finding.startswith("task_"):
                     finding = "task_request_invalid"
+                if replay_only:
+                    self._json(409, {"status": "blocked", "finding": finding})
+                else:
+                    rotated = session_manager.rotate(session)
+                    self._json(409, {"status": "blocked", "finding": finding}, session_token=rotated)
+
+        def _review_post(
+            self,
+            operation: str,
+            correction_match: re.Match[str] | None,
+            child_match: re.Match[str] | None,
+            recovery_match: re.Match[str] | None,
+            session: _Session,
+            *,
+            replay_only: bool,
+        ) -> None:
+            assert review_service is not None
+            try:
+                payload = self._read_task_payload(allow_empty=operation == "review_recover")
+                if operation == "review_correction":
+                    if replay_only or correction_match is None or set(payload) != {"text", "expected_revision"}:
+                        raise ValueError("candidate_correction_request_invalid")
+                    text = payload.get("text")
+                    revision = payload.get("expected_revision")
+                    if not isinstance(text, str) or not isinstance(revision, int) or isinstance(revision, bool):
+                        raise ValueError("candidate_correction_request_invalid")
+                    result = review_service.save_correction(
+                        correction_match.group(1), int(correction_match.group(2)),
+                        text=text, expected_revision=revision,
+                    )
+                elif operation == "review_child_plan":
+                    if child_match is None or set(payload) != {
+                        "request_id", "correction_revision", "correction_hash", "review_hash"
+                    }:
+                        raise ValueError("candidate_child_plan_request_invalid")
+                    request_id = payload.get("request_id")
+                    revision = payload.get("correction_revision")
+                    correction_hash = payload.get("correction_hash")
+                    review_hash = payload.get("review_hash")
+                    if (
+                        not isinstance(request_id, str)
+                        or not isinstance(revision, int)
+                        or isinstance(revision, bool)
+                        or not isinstance(correction_hash, str)
+                        or not isinstance(review_hash, str)
+                    ):
+                        raise ValueError("candidate_child_plan_request_invalid")
+                    if replay_only:
+                        result = review_service.replay_child_plan(
+                            child_match.group(1), int(child_match.group(2)),
+                            request_id=request_id, correction_revision=revision,
+                            correction_hash=correction_hash, review_hash=review_hash,
+                        )
+                    else:
+                        result = review_service.review_child_plan(
+                            child_match.group(1), int(child_match.group(2)),
+                            request_id=request_id, correction_revision=revision,
+                            correction_hash=correction_hash, review_hash=review_hash,
+                            subject_id=session.subject_id,
+                        )
+                elif operation == "review_revision":
+                    if set(payload) != {"request_id", "plan_hash"}:
+                        raise ValueError("candidate_revision_request_invalid")
+                    request_id = payload.get("request_id")
+                    plan_hash = payload.get("plan_hash")
+                    if not isinstance(request_id, str) or not isinstance(plan_hash, str):
+                        raise ValueError("candidate_revision_request_invalid")
+                    result = review_service.start_revision(
+                        request_id=request_id, plan_hash=plan_hash, replay_only=replay_only
+                    )
+                elif operation == "review_continuation":
+                    if set(payload) != {"request_id", "application_id"}:
+                        raise ValueError("candidate_continuation_request_invalid")
+                    request_id = payload.get("request_id")
+                    application_id = payload.get("application_id")
+                    if not isinstance(request_id, str) or not isinstance(application_id, str):
+                        raise ValueError("candidate_continuation_request_invalid")
+                    method = (
+                        review_service.replay_continuation
+                        if replay_only else review_service.continue_task
+                    )
+                    result = method(request_id=request_id, application_id=application_id)
+                elif operation == "review_accept":
+                    if set(payload) != {"request_id", "task_id", "ready_sequence", "review_hash"}:
+                        raise ValueError("candidate_accept_request_invalid")
+                    request_id = payload.get("request_id")
+                    task_id = payload.get("task_id")
+                    sequence = payload.get("ready_sequence")
+                    review_hash = payload.get("review_hash")
+                    if (
+                        not isinstance(request_id, str) or not isinstance(task_id, str)
+                        or not isinstance(sequence, int) or isinstance(sequence, bool)
+                        or not isinstance(review_hash, str)
+                    ):
+                        raise ValueError("candidate_accept_request_invalid")
+                    if replay_only:
+                        result = review_service.replay_accept(
+                            request_id=request_id, task_id=task_id,
+                            ready_sequence=sequence, review_hash=review_hash,
+                        )
+                    else:
+                        result = review_service.accept(
+                            request_id=request_id, task_id=task_id, ready_sequence=sequence,
+                            review_hash=review_hash, subject_id=session.subject_id,
+                        )
+                elif operation == "review_apply":
+                    if set(payload) != {"request_id", "candidate", "acceptance"}:
+                        raise ValueError("candidate_apply_request_invalid")
+                    request_id = payload.get("request_id")
+                    candidate = payload.get("candidate")
+                    acceptance = payload.get("acceptance")
+                    if not isinstance(request_id, str) or not isinstance(candidate, Mapping) or not isinstance(acceptance, Mapping):
+                        raise ValueError("candidate_apply_request_invalid")
+                    if replay_only:
+                        result = review_service.replay_apply(
+                            request_id=request_id, candidate=candidate, acceptance=acceptance,
+                        )
+                    else:
+                        result = review_service.apply(
+                            request_id=request_id, candidate=candidate, acceptance=acceptance,
+                            subject_id=session.subject_id,
+                        )
+                elif operation == "review_recover":
+                    if replay_only or payload or recovery_match is None:
+                        raise ValueError("task_apply_recovery_request_invalid")
+                    result = review_service.recover(recovery_match.group(1))
+                else:
+                    raise ValueError("candidate_request_invalid")
+                rotated = session_manager.rotate(session)
+                self._json(200, {"status": "accepted", "result": result}, session_token=rotated)
+            except ConnectionError:
+                return
+            except (OSError, RuntimeError, ValueError) as exc:
+                finding = _safe_finding(exc, "candidate_request_invalid")
                 if replay_only:
                     self._json(409, {"status": "blocked", "finding": finding})
                 else:

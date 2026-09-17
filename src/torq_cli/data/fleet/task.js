@@ -1,268 +1,85 @@
 (() => {
   "use strict";
-  class MutationQueue {
-    constructor() { this.tail = Promise.resolve(); }
-    enqueue(work) { this.tail = this.tail.catch(() => {}).then(work); return this.tail; }
-  }
-  class EditGate {
-    constructor() { this.epoch = 0; }
-    edited() { this.epoch += 1; }
-    capture(project, snapshot) { return {epoch:this.epoch, project, snapshot}; }
-    accepts(ticket, project, snapshot) { return ticket.epoch === this.epoch && ticket.project === project && ticket.snapshot === snapshot; }
-  }
-  function requestIdForPlan(planHash, storage, cryptoSource) {
-    const key = `torq.task.request.${planHash}`;
-    try {
-      const value = storage.getItem(key) || cryptoSource.randomUUID();
-      storage.setItem(key, value);
-      return value;
-    } catch (_) { return `request-${planHash.slice(7,31)}`; }
-  }
-  globalThis.TorqTask = { MutationQueue, EditGate, requestIdForPlan };
-  const byId = (id) => document.getElementById(id);
-  const view = byId("task-view");
-  const button = byId("task-view-button");
-  if (!view || !button) return;
-
-  const mutationQueue = new MutationQueue();
-  const editGate = new EditGate();
-  const state = { capabilities: null, project: "", revisions: {}, saved: {}, plan: null, active: null, loadToken: 0, saveTimer: null, initialized: false, draftReady: false };
-  const lines = (value) => value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
-  const escape = (value) => String(value).replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
-
-  async function request(path, options = {}) {
-    const response = await fetch(path, { credentials: "same-origin", headers: {"Content-Type":"application/json"}, ...options });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.finding || "task_request_failed");
-    return body;
-  }
-
-  function setStatus(message) { byId("task-draft-status").textContent = message; }
-  function setView() {
-    document.body.dataset.dashboardView = "task";
-    view.hidden = false;
-    byId("workspace-view").hidden = true;
-    byId("fleet-board").hidden = true;
-    button.setAttribute("aria-pressed", "true");
-    byId("workspace-view-button").setAttribute("aria-pressed", "false");
-    byId("fleet-view-button").setAttribute("aria-pressed", "false");
-    byId("skip-link").href = "#task-view";
-    byId("skip-link").textContent = "Skip to new task";
-    view.focus();
-    if (!state.initialized) {
-      state.initialized = true;
-      refresh().catch(() => { state.initialized = false; setDraftReady(false); setStatus("Task setup is unavailable. Reload to try again."); });
-    } else {
-      loadHistory().catch(() => setStatus("Could not refresh task history."));
-    }
-  }
-  button.addEventListener("click", setView);
-  [byId("workspace-view-button"), byId("fleet-view-button")].forEach((item) => item.addEventListener("click", () => {
-    view.hidden = true;
-    button.setAttribute("aria-pressed", "false");
-    delete document.body.dataset.dashboardView;
-  }));
-
-  function setDraftReady(ready) {
-    state.draftReady = ready;
-    ["task-project", "task-goal", "task-input-paths", "task-output-paths", "task-clear", "task-review"].forEach((id) => {
-      const control = byId(id);
-      if (control) control.disabled = !ready;
-    });
-  }
-
-  async function loadDraft(project, expectedEpoch = editGate.epoch) {
-    const token = ++state.loadToken;
-    const epoch = expectedEpoch;
-    const body = await request(`/api/v1/tasks/drafts/${encodeURIComponent(project)}`, {headers:{}});
-    if (token !== state.loadToken || project !== state.project) return;
-    const draft = body.draft;
-    state.revisions[project] = draft ? draft.revision : 0;
-    if (epoch !== editGate.epoch) return;
-    byId("task-goal").value = draft ? draft.goal : "";
-    byId("task-input-paths").value = draft ? draft.input_paths.join("\n") : "";
-    byId("task-output-paths").value = draft ? draft.output_paths.join("\n") : "";
-    state.saved[project] = JSON.stringify({project, goal:draft ? draft.goal : "", inputPaths:draft ? draft.input_paths : [], outputPaths:draft ? draft.output_paths : []});
-    setStatus(draft && draft.goal ? `Saved on this installation · revision ${state.revisions[project]}` : "Drafts are saved on this installation.");
-  }
-
-  async function refresh() {
-    setDraftReady(false);
-    setStatus("Loading saved draft...");
-    const initialEpoch = editGate.epoch;
-    const caps = await request("/api/v1/tasks/capabilities", {headers:{}});
-    state.capabilities = caps;
-    const select = byId("task-project");
-    const prior = state.project;
-    select.innerHTML = caps.projects.map((item) => `<option value="${escape(item.id)}">${escape(item.label)}</option>`).join("");
-    state.project = caps.projects.some((item) => item.id === prior) ? prior : (caps.projects[0] || {}).id || "";
-    select.value = state.project;
+  class MutationQueue { constructor(){this.tail=Promise.resolve();} enqueue(work){this.tail=this.tail.catch(()=>{}).then(work);return this.tail;} }
+  class EditGate { constructor(){this.epoch=0;} edited(){this.epoch+=1;} capture(project,snapshot){return{epoch:this.epoch,project,snapshot};} accepts(ticket,project,snapshot){return ticket.epoch===this.epoch&&ticket.project===project&&ticket.snapshot===snapshot;} }
+  class ReviewGate { constructor(){this.epoch=0;this.key="";} select(task,sequence){this.epoch+=1;this.key=`${task}:${sequence}`;return this.capture();} capture(){return{epoch:this.epoch,key:this.key};} accepts(ticket){return ticket.epoch===this.epoch&&ticket.key===this.key;} }
+  class RecoveryGate { constructor(){this.epoch=0;this.project="";} select(project){this.epoch+=1;this.project=project;return this.capture();} capture(){return{epoch:this.epoch,project:this.project};} accepts(ticket){return ticket.epoch===this.epoch&&ticket.project===this.project;} }
+  class HistoryGate { constructor(){this.epoch=0;this.query="";} select(query){this.epoch+=1;this.query=query;return this.capture();} capture(){return{epoch:this.epoch,query:this.query};} accepts(ticket){return ticket.epoch===this.epoch&&ticket.query===this.query;} }
+  function stableRequestId(kind,identity,storage,cryptoSource){const key=`torq.task.${kind}.${identity}`;try{const value=storage.getItem(key)||cryptoSource.randomUUID();storage.setItem(key,value);return value;}catch(_){return`request-${kind}-${String(identity).replace(/[^a-zA-Z0-9]/g,"").slice(0,24)}`;}}
+  function forgetAfterDefiniteRejection(error,kind,identity,storage){if(!error||!Number.isInteger(error.status)||error.status<400||error.status>499)return false;try{storage.removeItem(`torq.task.${kind}.${identity}`);return true;}catch(_){return false;}}
+  function requestIdForPlan(planHash,storage,cryptoSource){const key=`torq.task.request.${planHash}`;try{const value=storage.getItem(key)||cryptoSource.randomUUID();storage.setItem(key,value);return value;}catch(_){return`request-${String(planHash).slice(7,31)}`;}}
+  function unwrap(body,key){if(body&&typeof body.schema==="string")return body;if(body&&body.result!==undefined)return body.result;if(body&&body[key]!==undefined)return body[key];return body;}
+  function formatNewlineMetadata(meta,text){if(meta&&typeof meta==="object"){const style=String(meta.style||"newline style recorded").toUpperCase();const bytes=Number.isInteger(meta.bytes)?` · ${meta.bytes} bytes`:"";const ending=meta.final_newline===true?"final newline":meta.final_newline===false?"no final newline":(text&&text.endsWith("\n")?"final newline":"no final newline");return`${style}${bytes} · ${ending}`;}return`${String(meta||"newline style recorded").toUpperCase()} · ${text&&text.endsWith("\n")?"final newline":"no final newline"}`;}
+  function formatCheckOutput(output){if(!output||typeof output!=="object")return String(output||"No output recorded.");const checked=Array.isArray(output.checked)?output.checked:[];const status=output.status?`Status: ${readableValue(output.status)}`:"Structural output recorded.";const files=checked.map((item)=>item&&typeof item==="object"?`• ${String(item.path||"Unknown file")}${item.validator?` — ${readableValue(item.validator)}`:""}`:`• ${String(item)}`);return files.length?`${status}\nChecked files:\n${files.join("\n")}`:status;}
+  function readableValue(value){return String(value||"").replaceAll("_"," ");}
+  function canRecover(status){return !!status&&status.state==="recovery_required"&&status.owned===true;}
+  function applicationApplied(application){return !!application&&["applied","candidate_applied"].includes(application.state);}
+  function applicationBlocksApply(application){return applicationApplied(application)||!!application&&application.state==="recovery_required";}
+  function applicationRetryIdentity(candidate,acceptance,application){const prior=application&&["rejected","rolled_back"].includes(application.state)?`${application.application_id}.${application.state}`:"initial";return`${candidate.review_hash}.${acceptance.decision_id}.${prior}`;}
+  function applicationOutcomeMessage(application){if(applicationApplied(application))return"Candidate applied to the configured project. The signed review remains historical evidence.";if(application&&application.state==="recovery_required")return"Application did not complete. This project requires recovery before another Apply.";if(application&&application.state==="rolled_back")return"Application did not complete and the original project files were restored. Reopen eligibility before trying a fresh Apply.";if(application&&application.state==="rejected")return`Application was rejected${application.finding?`: ${readableValue(application.finding)}`:""}. Resolve the finding before trying a fresh Apply.`;return"Application did not complete. Reopen this review for the verified outcome and remedy.";}
+  globalThis.TorqTask={MutationQueue,EditGate,ReviewGate,RecoveryGate,HistoryGate,stableRequestId,forgetAfterDefiniteRejection,requestIdForPlan,unwrap,formatNewlineMetadata,formatCheckOutput,canRecover,applicationApplied,applicationBlocksApply,applicationRetryIdentity,applicationOutcomeMessage};
+  const byId=(id)=>document.getElementById(id), view=byId("task-view"), button=byId("task-view-button");
+  if(!view||!button)return;
+  const mutationQueue=new MutationQueue(), editGate=new EditGate(), reviewGate=new ReviewGate(), recoveryGate=new RecoveryGate(), historyGate=new HistoryGate();
+  const terminal=["candidate_ready","failed","cancelled","interrupted","termination_unknown","untrusted"];
+  const state={capabilities:null,project:"",revisions:{},saved:{},plan:null,active:null,loadToken:0,saveTimer:null,initialized:false,draftReady:false,review:null,selectedChange:0,correction:null,childPlan:null,acceptance:null,application:null,lastFocus:null,recoveryProject:"",historyQuery:"",historyCursor:null};
+  const lines=(value)=>value.split(/\r?\n/).map((item)=>item.trim()).filter(Boolean);
+  const escape=(value)=>String(value==null?"":value).replace(/[&<>"']/g,(char)=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+  const readable=readableValue;
+  async function request(path,options={}){const response=await fetch(path,{credentials:"same-origin",headers:{"Content-Type":"application/json"},...options});let body={};try{body=await response.json();}catch(_){}if(!response.ok){const error=new Error(body.finding||body.error||"task_request_failed");error.status=response.status;throw error;}return body;}
+  const enqueueMutation=(work)=>mutationQueue.enqueue(work);
+  function setStatus(message){byId("task-draft-status").textContent=message;}
+  function announce(message){if(byId("live-announcer"))byId("live-announcer").textContent=message;}
+  function setDraftReady(ready){state.draftReady=ready;["task-project","task-goal","task-input-paths","task-output-paths","task-clear","task-review"].forEach((id)=>{if(byId(id))byId(id).disabled=!ready;});}
+  function setView(){document.body.dataset.dashboardView="task";view.hidden=false;byId("workspace-view").hidden=true;byId("fleet-board").hidden=true;button.setAttribute("aria-pressed","true");byId("workspace-view-button").setAttribute("aria-pressed","false");byId("fleet-view-button").setAttribute("aria-pressed","false");byId("skip-link").href="#task-view";byId("skip-link").textContent="Skip to tasks";view.focus();if(!state.initialized){state.initialized=true;refresh().catch(()=>{state.initialized=false;setDraftReady(false);setStatus("Task setup is unavailable. Reload to try again.");});}else loadHistory().catch(()=>setStatus("Could not refresh task history."));}
+  button.addEventListener("click",setView);
+  [byId("workspace-view-button"),byId("fleet-view-button")].forEach((item)=>item.addEventListener("click",()=>{view.hidden=true;button.setAttribute("aria-pressed","false");delete document.body.dataset.dashboardView;}));
+  async function loadDraft(project,expectedEpoch=editGate.epoch){const token=++state.loadToken,body=await request(`/api/v1/tasks/drafts/${encodeURIComponent(project)}`,{headers:{}});if(token!==state.loadToken||project!==state.project)return;const draft=body.draft;state.revisions[project]=draft?draft.revision:0;if(expectedEpoch!==editGate.epoch)return;byId("task-goal").value=draft?draft.goal:"";byId("task-input-paths").value=draft?draft.input_paths.join("\n"):"";byId("task-output-paths").value=draft?draft.output_paths.join("\n"):"";state.saved[project]=JSON.stringify({project,goal:draft?draft.goal:"",inputPaths:draft?draft.input_paths:[],outputPaths:draft?draft.output_paths:[]});setStatus(draft&&draft.goal?`Saved on this installation · revision ${state.revisions[project]}`:"Drafts are saved on this installation.");}
+  async function refresh(){setDraftReady(false);setStatus("Loading saved draft...");const initialEpoch=editGate.epoch,caps=await request("/api/v1/tasks/capabilities",{headers:{}});state.capabilities=caps;const select=byId("task-project"),prior=state.project;select.innerHTML=caps.projects.map((item)=>`<option value="${escape(item.id)}">${escape(item.label)}</option>`).join("");state.project=caps.projects.some((item)=>item.id===prior)?prior:(caps.projects[0]||{}).id||"";select.value=state.project;
     await loadDraft(state.project, initialEpoch);
     setDraftReady(true);
-    await loadHistory();
-    if (caps.active_task_id) {
-      state.active = caps.active_task_id;
-      pollTask();
-    }
-  }
+    await loadHistory();loadRecovery(state.project);if(caps.active_task_id){state.active=caps.active_task_id;pollTask();}}
+  async function refreshTaskCapabilities(){state.capabilities=await request("/api/v1/tasks/capabilities",{headers:{}});return state.capabilities;}
+  const formSnapshot=()=>({project:state.project,goal:byId("task-goal").value,inputPaths:lines(byId("task-input-paths").value),outputPaths:lines(byId("task-output-paths").value)});
+  function saveDraft(){if (!state.draftReady) return Promise.reject(new Error("task_draft_loading"));const snapshot=formSnapshot();return enqueueMutation(async()=>{const{project,goal,inputPaths,outputPaths}=snapshot;if(!goal.trim())throw new Error("Enter a goal before reviewing.");const encoded=JSON.stringify(snapshot);if(state.saved[project]===encoded)return{project_id:project,goal,input_paths:inputPaths,output_paths:outputPaths,revision:state.revisions[project]||0};const body=await request(`/api/v1/tasks/drafts/${encodeURIComponent(project)}`,{method:"POST",body:JSON.stringify({goal,input_paths:inputPaths,output_paths:outputPaths,expected_revision:state.revisions[project]||0})});state.revisions[project]=body.result.revision;state.saved[project]=encoded;if(project===state.project&&JSON.stringify(formSnapshot())===JSON.stringify(snapshot))setStatus(`Saved on this installation · revision ${body.result.revision}`);return body.result;});}
+  byId("task-project").addEventListener("change",async(event)=>{const next=event.target.value,pending=byId("task-goal").value.trim()?saveDraft().catch(()=>{}):Promise.resolve();setDraftReady(false);state.plan=null;byId("task-start").disabled=true;await pending;state.project=next;loadRecovery(next);try{await loadDraft(next);setDraftReady(true);}catch(error){setStatus(readable(error.message));}});
+  ["task-goal","task-input-paths","task-output-paths"].forEach((id)=>byId(id).addEventListener("input",()=>{editGate.edited();state.plan=null;byId("task-start").disabled=true;byId("task-plan-summary").textContent="Review the updated goal and scope before starting.";setStatus("Saving changes…");clearTimeout(state.saveTimer);if(byId("task-goal").value.trim())state.saveTimer=setTimeout(()=>saveDraft().catch((error)=>setStatus(readable(error.message))),650);}));
+  byId("task-form").addEventListener("submit",async(event)=>{event.preventDefault();try{clearTimeout(state.saveTimer);const snapshot=JSON.stringify(formSnapshot()),ticket=editGate.capture(state.project,snapshot),draft=await saveDraft(),project=state.project,body=await enqueueMutation(()=>request("/api/v1/tasks/plans",{method:"POST",body:JSON.stringify({project_id:project,draft_revision:draft.revision,input_paths:draft.input_paths,output_paths:draft.output_paths})}));if(!editGate.accepts(ticket,state.project,JSON.stringify(formSnapshot()))||draft.revision!==state.revisions[state.project])return;state.plan=body.result;const label=(state.capabilities.projects.find((item)=>item.id===state.project)||{}).label||state.project;byId("task-plan-summary").innerHTML=`<dl><div><dt>Project</dt><dd>${escape(label)}</dd></div><div><dt>Provider</dt><dd>${escape(state.plan.provider)} · ${escape(state.plan.model)}</dd></div><div><dt>Check</dt><dd>Syntax and file format</dd></div></dl><strong>Allowed files</strong><ul class="task-file-list">${state.plan.output_paths.map((path)=>`<li>${escape(path)}</li>`).join("")}</ul><p class="task-hint">The provider can return contents only for these paths. TORQ writes a separate candidate and runs Python syntax, strict JSON, or UTF-8 checks. It does not run unit tests or change your project.</p><details><summary>Plan digest</summary><code>${escape(state.plan.plan_hash)}</code></details>`;byId("task-start").disabled=!state.capabilities.can_start_task;}catch(error){setStatus(readable(error.message));}});
+  byId("task-clear").addEventListener("click",async()=>{try{clearTimeout(state.saveTimer);const project=state.project,ticket=editGate.capture(project,JSON.stringify(formSnapshot())),body=await enqueueMutation(()=>request(`/api/v1/tasks/drafts/${encodeURIComponent(project)}/delete`,{method:"POST",body:JSON.stringify({expected_revision:state.revisions[project]||0})}));state.revisions[project]=body.result.revision;state.saved[project]=JSON.stringify({project,goal:"",inputPaths:[],outputPaths:[]});if(!editGate.accepts(ticket,state.project,JSON.stringify(formSnapshot())))return;["task-goal","task-input-paths","task-output-paths"].forEach((id)=>{byId(id).value="";});state.plan=null;byId("task-start").disabled=true;byId("task-plan-summary").textContent="Save a goal to review its exact execution plan.";setStatus("Draft deleted from this installation.");}catch(error){setStatus(readable(error.message));}});
+  byId("task-start").addEventListener("click",async()=>{if(!state.plan)return;const plan=state.plan,ticket=editGate.capture(state.project,JSON.stringify(formSnapshot()));byId("task-start").disabled=true;try{const requestId=requestIdForPlan(plan.plan_hash,localStorage,globalThis.crypto),body=await enqueueMutation(()=>{if(state.plan!==plan||!editGate.accepts(ticket,state.project,JSON.stringify(formSnapshot())))throw new Error("task_plan_changed");return request("/api/v1/tasks",{method:"POST",body:JSON.stringify({request_id:requestId,plan_hash:plan.plan_hash})});});if(state.plan!==plan||!editGate.accepts(ticket,state.project,JSON.stringify(formSnapshot())))return;state.active=body.result.task_id;renderTask(body.result);pollTask();}catch(error){if(state.plan===plan)byId("task-start").disabled=false;setStatus(`${readable(error.message)}. Select Start building to retry the same request.`);}});
+  function renderTask(task){const done=terminal.includes(task.state);byId("task-current").innerHTML=`<span class="task-state">${escape(readable(task.state))}</span>${task.finding?`<p>${escape(readable(task.finding))}</p>`:""}${task.verified?`<div class="task-result"><strong>Candidate verified</strong><br>${escape((task.candidate_files||[]).join(", "))}<br>Structural check exit ${escape(task.check.exit_code)}${task.ready_sequence!=null?`<br><button type="button" class="quiet-button" data-review-ready="${escape(task.ready_sequence)}" data-review-task="${escape(task.task_id)}">Review candidate</button>`:""}</div>`:""}`;const open=byId("task-current").querySelector("[data-review-task]");if(open)open.addEventListener("click",()=>openReview(open.dataset.reviewTask,Number(open.dataset.reviewReady),task.goal_summary||task.goal||"Candidate review"));byId("task-stop").disabled=done;}
+  async function pollTask(){if(!state.active)return;try{const body=await request(`/api/v1/tasks/${encodeURIComponent(state.active)}`,{headers:{}});renderTask(body.task);if(!terminal.includes(body.task.state))setTimeout(pollTask,600);else{state.active=null;await loadHistory();await refreshTaskCapabilities();}}catch(_){setTimeout(pollTask,1200);}}
+  byId("task-stop").addEventListener("click",async()=>{if(!state.active)return;const active=state.active;byId("task-stop").disabled=true;try{const body=await enqueueMutation(()=>request(`/api/v1/tasks/${encodeURIComponent(active)}/stop`,{method:"POST",body:""}));renderTask(body.result);if(terminal.includes(body.result.state)){state.active=null;await loadHistory();await refreshTaskCapabilities();}}catch(error){setStatus(readable(error.message));}});
 
-  async function refreshTaskCapabilities() {
-    state.capabilities = await request("/api/v1/tasks/capabilities", {headers:{}});
-    return state.capabilities;
-  }
-
-  byId("task-project").addEventListener("change", async (event) => {
-    const newProject = event.target.value;
-    const pendingSave = byId("task-goal").value.trim() ? saveDraft().catch(() => {}) : Promise.resolve();
-    setDraftReady(false);
-    state.plan = null;
-    byId("task-start").disabled = true;
-    await pendingSave;
-    state.project = newProject;
-    try { await loadDraft(state.project); setDraftReady(true); }
-    catch (error) { setStatus(error.message.replaceAll("_", " ")); }
-  });
-
-  const formSnapshot = () => ({
-    project: state.project,
-    goal: byId("task-goal").value,
-    inputPaths: lines(byId("task-input-paths").value),
-    outputPaths: lines(byId("task-output-paths").value)
-  });
-  const enqueueMutation = (work) => {
-    return mutationQueue.enqueue(work);
-  };
-
-  function saveDraft() {
-    if (!state.draftReady) return Promise.reject(new Error("task_draft_loading"));
-    const snapshot = formSnapshot();
-    const work = async () => {
-    const {project, goal, inputPaths, outputPaths} = snapshot;
-    if (!goal.trim()) throw new Error("Enter a goal before reviewing.");
-    const encoded = JSON.stringify(snapshot);
-    if (state.saved[project] === encoded) {
-      return {project_id:project, goal, input_paths:inputPaths, output_paths:outputPaths, revision:state.revisions[project] || 0};
-    }
-    const body = await request(`/api/v1/tasks/drafts/${encodeURIComponent(project)}`, {
-      method:"POST", body:JSON.stringify({goal, input_paths:inputPaths, output_paths:outputPaths, expected_revision:state.revisions[project] || 0})
-    });
-    state.revisions[project] = body.result.revision;
-    state.saved[project] = encoded;
-    if (project === state.project && JSON.stringify(formSnapshot()) === JSON.stringify(snapshot)) {
-      setStatus(`Saved on this installation · revision ${body.result.revision}`);
-    }
-    return body.result;
-    };
-    return enqueueMutation(work);
-  }
-
-  ["task-goal","task-input-paths","task-output-paths"].forEach((id) => byId(id).addEventListener("input", () => {
-    editGate.edited();
-    state.plan = null;
-    byId("task-start").disabled = true;
-    byId("task-plan-summary").textContent = "Review the updated goal and scope before starting.";
-    setStatus("Saving changes…");
-    clearTimeout(state.saveTimer);
-    if (byId("task-goal").value.trim()) state.saveTimer = setTimeout(() => saveDraft().catch((error) => setStatus(error.message.replaceAll("_", " "))), 650);
-  }));
-
-  byId("task-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    try {
-      clearTimeout(state.saveTimer);
-      const reviewedSnapshot = JSON.stringify(formSnapshot());
-      const reviewTicket = editGate.capture(state.project, reviewedSnapshot);
-      const draft = await saveDraft();
-      const reviewedProject = state.project;
-      const body = await enqueueMutation(() => request("/api/v1/tasks/plans", {method:"POST", body:JSON.stringify({project_id:reviewedProject, draft_revision:draft.revision, input_paths:draft.input_paths, output_paths:draft.output_paths})}));
-      if (!editGate.accepts(reviewTicket, state.project, JSON.stringify(formSnapshot())) || draft.revision !== state.revisions[state.project]) return;
-      state.plan = body.result;
-      const projectLabel = (state.capabilities.projects.find((item) => item.id === state.project) || {}).label || state.project;
-      byId("task-plan-summary").innerHTML = `<dl><div><dt>Project</dt><dd>${escape(projectLabel)}</dd></div><div><dt>Provider</dt><dd>${escape(state.plan.provider)} · ${escape(state.plan.model)}</dd></div><div><dt>Check</dt><dd>Syntax and file format</dd></div></dl><strong>Allowed files</strong><ul class="task-file-list">${state.plan.output_paths.map((path) => `<li>${escape(path)}</li>`).join("")}</ul><p class="task-hint">The provider can return contents only for these paths. TORQ writes a separate candidate and runs Python syntax, strict JSON, or UTF-8 checks. It does not run unit tests or change your project.</p><details><summary>Plan digest</summary><code>${escape(state.plan.plan_hash)}</code></details>`;
-      byId("task-start").disabled = !state.capabilities.can_start_task;
-    } catch (error) { setStatus(error.message.replaceAll("_", " ")); }
-  });
-
-  byId("task-clear").addEventListener("click", async () => {
-    try {
-      clearTimeout(state.saveTimer);
-      const project = state.project;
-      const deleteTicket = editGate.capture(project, JSON.stringify(formSnapshot()));
-      const body = await enqueueMutation(() => request(`/api/v1/tasks/drafts/${encodeURIComponent(project)}/delete`, {method:"POST", body:JSON.stringify({expected_revision:state.revisions[project] || 0})}));
-      state.revisions[project] = body.result.revision;
-      state.saved[project] = JSON.stringify({project, goal:"", inputPaths:[], outputPaths:[]});
-      if (!editGate.accepts(deleteTicket, state.project, JSON.stringify(formSnapshot()))) return;
-      ["task-goal","task-input-paths","task-output-paths"].forEach((id) => { byId(id).value = ""; });
-      state.plan = null; byId("task-start").disabled = true; byId("task-plan-summary").textContent = "Save a goal to review its exact execution plan.";
-      setStatus("Draft deleted from this installation.");
-    } catch (error) { setStatus(error.message.replaceAll("_", " ")); }
-  });
-
-  byId("task-start").addEventListener("click", async () => {
-    if (!state.plan) return;
-    const plan = state.plan;
-    const startTicket = editGate.capture(state.project, JSON.stringify(formSnapshot()));
-    byId("task-start").disabled = true;
-    try {
-      const requestId = requestIdForPlan(plan.plan_hash, localStorage, globalThis.crypto);
-      const body = await enqueueMutation(() => {
-        if (state.plan !== plan || !editGate.accepts(startTicket, state.project, JSON.stringify(formSnapshot()))) throw new Error("task_plan_changed");
-        return request("/api/v1/tasks", {method:"POST", body:JSON.stringify({request_id:requestId, plan_hash:plan.plan_hash})});
-      });
-      if (state.plan !== plan || !editGate.accepts(startTicket, state.project, JSON.stringify(formSnapshot()))) return;
-      state.active = body.result.task_id;
-      renderTask(body.result);
-      pollTask();
-    } catch (error) { if (state.plan === plan) byId("task-start").disabled = false; setStatus(`${error.message.replaceAll("_", " ")}. Select Start building to retry the same request.`); }
-  });
-
-  function renderTask(task) {
-    const terminal = ["candidate_ready","failed","cancelled","interrupted","termination_unknown","untrusted"].includes(task.state);
-    byId("task-current").innerHTML = `<span class="task-state">${escape(task.state.replaceAll("_"," "))}</span>${task.finding ? `<p>${escape(task.finding.replaceAll("_"," "))}</p>` : ""}${task.verified ? `<div class="task-result"><strong>Candidate verified</strong><br>${escape((task.candidate_files || []).join(", "))}<br>Structural check exit ${escape(task.check.exit_code)}</div>` : ""}`;
-    byId("task-stop").disabled = terminal;
-  }
-
-  async function pollTask() {
-    if (!state.active) return;
-    try {
-      const body = await request(`/api/v1/tasks/${encodeURIComponent(state.active)}`, {headers:{}});
-      renderTask(body.task);
-      if (!["candidate_ready","failed","cancelled","interrupted","termination_unknown","untrusted"].includes(body.task.state)) setTimeout(pollTask, 600);
-      else { state.active = null; await loadHistory(); await refreshTaskCapabilities(); }
-    } catch (_) { setTimeout(pollTask, 1200); }
-  }
-
-  byId("task-stop").addEventListener("click", async () => {
-    if (!state.active) return;
-    const activeTask = state.active;
-    byId("task-stop").disabled = true;
-    try {
-      const body = await enqueueMutation(() => request(`/api/v1/tasks/${encodeURIComponent(activeTask)}/stop`, {method:"POST", body:""}));
-      renderTask(body.result);
-      if (["candidate_ready","failed","cancelled","interrupted","termination_unknown","untrusted"].includes(body.result.state)) {
-        state.active = null;
-        await loadHistory();
-        await refreshTaskCapabilities();
-      }
-    }
-    catch (error) { setStatus(error.message.replaceAll("_", " ")); }
-  });
-
-  async function loadHistory() {
-    const body = await request("/api/v1/tasks", {headers:{}});
-    byId("task-history-list").innerHTML = body.tasks.length ? body.tasks.map((task) => `<button type="button" class="task-history-row" data-task-id="${escape(task.task_id)}"><span><strong>${escape(task.goal_summary || "Candidate task")}</strong><small>${escape(task.project_label || "Configured project")}</small></span><span class="task-state">${escape(task.state.replaceAll("_"," "))}</span></button>`).join("") : "No candidate history yet.";
-    byId("task-history-list").querySelectorAll("[data-task-id]").forEach((row) => row.addEventListener("click", async () => {
-      const body = await request(`/api/v1/tasks/${encodeURIComponent(row.dataset.taskId)}`, {headers:{}});
-      state.active = body.task.task_id;
-      renderTask(body.task);
-      if (!["candidate_ready","failed","cancelled","interrupted","termination_unknown","untrusted"].includes(body.task.state)) pollTask();
-      else { state.active = null; await refreshTaskCapabilities(); }
-    }));
-  }
-
-  request("/api/v1/tasks/capabilities", {headers:{}}).then((caps) => {
-    state.capabilities = caps;
-    button.hidden = false;
-    if (new URLSearchParams(location.search).get("view") === "task") setView();
-  }).catch(() => { button.hidden = true; });
+  const reviewPath=(task,sequence,suffix="")=>`/api/v1/task-reviews/${encodeURIComponent(task)}/${encodeURIComponent(sequence)}${suffix}`;
+  const remedies={task_review_source_stale:"The project changed after this candidate was built. Start a new task from the current source.",task_apply_recovery_required:"This project has an interrupted application. Use the recovery action, then reopen this review.",task_apply_primary_busy:"Another application is using this project. Wait for it to finish, then try again.",task_apply_parent_missing:"Create the missing project folder, then reopen this review.",task_review_unverified:"The signed candidate evidence could not be verified. Rebuild the candidate before accepting it.",task_correction_revision_conflict:"The correction changed in another session. Reopen this review to load the saved draft.",candidate_continuation_draft_occupied:"This project already has a saved task draft. Return to tasks and finish or delete that draft before continuing."};
+  const remedyFor=(code)=>remedies[code]||`${readable(code)}. Reopen the review and try again.`;
+  function setReviewAlert(message,tone=""){byId("review-alert").textContent=message;byId("review-alert").dataset.tone=tone;announce(message);}
+  function renderRecovery(status){const panel=byId("task-recovery-panel"),button=byId("task-recover");if(!status||status.state==="idle"){panel.hidden=true;button.hidden=true;return;}panel.hidden=false;byId("task-recovery-title").textContent="Project recovery required";byId("task-recovery-message").textContent=status.owned===true?"An interrupted application must be resolved before this project can accept new work.":"Another TORQ installation owns this interrupted application. Open that installation to recover it; this dashboard will not modify its journal.";button.hidden=!canRecover(status);button.disabled=false;}
+  async function loadRecovery(project){if(!project){renderRecovery(null);return;}state.recoveryProject=project;const ticket=recoveryGate.select(project);try{const status=await request(`/api/v1/task-recovery/${encodeURIComponent(project)}`,{headers:{}});if(recoveryGate.accepts(ticket)&&state.recoveryProject===project)renderRecovery(status);}catch(error){if(recoveryGate.accepts(ticket)&&state.recoveryProject===project){renderRecovery({state:"recovery_required",owned:false});byId("task-recovery-message").textContent=`Recovery status is unavailable: ${readable(error.message)}. Reload before starting or applying work.`;}}}
+  byId("task-recover").addEventListener("click",async()=>{const project=state.recoveryProject,ticket=recoveryGate.capture(),reviewTicket=reviewGate.capture(),control=byId("task-recover");if(!project)return;control.disabled=true;try{await enqueueMutation(()=>request(`/api/v1/task-recovery/${encodeURIComponent(project)}/recover`,{method:"POST",body:"{}"}));if(!recoveryGate.accepts(ticket)||state.recoveryProject!==project)return;await loadRecovery(project);await refreshTaskCapabilities();if(reviewGate.accepts(reviewTicket)&&state.review){const identity=state.review.review;await openReview(identity.task_id,identity.ready_sequence,byId("review-title").textContent);}else setStatus("Project recovery completed. You can review or start work again.");}catch(error){if(recoveryGate.accepts(ticket)&&state.recoveryProject===project){control.disabled=false;renderRecovery({state:"recovery_required",owned:true});byId("task-recovery-message").textContent=`Recovery remains blocked: ${readable(error.message)}. Resolve the reported project conflict, then retry.`;}}});
+  function showCompose(focus=true){reviewGate.select("",0);state.review=null;state.childPlan=null;state.acceptance=null;state.application=null;byId("task-review-view").hidden=true;byId("task-compose-view").hidden=false;loadRecovery(state.project);if(focus)(state.lastFocus&&document.contains(state.lastFocus)?state.lastFocus:byId("task-history-query")).focus();}
+  byId("review-back").addEventListener("click",()=>showCompose());
+  function renderPlan(review){const plan=review.plan||{},lineage=review.lineage||plan.lineage;byId("review-panel-plan").innerHTML=`<div class="review-summary-grid"><div><span>Project</span><strong>${escape(plan.project_label||plan.project_id||"Configured project")}</strong></div><div><span>Provider</span><strong>${escape([plan.provider,plan.model].filter(Boolean).join(" · "))}</strong></div><div><span>Files in scope</span><strong>${escape((plan.output_paths||[]).length)}</strong></div></div><h2>Goal</h2><p class="review-plan-goal">${escape(plan.goal||"No goal recorded")}</p><h2>Reviewed scope</h2><ul class="task-file-list">${(plan.output_paths||[]).map((path)=>`<li>${escape(path)}</li>`).join("")}</ul>${lineage?`<section class="review-lineage"><h2>Lineage</h2><p>This candidate is a ${escape(lineage.mode||"revision")} of task ${escape((lineage.parent_candidate||{}).task_id||lineage.parent_task_id||"")}.</p></section>`:""}`;}
+  function renderDiff(){const changes=(state.review&&state.review.review.changes)||[],change=changes[state.selectedChange];if(!change){byId("review-diff").textContent="No file changes.";return;}byId("review-files").querySelectorAll("button").forEach((item,index)=>{item.setAttribute("aria-current",index===state.selectedChange?"true":"false");item.tabIndex=index===state.selectedChange?0:-1;});const diff=change.diff_complete===false?`${change.diff||""}\n\nDiff detail was truncated. Inspect the bounded reviewed result text below.`:change.diff||"No textual diff.";byId("review-diff").innerHTML=`<header><div><span class="task-step">${escape(readable(change.operation))}</span><h2>${escape(change.path)}</h2></div><dl><div><dt>Before</dt><dd>${escape(formatNewlineMetadata(change.base_newlines,change.base_text))}</dd></div><div><dt>After</dt><dd>${escape(formatNewlineMetadata(change.result_newlines,change.result_text))}</dd></div></dl></header><pre aria-label="Text diff"><code>${escape(diff)}</code></pre>${change.diff_complete===false?`<details><summary>Reviewed result text</summary><pre><code>${escape(change.result_text||"")}</code></pre></details>`:""}<details><summary>File hashes</summary><dl><div><dt>Base</dt><dd><code>${escape(change.base_hash||"Absent")}</code></dd></div><div><dt>Result</dt><dd><code>${escape(change.result_hash)}</code></dd></div></dl></details>`;}
+  function renderChanges(review){const changes=review.changes||[];byId("review-change-count").textContent=`(${changes.length})`;byId("review-files").innerHTML=changes.map((change,index)=>`<button type="button" data-change-index="${index}" aria-current="${index===0}"><span>${escape(change.path)}</span><small>${escape(readable(change.operation))}</small></button>`).join("");const controls=Array.from(byId("review-files").querySelectorAll("button"));controls.forEach((item,index)=>{item.addEventListener("click",()=>{state.selectedChange=Number(item.dataset.changeIndex);renderDiff();});item.addEventListener("keydown",(event)=>{let next;if(event.key==="ArrowDown"||event.key==="ArrowRight")next=(index+1)%controls.length;if(event.key==="ArrowUp"||event.key==="ArrowLeft")next=(index-1+controls.length)%controls.length;if(event.key==="Home")next=0;if(event.key==="End")next=controls.length-1;if(next!==undefined){event.preventDefault();state.selectedChange=next;renderDiff();controls[next].focus();}});});state.selectedChange=0;renderDiff();}
+  function renderChecks(review){const check=review.checks||{},passed=Number(check.exit_code)===0&&check.output_complete===true&&check.termination==="confirmed_empty";byId("review-panel-checks").innerHTML=`<div class="check-verdict" data-passed="${passed}"><strong>${passed?"Structural checks passed":"Structural checks did not pass"}</strong><p>${passed?"The signed bounded file-format check completed successfully.":"Acceptance is unavailable until a complete successful check is recorded."}</p></div><dl class="review-check-facts"><div><dt>Profile</dt><dd>${escape([check.profile_id,check.profile_version].filter(Boolean).join(" · "))}</dd></div><div><dt>Exit code</dt><dd>${escape(check.exit_code)}</dd></div><div><dt>Output</dt><dd>${check.output_complete?"Complete":"Incomplete"}</dd></div><div><dt>Termination</dt><dd>${escape(readable(check.termination))}</dd></div></dl><h2>Check output</h2><pre><code>${escape(formatCheckOutput(check.output))}</code></pre><p class="task-hint">Command contract: ${escape(check.command_contract||"python -I -S <structural-v1-helper> <manifest>")}. This is a structural file check; project tests were not run.</p><details><summary>Check identifiers</summary><dl><div><dt>Helper</dt><dd><code>${escape(check.helper_hash)}</code></dd></div><div><dt>Arguments</dt><dd><code>${escape(check.argv_hash)}</code></dd></div></dl></details>`;return passed;}
+  function renderHashes(envelope){const review=envelope.review,plan=review.plan||{};byId("review-hashes").innerHTML=`<div><dt>Task</dt><dd><code>${escape(review.task_id)}</code></dd></div><div><dt>Evidence sequence</dt><dd>${escape(review.ready_sequence)}</dd></div><div><dt>Review</dt><dd><code>${escape(envelope.review_hash)}</code></dd></div><div><dt>Plan</dt><dd><code>${escape(plan.plan_hash)}</code></dd></div><div><dt>Base scope</dt><dd><code>${escape(plan.base_scope_manifest_hash)}</code></dd></div><div><dt>Candidate scope</dt><dd><code>${escape(plan.candidate_scope_manifest_hash)}</code></dd></div>`;}
+  function renderReview(envelope,title){const review=envelope.review;state.review=envelope;byId("review-title").textContent=title||review.plan.goal||"Candidate review";byId("review-identity").textContent=`Task ${review.task_id} · evidence sequence ${review.ready_sequence}`;byId("review-state").textContent=envelope.verified?"Verified":"Unavailable";renderPlan(review);renderChanges(review);const checksPassed=renderChecks(review),live=envelope.eligibility||envelope.live||{},accepted=envelope.acceptance||live.acceptance||null,application=envelope.application||live.application||null,applied=applicationApplied(application);renderHashes(envelope);state.acceptance=accepted;state.application=application;byId("review-accept").disabled=!(envelope.verified&&checksPassed&&live.can_accept===true&&!accepted);byId("review-apply-section").hidden=!(accepted&&live.can_apply===true&&!applicationBlocksApply(application));byId("review-continue-section").hidden=!applied;if(live.reason||live.finding)setReviewAlert(remedyFor(live.reason||live.finding),"warning");else if(applied)setReviewAlert("This candidate was applied. The historical review remains available.","success");else if(application)setReviewAlert(applicationOutcomeMessage(application),"warning");else if(accepted)setReviewAlert("Candidate accepted. Your project is unchanged until you select Apply to project.","success");else if(live.can_accept!==true)setReviewAlert("This verified review is historical. Current acceptance eligibility is unavailable; reopen after the server finishes checking the project.","warning");else setReviewAlert("Verified candidate loaded.","success");}
+  async function loadCorrection(ticket){try{const body=await request(reviewPath(state.review.review.task_id,state.review.review.ready_sequence,"/correction"),{headers:{}});if(!reviewGate.accepts(ticket))return;state.correction=unwrap(body,"correction")||{revision:0,text:""};byId("review-correction").value=state.correction.text||"";byId("review-correction-status").textContent=state.correction.text?`Saved correction · revision ${state.correction.revision}`:"Correction draft is separate from project drafts.";}catch(_){if(reviewGate.accepts(ticket))byId("review-correction-status").textContent="Correction draft is unavailable.";}}
+  async function openReview(task,sequence,title){state.lastFocus=document.activeElement;const ticket=reviewGate.select(task,sequence);state.review=null;state.childPlan=null;state.acceptance=null;state.application=null;byId("task-compose-view").hidden=true;byId("task-review-view").hidden=false;byId("review-title").textContent=title||"Candidate review";byId("review-goal").textContent="Loading the selected candidate…";byId("review-identity").textContent=`Task ${task} · evidence sequence ${sequence}`;byId("review-state").textContent="Loading";byId("review-accept").disabled=true;byId("review-apply-section").hidden=true;byId("review-continue-section").hidden=true;byId("review-child-plan").hidden=true;byId("review-start-revision").hidden=true;setReviewAlert("Verifying the selected candidate…");byId("review-back").focus();try{const body=await request(reviewPath(task,sequence),{headers:{}});if(!reviewGate.accepts(ticket))return;const envelope=unwrap(body,"review");if(!envelope||envelope.schema!=="torq-task-review-v1")throw new Error("task_review_schema_invalid");renderReview(envelope,title);loadRecovery(envelope.review.plan.project_id);loadCorrection(ticket);}catch(error){if(reviewGate.accepts(ticket)){byId("review-state").textContent="Unavailable";setReviewAlert(remedyFor(error.message),"warning");}}}
+  function selectTab(name,focus=true){document.querySelectorAll("[data-review-tab]").forEach((tab)=>{const selected=tab.dataset.reviewTab===name;tab.setAttribute("aria-selected",String(selected));tab.tabIndex=selected?0:-1;byId(`review-panel-${tab.dataset.reviewTab}`).hidden=!selected;if(selected&&focus)tab.focus();});}
+  const tabs=Array.from(document.querySelectorAll("[data-review-tab]"));tabs.forEach((tab,index)=>{tab.addEventListener("click",()=>selectTab(tab.dataset.reviewTab,false));tab.addEventListener("keydown",(event)=>{let next;if(event.key==="ArrowRight")next=(index+1)%tabs.length;if(event.key==="ArrowLeft")next=(index-1+tabs.length)%tabs.length;if(event.key==="Home")next=0;if(event.key==="End")next=tabs.length-1;if(next!==undefined){event.preventDefault();selectTab(tabs[next].dataset.reviewTab);}});});
+  byId("review-correction").addEventListener("input",()=>{state.childPlan=null;byId("review-child-plan").hidden=true;byId("review-start-revision").hidden=true;byId("review-correction-status").textContent="Correction has unsaved changes.";});
+  async function saveCorrection(ticket){const text=byId("review-correction").value.trim();if(!text)throw new Error("Enter a correction before reviewing it.");const identity=state.review.review,expected=state.correction?state.correction.revision:0,body=await request(reviewPath(identity.task_id,identity.ready_sequence,"/correction"),{method:"POST",body:JSON.stringify({text,expected_revision:expected})});if(!reviewGate.accepts(ticket))return null;state.correction=unwrap(body,"correction");byId("review-correction-status").textContent=`Saved correction · revision ${state.correction.revision}`;return state.correction;}
+  byId("review-correction-plan").addEventListener("click",async()=>{if(!state.review)return;const ticket=reviewGate.capture(),control=byId("review-correction-plan");control.disabled=true;try{const correction=await enqueueMutation(()=>saveCorrection(ticket));if(!correction||!reviewGate.accepts(ticket))return;const identity=state.review.review,requestId=stableRequestId("correction-plan",`${identity.task_id}.${identity.ready_sequence}.${correction.content_hash}`,localStorage,globalThis.crypto),body=await enqueueMutation(()=>request(reviewPath(identity.task_id,identity.ready_sequence,"/child-plans"),{method:"POST",body:JSON.stringify({request_id:requestId,correction_revision:correction.revision,correction_hash:correction.content_hash,review_hash:state.review.review_hash})}));if(!reviewGate.accepts(ticket))return;const childEnvelope=unwrap(body,"plan");state.childPlan=childEnvelope.plan||childEnvelope;byId("review-child-plan").innerHTML=`<strong>Revision plan ready</strong><p>${escape(state.childPlan.goal||"Build a corrected candidate from the same original base.")}</p><p>${escape((state.childPlan.output_paths||[]).length)} files in scope. Starting creates a new candidate; this one remains unchanged.</p>`;byId("review-child-plan").hidden=false;byId("review-start-revision").hidden=false;setReviewAlert("Correction plan reviewed. Start revision when ready.","success");}catch(error){if(reviewGate.accepts(ticket))setReviewAlert(remedyFor(error.message),"warning");}finally{if(reviewGate.accepts(ticket))control.disabled=false;}});
+  byId("review-start-revision").addEventListener("click",async()=>{if(!state.review||!state.childPlan)return;const ticket=reviewGate.capture(),plan=state.childPlan,control=byId("review-start-revision");control.disabled=true;try{const requestId=stableRequestId("revision",plan.plan_hash||`${state.review.review_hash}.${state.correction.revision}`,localStorage,globalThis.crypto),body=await enqueueMutation(()=>request("/api/v1/task-revisions",{method:"POST",body:JSON.stringify({request_id:requestId,plan_hash:plan.plan_hash})}));if(!reviewGate.accepts(ticket))return;const task=unwrap(body,"task");showCompose(false);state.active=task.task_id;renderTask(task);pollTask();}catch(error){if(reviewGate.accepts(ticket)){control.disabled=false;setReviewAlert(remedyFor(error.message),"warning");}}});
+  byId("review-accept").addEventListener("click",async()=>{if(!state.review)return;const ticket=reviewGate.capture(),envelope=state.review,control=byId("review-accept");control.disabled=true;try{const identity=envelope.review,requestId=stableRequestId("accept",envelope.review_hash,localStorage,globalThis.crypto),body=await enqueueMutation(()=>request("/api/v1/task-reviews/accept",{method:"POST",body:JSON.stringify({request_id:requestId,task_id:identity.task_id,ready_sequence:identity.ready_sequence,review_hash:envelope.review_hash})}));if(!reviewGate.accepts(ticket))return;state.acceptance=unwrap(body,"acceptance");byId("review-apply-section").hidden=false;setReviewAlert("Candidate accepted. Your project is unchanged until you select Apply to project.","success");}catch(error){if(reviewGate.accepts(ticket)){control.disabled=false;setReviewAlert(remedyFor(error.message),"warning");}}});
+  byId("review-apply").addEventListener("click",async()=>{if(!state.review||!state.acceptance)return;const ticket=reviewGate.capture(),control=byId("review-apply"),priorApplication=state.application;control.disabled=true;try{const candidate=state.acceptance.candidate,acceptance=state.acceptance.acceptance||state.acceptance.decision,requestId=stableRequestId("apply",applicationRetryIdentity(candidate,acceptance,priorApplication),localStorage,globalThis.crypto),body=await enqueueMutation(()=>request("/api/v1/task-applications",{method:"POST",body:JSON.stringify({request_id:requestId,candidate,acceptance})}));if(!reviewGate.accepts(ticket))return;state.application=unwrap(body,"application");const applied=applicationApplied(state.application);byId("review-continue-section").hidden=!applied;byId("review-apply-section").hidden=true;setReviewAlert(applicationOutcomeMessage(state.application),applied?"success":"warning");if(["rejected","rolled_back"].includes(state.application.state)){const identity=state.review.review,title=byId("review-title").textContent,fresh=await request(reviewPath(identity.task_id,identity.ready_sequence),{headers:{}});if(reviewGate.accepts(ticket))renderReview(unwrap(fresh,"review"),title);}}catch(error){if(reviewGate.accepts(ticket)){control.disabled=false;setReviewAlert(remedyFor(error.message),"warning");}}});
+  byId("review-continue").addEventListener("click",async()=>{if(!state.review||!state.application)return;const ticket=reviewGate.capture(),control=byId("review-continue"),applicationId=state.application.application_id;control.disabled=true;try{const requestId=stableRequestId("continue",applicationId,localStorage,globalThis.crypto),body=await enqueueMutation(()=>request("/api/v1/task-continuations",{method:"POST",body:JSON.stringify({request_id:requestId,application_id:applicationId})}));if(!reviewGate.accepts(ticket))return;const envelope=unwrap(body,"draft"),draft=envelope.draft||envelope;showCompose(false);if(draft&&draft.project_id===state.project){await loadDraft(state.project);byId("task-goal").focus();}setStatus("Continuation draft opened from the project’s current source.");}catch(error){forgetAfterDefiniteRejection(error,"continue",applicationId,localStorage);if(reviewGate.accepts(ticket)){control.disabled=false;setReviewAlert(remedyFor(error.message),"warning");}}});
+  function bindHistoryRows(){byId("task-history-list").querySelectorAll("[data-task-id]").forEach((row)=>row.addEventListener("click",async()=>{if(row.dataset.readySequence!==undefined){openReview(row.dataset.taskId,Number(row.dataset.readySequence),row.querySelector("strong").textContent);return;}const result=await request(`/api/v1/tasks/${encodeURIComponent(row.dataset.taskId)}`,{headers:{}}),task=result.task;if(task.state==="candidate_ready"&&task.ready_sequence!=null){openReview(task.task_id,task.ready_sequence,task.goal_summary||task.goal);return;}state.active=task.task_id;renderTask(task);if(!terminal.includes(task.state))pollTask();else{state.active=null;await refreshTaskCapabilities();}}));}
+  async function loadHistory(query="",append=false){const normalized=String(query).trim();let ticket,cursor;if(append){ticket=historyGate.capture();cursor=state.historyCursor;if(!cursor)return;}else{ticket=historyGate.select(normalized);state.historyQuery=normalized;state.historyCursor=null;cursor=null;}const cursorPart=cursor?`&cursor=${encodeURIComponent(cursor)}`:"";let body;try{body=await request(`/api/v1/task-history?q=${encodeURIComponent(normalized)}&limit=50${cursorPart}`,{headers:{}});}catch(error){if(!historyGate.accepts(ticket)||state.historyQuery!==normalized)return;if(error.status!==404||append)throw error;body=await request("/api/v1/tasks",{headers:{}});}if(!historyGate.accepts(ticket)||state.historyQuery!==normalized)return;const items=body.items||body.tasks||[],markup=items.map((task)=>`<button type="button" class="task-history-row" data-task-id="${escape(task.task_id)}"${task.ready_sequence!=null?` data-ready-sequence="${escape(task.ready_sequence)}"`:""}><span><strong>${escape(task.title||task.goal_summary||task.goal||"Candidate task")}</strong><small>${escape(task.project_label||task.project_id||"Configured project")}${task.created_at||task.updated_at?` · ${escape(new Date(task.created_at||task.updated_at).toLocaleString())}`:""}</small></span><span class="task-state">${escape(readable(task.state))}</span></button>`).join("");const list=byId("task-history-list");list.innerHTML=append?list.innerHTML+markup:(markup||"No matching candidate history.");state.historyCursor=body.next_cursor||null;byId("task-history-more").hidden=!state.historyCursor;bindHistoryRows();}
+  byId("task-history-search").addEventListener("submit",(event)=>{event.preventDefault();loadHistory(byId("task-history-query").value,false).catch(()=>setStatus("History search is unavailable. Try again."));});
+  byId("task-history-more").addEventListener("click",()=>{const control=byId("task-history-more");control.disabled=true;loadHistory(state.historyQuery,true).catch(()=>setStatus("More history is unavailable. Try again.")).finally(()=>{control.disabled=false;});});
+  request("/api/v1/tasks/capabilities",{headers:{}}).then((caps)=>{state.capabilities=caps;button.hidden=false;if(new URLSearchParams(location.search).get("view")==="task")setView();}).catch(()=>{button.hidden=true;});
 })();
