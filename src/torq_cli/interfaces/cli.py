@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from collections.abc import Mapping, Sequence
@@ -14,10 +16,13 @@ import yaml
 
 from torq_cli import __version__
 from torq_cli.adapters.chat_provider import ChatProviderCommandFactory, current_environment
+from torq_cli.adapters.candidate_provider import CandidateProviderCommandFactory
 from torq_cli.adapters.linux_containment import linux_containment_capability
 from torq_cli.application import import_v5_config, import_v5_console
 from torq_cli.application.chat_projection import reduce_chat_projection
 from torq_cli.application.chat_runtime import ChatRuntimeCoordinator
+from torq_cli.application.candidate_tasks import CandidateTaskService, TaskProject
+from torq_cli.application.workspace import classify_workspace_root
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.live_runtime import build_live_runtime
 from torq_cli.application.resolve import envelope_to_dict, resolve_path
@@ -42,6 +47,8 @@ from torq_cli.interfaces.fleet_http import create_fleet_server
 from torq_cli.safety.chat_evidence import ChatEvidenceJournal, verify_chat_evidence
 from torq_cli.safety.production_trust import evaluate_production_trust
 from torq_cli.safety.receipts import FileRunKeyStore, verify_receipt_store
+from torq_cli.safety.receipts import restrict_owner_only_directory
+from torq_cli.safety.task_workspace import validate_disjoint_roots
 
 
 def exit_code_for(status: str, require_effective: bool, findings: Sequence[object]) -> int:
@@ -147,7 +154,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--run-root", required=True)
     verify.add_argument("--trusted-public-key")
     fleet = sub.add_parser("fleet")
-    fleet.add_argument("--run-root", required=True)
+    fleet.add_argument("--run-root")
     fleet.add_argument("--trusted-public-key")
     fleet.add_argument("--serve", action="store_true")
     fleet.add_argument("--host", default="127.0.0.1")
@@ -159,6 +166,12 @@ def _parser() -> argparse.ArgumentParser:
     fleet.add_argument("--chat-model")
     fleet.add_argument("--credential-file")
     fleet.add_argument("--claude-bin", default="claude")
+    fleet.add_argument("--task-project", action="append", default=[], metavar="ID=PATH")
+    fleet.add_argument("--task-state-root")
+    fleet.add_argument("--task-work-root")
+    fleet.add_argument("--task-provider", choices=("claude", "deepseek", "kimi", "qwen", "zai"))
+    fleet.add_argument("--task-model")
+    fleet.add_argument("--task-claude-bin")
     demo = sub.add_parser(
         "demo",
         help="Scaffold a zero-config dry-run demo (no providers contacted)",
@@ -371,15 +384,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 3
     if args.command == "fleet":
+        if args.run_root is None and not args.task_project:
+            print(json.dumps({"status": "blocked", "finding": "fleet_run_root_required"}, sort_keys=True))
+            return 3
+        environment = current_environment()
+        app_base = environment.get("LOCALAPPDATA") or environment.get("XDG_STATE_HOME")
+        if app_base is None:
+            home = environment.get("HOME") or environment.get("USERPROFILE")
+            if home is None:
+                print(json.dumps({"status": "blocked", "finding": "task_state_root_required"}, sort_keys=True))
+                return 3
+            app_base = str(Path(home) / ".local" / "state")
+        task_parent = Path(app_base) / "TorqCLI"
+        task_state_root = Path(args.task_state_root) if args.task_state_root else task_parent / "candidate-state"
+        task_work_root = Path(args.task_work_root) if args.task_work_root else task_parent / "candidate-work"
+        selected_run_root = Path(args.run_root) if args.run_root is not None else task_parent / "no-run-selected"
         projector = FleetProjector(
-            Path(args.run_root),
+            selected_run_root,
             trusted_public_key=trusted_public_key,
         )
         if args.serve:
+            task_service = None
+            task_runtime_root = None
             try:
                 chat_controller = None
                 chat_snapshot_provider = None
                 if args.chat_provider is not None:
+                    if args.run_root is None:
+                        raise ValueError("chat_run_root_required")
                     if args.chat_model is None:
                         raise ValueError("chat_model_required")
                     if sys.platform.startswith("linux"):
@@ -388,6 +420,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                             raise ValueError(capability.reason)
                     elif sys.platform != "win32":
                         raise ValueError("chat_strong_containment_unavailable")
+                    selected_root = selected_run_root
+                    workspace_root = classify_workspace_root(selected_root)
+                    if workspace_root["root_kind"] != "individual_run":
+                        finding = str(workspace_root["reason_code"])
+                        if workspace_root["root_kind"] == "collection":
+                            finding += ":" + ",".join(workspace_root["runs"])
+                        raise ValueError(finding)
+                    workspace_root = classify_workspace_root(
+                        selected_root,
+                        projector.snapshot(),
+                    )
+                    if workspace_root["trusted"] is not True:
+                        raise ValueError(str(workspace_root["reason_code"]))
                     vault = None
                     if args.chat_provider != "claude":
                         if args.credential_file is None:
@@ -442,14 +487,71 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 verification_finding=str(exc),
                             )
 
+                if args.task_project:
+                    if not all(
+                        isinstance(value, str) and value
+                        for value in (
+                            args.task_provider,
+                            args.task_model,
+                        )
+                    ):
+                        raise ValueError("task_launch_configuration_required")
+                    projects = []
+                    for specification in args.task_project:
+                        project_id, separator, raw_path = specification.partition("=")
+                        if not separator or not project_id or not Path(raw_path).is_absolute():
+                            raise ValueError("task_project_configuration_invalid")
+                        projects.append(TaskProject(project_id, project_id, Path(raw_path)))
+                    validate_disjoint_roots(
+                        [*(project.root for project in projects), task_state_root, task_work_root]
+                    )
+                    task_vault = None
+                    if args.task_provider != "claude":
+                        if args.credential_file is None:
+                            raise ValueError("task_credential_source_required")
+                        task_vault = ExplicitEnvVault(Path(args.credential_file).resolve())
+                    task_runtime_root = Path(tempfile.mkdtemp(prefix="torq-task-provider-"))
+                    restrict_owner_only_directory(task_runtime_root)
+                    claude_binary = None
+                    if args.task_provider == "claude":
+                        if args.task_claude_bin is not None:
+                            claude_binary = Path(args.task_claude_bin)
+                        else:
+                            home = current_environment().get("USERPROFILE")
+                            if not home:
+                                raise ValueError("task_claude_binary_required")
+                            claude_binary = Path(home) / ".local" / "bin" / "claude.exe"
+                    task_factory = CandidateProviderCommandFactory(
+                        provider=args.task_provider,
+                        model=args.task_model,
+                        runtime_root=task_runtime_root,
+                        base_environment=current_environment(),
+                        vault=task_vault,
+                        claude_binary=claude_binary,
+                    )
+                    task_service = CandidateTaskService(
+                        projects=projects,
+                        state_root=task_state_root,
+                        work_root=task_work_root,
+                        provider_factory=task_factory,
+                        provider=args.task_provider,
+                        model=args.task_model,
+                    )
+
                 server = create_fleet_server(
                     projector,
                     host=args.host,
                     port=args.port,
                     chat_controller=chat_controller,
                     chat_snapshot_provider=chat_snapshot_provider,
+                    workspace_chat_provider=args.chat_provider,
+                    task_service=task_service,
                 )
             except (OSError, ValueError) as exc:
+                if task_service is not None:
+                    task_service.close()
+                if task_runtime_root is not None:
+                    shutil.rmtree(task_runtime_root, ignore_errors=True)
                 print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))
                 return 3
             host, port = server.server_address[:2]
@@ -459,7 +561,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(
                     {
                         "status": "serving",
-                        "url": (f"http://{host_text}:{port}/bootstrap?nonce={bootstrap_nonce}"),
+                        "url": (
+                            f"http://{host_text}:{port}/bootstrap?nonce={bootstrap_nonce}"
+                            + ("&view=task" if args.task_project else "")
+                        ),
                     },
                     sort_keys=True,
                 ),
@@ -474,7 +579,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if chat_controller is not None:
                         chat_controller.shutdown(timeout=5.0)
                 finally:
-                    server.server_close()
+                    try:
+                        if task_service is not None:
+                            task_service.close()
+                    finally:
+                        server.server_close()
+                        if task_runtime_root is not None:
+                            shutil.rmtree(task_runtime_root, ignore_errors=True)
             return 0
         snapshot = projector.snapshot()
         print(json.dumps(snapshot, sort_keys=True))

@@ -13,6 +13,10 @@ from torq_cli.domain.run_plan import (
     plan_hash,
     revision_body,
 )
+from torq_cli.domain.task_evidence import (
+    validate_task_audit_payload,
+    validate_task_receipt_contract,
+)
 
 ATTEMPT_TRANSITIONS = frozenset(
     {
@@ -395,6 +399,10 @@ def validate_receipt_payload(
     # floor catches the rest, including the writer-only lifecycle transitions.
     if not legacy and _oversized_value(dict(payload)):
         return "receipt_value_oversized"
+    if transition == "audit":
+        task_finding = validate_task_audit_payload(payload)
+        if task_finding is not None:
+            return task_finding
     if transition in ATTEMPT_TRANSITIONS:
         if not isinstance(payload.get("role"), str):
             return "attempt_role_invalid"
@@ -799,6 +807,9 @@ def validate_v2_receipt_contract(
     legacy: bool = False,
 ) -> str | None:
     """Validate cross-receipt lifecycle invariants after crypto verification."""
+    task_finding = validate_task_receipt_contract(receipts, sealed=sealed)
+    if task_finding is not None:
+        return task_finding
     attempts: dict[str, dict[str, Any]] = {}
     ordinals: dict[str, int] = {}
     repairs: dict[str, tuple[str, int, int]] = {}

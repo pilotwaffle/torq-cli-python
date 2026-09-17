@@ -4,22 +4,29 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>TORQ Fleet</title>
+  <title>TORQ Workspace</title>
   <link rel="stylesheet" href="/assets/fleet.css">
   <link rel="stylesheet" href="/assets/chat.css">
+  <link rel="stylesheet" href="/assets/task.css">
   <script src="/assets/fleet.js" defer></script>
   <script src="/assets/chat.js" defer></script>
+  <script src="/assets/task.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#fleet-board">Skip to fleet board</a>
+  <a id="skip-link" class="skip-link" href="#fleet-board">Skip to Fleet board</a>
   <p id="live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></p>
   <div class="shell">
     <header class="topbar">
-      <div class="wordmark" aria-label="TORQ Fleet">
+      <div class="wordmark" aria-label="TORQ">
         <span class="wordmark-mark" aria-hidden="true">TQ</span>
-        <span><strong>TORQ</strong><small>GOVERNED FLEET</small></span>
+        <span><strong>TORQ</strong><small>LOCAL GOVERNED WORKSPACE</small></span>
       </div>
       <div class="topbar-tools">
+        <div class="view-switch" role="group" aria-label="Dashboard view">
+          <button id="task-view-button" type="button" aria-pressed="false" hidden>New task</button>
+          <button id="workspace-view-button" type="button" aria-pressed="false">Workspace</button>
+          <button id="fleet-view-button" type="button" aria-pressed="true">Fleet</button>
+        </div>
         <label class="theme-picker" for="theme-control"><span>Theme</span>
           <select id="theme-control" aria-label="Color theme">
             <option value="system">System</option>
@@ -35,6 +42,99 @@
         </div>
       </div>
     </header>
+
+    <main id="workspace-view" class="workspace" tabindex="-1" hidden>
+      <section class="workspace-hero" aria-labelledby="workspace-title">
+        <p id="workspace-context" class="workspace-context">Local workspace</p>
+        <h1 id="workspace-title">Welcome to TORQ</h1>
+        <p id="workspace-summary" class="workspace-summary">Checking this run and its discussion capabilities…</p>
+      </section>
+      <section class="workspace-layout">
+        <div class="workspace-main">
+          <div id="workspace-composer-slot"></div>
+          <div id="workspace-suggestions" class="workspace-suggestions" aria-label="Suggested prompts">
+            <button type="button" data-prompt="Summarize this run in plain language.">Summarize this run</button>
+            <button type="button" data-prompt="What should I review next, based only on verified evidence?">What should I review?</button>
+            <button type="button" data-prompt="Explain any blocked or incomplete state and what I can do next.">Explain the next step</button>
+          </div>
+          <div id="workspace-transcript-slot"></div>
+        </div>
+        <aside class="workspace-side" aria-label="Workspace guidance">
+          <section class="next-action-card" aria-labelledby="next-action-title">
+            <span class="workspace-label">Next action</span>
+            <h2 id="next-action-title">Checking this workspace</h2>
+            <p id="next-action-message">TORQ is verifying the selected root.</p>
+            <p id="next-action-remediation"></p>
+            <div class="workspace-guidance-actions">
+              <button id="workspace-setup" class="workspace-primary" type="button">View setup steps</button>
+              <button id="workspace-refresh" class="workspace-refresh" type="button">Check again</button>
+            </div>
+          </section>
+          <section id="run-picker" class="run-picker" aria-labelledby="run-picker-title" hidden>
+            <span class="workspace-label">Available runs</span>
+            <h2 id="run-picker-title">Choose an individual run</h2>
+            <div id="run-picker-list"></div>
+          </section>
+          <details id="workspace-details" class="workspace-details">
+            <summary id="workspace-details-summary">Run details and setup</summary>
+            <dl>
+              <div><dt>Root type</dt><dd id="workspace-root-kind">Checking</dd></div>
+              <div><dt>Run</dt><dd id="workspace-run-id">—</dd></div>
+              <div><dt>Evidence</dt><dd id="workspace-trust">Checking</dd></div>
+              <div><dt>Mode</dt><dd id="workspace-mode">Unknown</dd></div>
+              <div><dt>Provider</dt><dd id="workspace-provider">Not configured</dd></div>
+              <div><dt>Execution</dt><dd>Not available in this workspace</dd></div>
+            </dl>
+            <p>Workspace can discuss an existing verified run. Starting builds is not available here yet.</p>
+            <p>Launch an individual run with <code>torq fleet --run-root .\run-id --serve</code>. Add <code>--chat-provider</code> and <code>--chat-model</code> to enable discussion.</p>
+          </details>
+        </aside>
+      </section>
+    </main>
+
+    <main id="task-view" class="task-view" tabindex="-1" hidden>
+      <section class="task-hero">
+        <p class="workspace-context">Bounded execution</p>
+        <h1>What would you like to build?</h1>
+        <p>Describe one change, review the exact files and structural check, then start an isolated candidate. Your project stays unchanged.</p>
+      </section>
+      <section class="task-grid">
+        <form id="task-form" class="task-card task-editor">
+          <span class="task-step">1 · Goal and scope</span>
+          <label for="task-project">Project</label>
+          <select id="task-project" disabled></select>
+          <label for="task-goal">Goal</label>
+          <textarea id="task-goal" rows="5" maxlength="16384" placeholder="For example: add input validation to calculator.py" disabled></textarea>
+          <div class="task-two-col">
+            <label>Source files<textarea id="task-input-paths" rows="3" placeholder="calculator.py" disabled></textarea></label>
+            <label>Files the candidate may change<textarea id="task-output-paths" rows="3" placeholder="calculator.py" disabled></textarea></label>
+          </div>
+          <p class="task-hint">One relative path per line. Supported: .py, .json, .md, .txt. Secret-like content is rejected.</p>
+          <div class="task-actions">
+            <button id="task-clear" type="button" class="quiet-button" disabled>Delete draft</button>
+            <button id="task-review" type="submit" class="workspace-primary" disabled>Review plan</button>
+          </div>
+          <p id="task-draft-status" class="task-status" role="status">Loading saved draft...</p>
+        </form>
+        <section class="task-card task-plan" aria-labelledby="task-plan-title">
+          <span class="task-step">2 · Review and start</span>
+          <h2 id="task-plan-title">Plan preview</h2>
+          <div id="task-plan-summary" class="task-empty">Save a goal to review its exact execution plan.</div>
+          <button id="task-start" type="button" class="workspace-primary" disabled>Start building</button>
+        </section>
+        <section class="task-card task-progress" aria-labelledby="task-progress-title">
+          <span class="task-step">3 · Progress</span>
+          <h2 id="task-progress-title">Build status</h2>
+          <div id="task-current" class="task-empty">No task started.</div>
+          <button id="task-stop" type="button" class="chat-stop" disabled>Stop</button>
+        </section>
+        <section class="task-card task-history" aria-labelledby="task-history-title">
+          <span class="task-step">History</span>
+          <h2 id="task-history-title">Recent candidates</h2>
+          <div id="task-history-list" class="task-empty">No candidate history yet.</div>
+        </section>
+      </section>
+    </main>
 
     <section class="governance-rail" aria-labelledby="rail-title">
       <div class="rail-heading">
@@ -89,14 +189,16 @@
         <dl id="settlement-list" class="settlement-list"></dl>
       </section>
 
-      <section class="chat-workspace" aria-labelledby="chat-title">
+      <div id="fleet-transcript-slot">
+      <section id="chat-workspace-section" class="chat-workspace" aria-labelledby="chat-title">
         <div class="section-heading">
-          <div><span class="panel-kicker">OWNED PROVIDER SESSION</span><h2 id="chat-title">Governed conversation</h2></div>
-          <span class="mono">SIGNED TERMINAL EVIDENCE</span>
+          <div><span id="chat-kicker" class="panel-kicker">OWNED PROVIDER SESSION</span><h2 id="chat-title">Governed conversation</h2></div>
+          <span id="chat-evidence-note" class="mono">SIGNED TERMINAL EVIDENCE</span>
         </div>
-        <div id="chat-transcript" class="chat-transcript" aria-label="Verified conversation transcript"></div>
+        <div id="chat-transcript" class="chat-transcript" aria-label="Verified conversation transcript"><p id="chat-empty" class="chat-empty">No accepted messages yet. Your draft stays separate until Send is accepted.</p></div>
         <p id="chat-announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
       </section>
+      </div>
     </main>
   </div>
 
@@ -127,17 +229,26 @@
         <span id="composer-status" role="status" aria-live="polite"></span>
       </div>
     </form>
-    <form id="chat-composer" class="chat-composer" aria-label="Governed chat composer">
+    <div id="fleet-composer-slot">
+    <form id="chat-composer" class="chat-composer workspace-composer" aria-label="Run discussion composer">
+      <div class="composer-heading">
+        <div><span id="composer-purpose" class="workspace-label">Draft</span><strong>What would you like to understand?</strong></div>
+        <span id="draft-state" class="draft-state">Held in this tab</span>
+      </div>
       <label class="sr-only" for="chat-input">Message the governed provider</label>
-      <textarea id="chat-input" class="chat-input" rows="2" maxlength="65536" placeholder="Ask TORQ to work on the governed run..." aria-describedby="chat-help chat-status"></textarea>
+      <textarea id="chat-input" class="chat-input" rows="4" maxlength="65536" placeholder="Ask about this run, its plan, or its verified result..." aria-describedby="chat-help chat-status"></textarea>
       <label class="sr-only" for="chat-attachments">Attach text, images, or PDF files</label>
       <input id="chat-attachments" class="chat-attachments" type="file">
       <div id="chat-attachment-list" class="chat-attachment-list" aria-label="Staged attachments"></div>
-      <button id="chat-stop" class="chat-stop" type="button" disabled>Stop</button>
-      <button id="chat-send" class="chat-send" type="submit">Send</button>
-      <p id="chat-help" class="chat-help">Text, PNG, JPEG, GIF, WebP or PDF · up to 6 files · 5 MB each · Ctrl+Enter to send</p>
+      <div class="composer-actions">
+        <button id="clear-draft" class="chat-clear" type="button">Clear draft</button>
+        <button id="chat-stop" class="chat-stop" type="button" disabled>Stop</button>
+        <button id="chat-send" class="chat-send" type="submit" disabled>Send</button>
+      </div>
+      <p id="chat-help" class="chat-help">Your draft stays in this browser tab. Ctrl or Cmd+Enter sends when discussion is available.</p>
       <span id="chat-status" class="chat-status">Connecting to governed runtime...</span>
     </form>
+    </div>
   </footer>
 </body>
 </html>

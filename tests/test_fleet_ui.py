@@ -90,6 +90,16 @@ def test_fleet_ui_shell_is_public_but_contains_no_run_data(tmp_path: Path) -> No
         "context-submit",
         "chat-send",
         "chat-stop",
+        "clear-draft",
+        "workspace-view-button",
+        "fleet-view-button",
+        "workspace-setup",
+        "workspace-refresh",
+        "task-view-button",
+        "task-clear",
+        "task-review",
+        "task-start",
+        "task-stop",
     }
     assert 'href="#fleet-board"' in markup
     assert 'aria-live="polite"' in markup
@@ -127,6 +137,27 @@ def test_fleet_ui_assets_are_local_no_store_and_host_guarded(tmp_path: Path) -> 
     assert b"innerHTML" not in javascript
     assert rebound.status == 421
     assert b"fleet_host_denied" in rebound_body
+
+
+def test_task_ui_is_bundled_and_names_bounded_candidate_behavior() -> None:
+    html = Path("src/torq_cli/data/fleet/index.html").read_text(encoding="utf-8")
+    javascript = Path("src/torq_cli/data/fleet/task.js").read_text(encoding="utf-8")
+    css = Path("src/torq_cli/data/fleet/task.css").read_text(encoding="utf-8")
+    assert 'id="task-view-button"' in html
+    assert 'id="task-goal"' in html
+    assert 'id="task-goal" rows="5" maxlength="16384"' in html
+    assert 'placeholder="For example: add input validation to calculator.py" disabled' in html
+    assert 'id="task-review" type="submit" class="workspace-primary" disabled' in html
+    assert "if (!state.draftReady) return Promise.reject" in javascript
+    assert "await loadDraft(state.project, initialEpoch);\n    setDraftReady(true);" in javascript
+    assert "Start building" in html
+    assert "Your project stays unchanged" in html
+    assert "It does not run unit tests or change your project" in javascript
+    assert "torq.task.request.${planHash}" in javascript
+    assert "MutationQueue" in javascript
+    assert "caps.active_task_id" in javascript
+    assert "data-task-id" in javascript
+    assert '@media (max-width: 760px)' in css
 
 
 def _contrast(first: str, second: str) -> float:
@@ -251,6 +282,31 @@ def test_chat_composer_is_accessible_contrasted_and_non_clipping() -> None:
     assert "this.runtimeAvailable = false" in javascript
     assert "this.elements.stop.focus()" in javascript
     assert 'setAttribute("aria-live", "off")' in javascript
+
+
+def test_workspace_is_opt_in_truthful_and_draft_safe() -> None:
+    html = Path("src/torq_cli/data/fleet/index.html").read_text(encoding="utf-8")
+    javascript = Path("src/torq_cli/data/fleet/chat.js").read_text(encoding="utf-8")
+    css = Path("src/torq_cli/data/fleet/chat.css").read_text(encoding="utf-8")
+
+    assert 'id="workspace-view"' in html
+    assert 'id="workspace-view-button"' in html
+    assert 'id="fleet-view-button"' in html
+    assert 'id="workspace-setup"' in html
+    assert 'id="clear-draft"' in html
+    assert "Starting builds is not available here yet" in html
+    assert "/api/v1/workspace" in javascript
+    assert 'VIEW_KEY = "torq.workspace.view.v1"' in javascript
+    assert 'DRAFT_KEY_PREFIX = "torq.workspace.draft.v1."' in javascript
+    assert "global.sessionStorage.setItem(this.draftKey, this.elements.input.value)" in javascript
+    assert "this.elements.input.disabled = false" in javascript
+    assert "this.draftRevision === submittedRevision" in javascript
+    assert "event.ctrlKey || event.metaKey" in javascript
+    assert "chat_stream_available" in javascript
+    assert "innerHTML" not in javascript
+    assert 'body[data-view="workspace"] .topbar-facts' in css
+    assert "@media (max-width: 40rem)" in css
+    assert ".workspace-suggestions { flex-wrap: wrap; }" in css
 
 
 def test_fleet_bootstrap_lands_on_ui_without_exposing_session_in_url(

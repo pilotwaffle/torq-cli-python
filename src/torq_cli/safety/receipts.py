@@ -621,6 +621,16 @@ def restrict_owner_only_directory(path: Path) -> None:
     _restrict_signing_directory(path, "runtime_directory_permissions_unsafe")
 
 
+def restrict_owner_only_file(path: Path) -> None:
+    """Restrict a sensitive non-key file to the current OS identity."""
+    _restrict_signing_file(path, "runtime_file_permissions_unsafe")
+
+
+def fsync_directory(path: Path) -> None:
+    """Flush one directory entry using the receipt store's platform policy."""
+    _fsync_directory(path)
+
+
 def _restrict_private_key(path: Path) -> None:
     _restrict_signing_file(path, "receipt_signing_key_permissions_unsafe")
 
@@ -788,7 +798,12 @@ class FileRunKeyStore:
     @staticmethod
     def _read_regular_key(path: Path) -> bytes:
         metadata = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or path.is_symlink()
+            or not signing_file_permissions_are_restricted(path)
+        ):
             raise ValueError("receipt_signing_key_unsafe")
         encoded = path.read_bytes().strip()
         if len(encoded) != 64:
@@ -881,6 +896,28 @@ class FileRunKeyStore:
             ),
             recovery=self._get_or_create_secret(directory / "recovery.key"),
             artifact=self._get_or_create_secret(directory / "artifact.key"),
+        )
+
+    def load_run_keys(self, run_id: str) -> RunKeys:
+        """Load an existing run identity without creating or chmod-ing anything."""
+        if not _valid_run_id(run_id):
+            raise ValueError("run_id_invalid")
+        identity = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+        directory = self.run_identities_path / identity
+        metadata = directory.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or directory.is_symlink()
+            or not signing_file_permissions_are_restricted(directory)
+        ):
+            raise ValueError("receipt_run_identity_unsafe")
+        return RunKeys(
+            manifest=self._read_regular_key(directory / "manifest.key"),
+            orchestrator=self._read_regular_key(directory / "orchestrator.key"),
+            supervisor=self._read_regular_key(directory / "supervisor.key"),
+            operator_gateway=self._read_regular_key(directory / "operator-gateway.key"),
+            recovery=self._read_regular_key(directory / "recovery.key"),
+            artifact=self._read_regular_key(directory / "artifact.key"),
         )
 
 
@@ -2018,3 +2055,37 @@ def verify_receipt_store(
         return StoreVerification("tampered", "manifest_signature_invalid")
     except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError):
         return StoreVerification("incomplete", "evidence_unreadable")
+
+
+def read_verified_artifact(
+    evidence_root: Path,
+    run_id: str,
+    artifact_relative: str,
+) -> bytes:
+    """Read one exact artifact only from a sealed, verified existing task store."""
+    if not _valid_run_id(run_id):
+        raise ValueError("run_id_invalid")
+    run_root = evidence_root / run_id
+    verification = verify_receipt_store(run_root)
+    if verification.status != "verified":
+        raise ValueError("artifact_store_not_verified")
+    manifest = json.loads((run_root / "terminal-manifest.json").read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("sealed") is not True:
+        raise ValueError("artifact_store_not_sealed")
+    target = (run_root / artifact_relative).resolve(strict=True)
+    if not target.is_relative_to(run_root.resolve()):
+        raise ValueError("artifact_path_escape")
+    metadata = target.stat(follow_symlinks=False)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or target.is_symlink():
+        raise ValueError("artifact_file_unsafe")
+    payload = target.read_bytes()
+    if not payload.startswith(_ARTIFACT_FORMAT) or len(payload) < 38:
+        raise ValueError("artifact_format_invalid")
+    keys = FileRunKeyStore(evidence_root).load_run_keys(run_id)
+    offset = len(_ARTIFACT_FORMAT)
+    plain = AESGCM(keys.artifact).decrypt(
+        payload[offset : offset + 12],
+        payload[offset + 12 :],
+        run_id.encode("utf-8"),
+    )
+    return plain

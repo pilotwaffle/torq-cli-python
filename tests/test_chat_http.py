@@ -77,6 +77,11 @@ class _Chat:
         return None
 
 
+def _add_trusted_evidence_shape(root: Path) -> None:
+    for name in ("receipts.jsonl", "terminal-manifest.json", "run-certificate.json"):
+        (root / name).write_text("{}", encoding="utf-8")
+
+
 def _request(
     server: Any,
     method: str,
@@ -155,6 +160,7 @@ def test_chat_routes_are_session_and_same_origin_gated(tmp_path: Path) -> None:
 def test_chat_submit_and_cancel_are_forwarded_to_single_owner(tmp_path: Path) -> None:
     projector = _Projector(tmp_path / "run-chat-control")
     projector.run_root.mkdir()
+    _add_trusted_evidence_shape(projector.run_root)
     chat = _Chat(projector.run_root)
     sessions = FleetSessionManager()
     cookie = f"torq_fleet_session={sessions.exchange(sessions.bootstrap_nonce)}"

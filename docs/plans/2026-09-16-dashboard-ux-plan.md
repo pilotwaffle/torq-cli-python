@@ -1,6 +1,16 @@
 # TORQ task workspace: dashboard review and implementation plan
 
-Status: proposed, not implemented. Reviewed 2026-09-16, revised the same day after a second research pass. Scope: TORQ CLI in E:/Torq-CLI.
+Status: bounded P0/P1 and separately approved candidate-only P2 implemented on 2026-09-16; P3 remains unimplemented. See `2026-09-16-dashboard-p2-contract.md` and the P2 verification receipts. Scope: TORQ CLI in E:/Torq-CLI.
+
+Historical P0/P1 correction: that increment delivered only the opt-in Workspace,
+truthful root/provider/session capability metadata, collection guidance, and
+browser-session drafts. Existing live dispatch still cannot edit files or run commands,
+so P2 was implemented through the separately reviewed bounded candidate service in
+`2026-09-16-dashboard-p2-contract.md`. P2 creates and structurally checks an isolated,
+evidence-bound candidate; it does not apply changes to the source project. Provider process persistence is disabled, but TORQ can
+continue discussion by reconstructing a prompt from signed history. Fleet already
+notifies for open operator actions. Verified dry-run evidence is valid evidence;
+run mode, trust, session writability, and execution capability remain separate.
 
 Product goal, stated by the user on 2026-09-16: use TORQ CLI the way Google Antigravity, the Codex app, and Claude Code are used. Describe a task in ordinary language, get a plan, let the agent edit files and run commands, review the diff and checks, and iterate. The current dashboard cannot do this: its chat runs the provider with no tools and in plan mode, bound to an existing run. Everything below is in service of closing that gap without giving up the evidence guarantees those tools do not have.
 
@@ -8,10 +18,10 @@ Product goal, stated by the user on 2026-09-16: use TORQ CLI the way Google Anti
 |---|---|---|
 | Open a folder and start typing | Requires an existing run directory and a certified receipt chain | P0 entry states, P2 project selection and start service |
 | Agent proposes a plan, user approves | Chat is plan-only with no execution path | P2 execution policy and accepted plan revision |
-| Agent edits files and runs commands | Chat adapter passes an empty tools list | P2 governed run creation through existing services; never by unlocking the chat adapter |
+| Agent edits files and runs commands | Chat and live dispatch forbid tools/files; application transaction is design-only | P2 depends on a separately reviewed execution/workspace/transaction implementation |
 | Review a diff and test results, then accept | Fleet shows evidence counts and lanes, not a diff | P3 Plan, Changes, and Checks views under the artifact integrity rules |
-| Ask a follow-up and continue | No session persistence in the chat adapter | P1 drafts during work, P3 revision requests and task continuation |
-| Get notified when it needs you | None | P1 notifications |
+| Ask a follow-up and continue | Signed history reconstructs discussion context; build continuation is unavailable | P1 unsent drafts; P3 still needs revision/task continuation contracts |
+| Get notified when it needs you | Fleet already alerts for newly open actions | Existing Fleet alerts; future completion alerts remain separate |
 
 P0 and P1 make the dashboard honest and usable. P2 is the phase that makes it a build tool. Do not call the goal met before P2's exit gate passes.
 

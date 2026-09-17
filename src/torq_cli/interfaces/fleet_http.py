@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from torq_cli.application.fleet import FleetProjector
 from torq_cli.application.fleet_controls import FleetControlService
 from torq_cli.application.orchestrator import OrchestrationBlocked
+from torq_cli.application.workspace import classify_workspace_root
 from torq_cli.core.redaction import RedactionBlocked
 
 _FLEET_ASSETS = {
@@ -35,6 +36,8 @@ _FLEET_ASSETS = {
     "/assets/fleet.js": ("fleet.js", "text/javascript; charset=utf-8"),
     "/assets/chat.css": ("chat.css", "text/css; charset=utf-8"),
     "/assets/chat.js": ("chat.js", "text/javascript; charset=utf-8"),
+    "/assets/task.css": ("task.css", "text/css; charset=utf-8"),
+    "/assets/task.js": ("task.js", "text/javascript; charset=utf-8"),
 }
 
 
@@ -171,6 +174,7 @@ class FleetSessionManager:
         self.bootstrap_nonce = secrets.token_urlsafe(32)
         self._nonce_spent = False
         self._sessions: dict[str, _Session] = {}
+        self._read_recovery: dict[str, str] = {}
         self._lock = RLock()
 
     def exchange(self, nonce: str) -> str:
@@ -239,6 +243,11 @@ class FleetSessionManager:
     def rotate(self, session: _Session) -> str:
         with self._lock:
             self._sessions.pop(session.token, None)
+            self._read_recovery = {
+                old: target
+                for old, target in self._read_recovery.items()
+                if target != session.token
+            }
             now = self._clock()
             token = secrets.token_urlsafe(48)
             self._sessions[token] = _Session(
@@ -247,7 +256,32 @@ class FleetSessionManager:
                 now,
                 read_only=session.read_only,
             )
+            self._read_recovery[session.token] = token
             return token
+
+    def recover_rotated_session(self, cookie_header: str | None) -> tuple[_Session, str] | None:
+        """Resolve a prior token only for the handler's idempotent task replay path."""
+        if not cookie_header:
+            return None
+        cookie = SimpleCookie()
+        try:
+            cookie.load(cookie_header)
+        except ValueError:
+            return None
+        morsel = cookie.get("torq_fleet_session")
+        if morsel is None:
+            return None
+        with self._lock:
+            current = self._read_recovery.get(morsel.value)
+            session = self._sessions.get(current or "")
+            if session is None:
+                return None
+            now = self._clock()
+            if now - session.last_seen >= self._idle_seconds or now - session.issued_at >= self._absolute_seconds:
+                self._read_recovery.pop(morsel.value, None)
+                return None
+            session.last_seen = now
+            return session, session.token
 
     def claim_mutation(self, cookie_header: str | None) -> _Session | None:
         """Atomically consume a write session so concurrent POSTs cannot fork it."""
@@ -298,6 +332,19 @@ def _reject_json_constant(value: str) -> object:
     raise ValueError("context_request_non_finite")
 
 
+class TaskHTTPService(Protocol):
+    def capabilities(self) -> dict[str, Any]: ...
+    def draft(self, project_id: str) -> dict[str, Any] | None: ...
+    def save_draft(self, project_id: str, *, goal: str, input_paths: list[str], output_paths: list[str], expected_revision: int) -> dict[str, Any]: ...
+    def delete_draft(self, project_id: str, *, expected_revision: int) -> None: ...
+    def review_plan(self, *, project_id: str, draft_revision: int, input_paths: list[str], output_paths: list[str]) -> dict[str, Any]: ...
+    def start(self, *, request_id: str, plan_hash: str) -> dict[str, Any]: ...
+    def replay_start(self, *, request_id: str, plan_hash: str) -> dict[str, Any]: ...
+    def stop(self, task_id: str) -> dict[str, Any]: ...
+    def task(self, task_id: str) -> dict[str, Any]: ...
+    def history(self) -> list[dict[str, Any]]: ...
+
+
 def create_fleet_server(
     projector: FleetProjector,
     *,
@@ -311,6 +358,8 @@ def create_fleet_server(
     operational_state_provider: Callable[[], Mapping[str, Any]] | None = None,
     chat_controller: ChatController | None = None,
     chat_snapshot_provider: Callable[[], Mapping[str, Any]] | None = None,
+    workspace_chat_provider: str | None = None,
+    task_service: TaskHTTPService | None = None,
 ) -> ThreadingHTTPServer:
     if not _loopback_host(host):
         raise ValueError("fleet_loopback_required")
@@ -439,6 +488,139 @@ def create_fleet_server(
             read_only_reason=("session_read_only" if session.read_only else None),
         )
 
+    def workspace_metadata(session: _Session) -> dict[str, Any]:
+        root = classify_workspace_root(projector.run_root)
+        if root["root_kind"] == "individual_run":
+            envelope = fleet_envelope(session)
+            snapshot = envelope["snapshot"]
+            root = classify_workspace_root(projector.run_root, snapshot)
+            write_capable = bool(envelope["session"].get("write_capable"))
+        else:
+            snapshot = {}
+            write_capable = not session.read_only
+        chat = chat_snapshot()
+        runtime_present = chat_controller is not None and chat_snapshot_provider is not None
+        chat_available = runtime_present and chat.get("data_status") == "available"
+        active_turn_id = chat.get("active_turn_id")
+        active = isinstance(active_turn_id, str) and bool(active_turn_id)
+        configured_provider = workspace_chat_provider.casefold() if workspace_chat_provider else None
+        supported_provider = configured_provider in {"claude", "deepseek", "kimi", "qwen", "zai"}
+        provider = configured_provider if supported_provider else None
+        attachment_types = (
+            []
+            if provider in {None, "claude"}
+            else [
+                "application/json",
+                "application/pdf",
+                "image/gif",
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+                "text/markdown",
+                "text/plain",
+            ]
+        )
+        root_ready = root["root_kind"] == "individual_run" and root["trusted"] is True
+        can_discuss = bool(root_ready and provider and chat_available and write_capable and not active)
+        can_cancel = bool(root_ready and runtime_present and write_capable and active)
+        if not root_ready:
+            reason_code = root["reason_code"]
+            message = root["message"]
+            remediation = root["remediation"]
+        elif provider is None:
+            reason_code = "workspace_chat_provider_missing"
+            message = "Discussion is not enabled for this session."
+            remediation = "Relaunch with --chat-provider and --chat-model to discuss this run."
+        elif not write_capable:
+            run = snapshot.get("run") if isinstance(snapshot, Mapping) else None
+            closed = isinstance(run, Mapping) and run.get("workflow_state") in {"closed", "abandoned"}
+            reason_code = "workspace_run_closed" if closed else "fleet_session_read_only"
+            message = (
+                "This completed run is available for review."
+                if closed
+                else "This session is open read-only."
+            )
+            remediation = (
+                "Use Fleet to inspect its verified evidence. Discussion cannot be added to a closed run."
+                if closed
+                else "Relaunch this individual run to obtain a new session."
+            )
+        elif not chat_available:
+            reason_code = "chat_runtime_unavailable"
+            message = "Discussion history is not available."
+            remediation = "Inspect Details, then relaunch the configured individual run."
+        elif active:
+            reason_code = "chat_turn_active"
+            message = "TORQ is responding. You can write the next draft now."
+            remediation = "Send the draft manually after this response finishes, or stop the active turn."
+        else:
+            reason_code = None
+            message = "Ask about this verified run."
+            remediation = None
+        return {
+            "schema": "torq-workspace-v1",
+            "workspace_id": root["workspace_id"],
+            "root": {
+                "kind": root["root_kind"],
+                "trusted": root["trusted"],
+                "verification_state": root["verification_state"],
+                "run_mode": root["run_mode"],
+            },
+            "selected_run_id": root["selected_run_id"],
+            "runs": root["runs"],
+            "provider": {
+                "name": provider,
+                "configuration": (
+                    "configured"
+                    if provider
+                    else "unsupported"
+                    if configured_provider
+                    else "not_configured"
+                ),
+                "authentication": "not_checked",
+            },
+            "capabilities": {
+                "can_discuss_run": can_discuss,
+                "can_cancel": can_cancel,
+                "can_start_task": False,
+                "execution_supported": False,
+                "chat_stream_available": bool(runtime_present and chat_available),
+                "draft_storage": "browser_session",
+                "attachment_types": attachment_types,
+                "limits": {
+                    "attachments": 0 if not attachment_types else 6,
+                    "attachment_bytes": 0 if not attachment_types else 5 * 1024 * 1024,
+                },
+            },
+            "active_turn_id": active_turn_id if active else None,
+            "guidance": {
+                "reason_code": reason_code,
+                "message": message,
+                "remediation": remediation,
+                "consequence": "Drafts are never sent automatically.",
+            },
+        }
+
+    def preflight_chat_submit(session: _Session) -> None:
+        root = classify_workspace_root(projector.run_root)
+        if root["root_kind"] != "individual_run":
+            raise ValueError(str(root["reason_code"]))
+        snapshot = projector.snapshot()
+        root = classify_workspace_root(projector.run_root, snapshot)
+        if root["trusted"] is not True:
+            raise ValueError("workspace_run_untrusted")
+        run = snapshot.get("run")
+        if isinstance(run, Mapping) and run.get("workflow_state") in {"closed", "abandoned"}:
+            session_manager.downgrade(session)
+        if session.read_only:
+            raise ValueError("fleet_session_read_only")
+        chat = chat_snapshot()
+        if chat.get("data_status") != "available":
+            raise ValueError("chat_runtime_unavailable")
+        active_turn_id = chat.get("active_turn_id")
+        if isinstance(active_turn_id, str) and active_turn_id:
+            raise ValueError("chat_turn_active")
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "TORQFleet/1"
 
@@ -466,7 +648,9 @@ def create_fleet_server(
                     self._json(403, {"status": "blocked", "finding": str(exc)})
                     return
                 self.send_response(303)
-                self.send_header("Location", "/")
+                requested_view = values.get("view", [])
+                location = "/?view=task" if requested_view == ["task"] else "/"
+                self.send_header("Location", location)
                 self.send_header(
                     "Set-Cookie",
                     "torq_fleet_session=" + token + "; HttpOnly; SameSite=Strict; Path=/",
@@ -487,6 +671,35 @@ def create_fleet_server(
                 return
             if parsed.path == "/api/v1/fleet":
                 self._json(200, fleet_envelope(session))
+                return
+            if parsed.path == "/api/v1/workspace":
+                self._json(200, workspace_metadata(session))
+                return
+            if parsed.path == "/api/v1/tasks/capabilities" and task_service is not None:
+                try:
+                    self._json(200, task_service.capabilities())
+                except (OSError, ValueError):
+                    self._json(409, {"status": "blocked", "finding": "task_state_unavailable"})
+                return
+            if parsed.path == "/api/v1/tasks" and task_service is not None:
+                try:
+                    self._json(200, {"schema": "torq-task-history-v1", "tasks": task_service.history()})
+                except (OSError, ValueError):
+                    self._json(409, {"status": "blocked", "finding": "task_state_unavailable"})
+                return
+            draft_match = re.fullmatch(r"/api/v1/tasks/drafts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})", parsed.path)
+            if draft_match is not None and task_service is not None:
+                try:
+                    self._json(200, {"draft": task_service.draft(draft_match.group(1))})
+                except ValueError:
+                    self._json(404, {"status": "not_found"})
+                return
+            task_match = re.fullmatch(r"/api/v1/tasks/(run-task-[a-f0-9]{24})", parsed.path)
+            if task_match is not None and task_service is not None:
+                try:
+                    self._json(200, {"task": task_service.task(task_match.group(1))})
+                except ValueError:
+                    self._json(404, {"status": "not_found"})
                 return
             if parsed.path == "/api/v1/chat":
                 self._json(200, chat_snapshot())
@@ -643,12 +856,34 @@ def create_fleet_server(
                 r"/api/v1/chat/turns/([A-Za-z0-9][A-Za-z0-9:._-]{0,127})/cancel",
                 path,
             )
+            task_draft_match = re.fullmatch(
+                r"/api/v1/tasks/drafts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})", path
+            )
+            task_draft_delete_match = re.fullmatch(
+                r"/api/v1/tasks/drafts/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/delete", path
+            )
+            task_stop_match = re.fullmatch(r"/api/v1/tasks/(run-task-[a-f0-9]{24})/stop", path)
             if path == "/api/v1/chat/turns":
                 operation = "chat_submit"
                 service_present = chat_controller is not None
             elif chat_cancel_match is not None:
                 operation = "chat_cancel"
                 service_present = chat_controller is not None
+            elif task_draft_delete_match is not None:
+                operation = "task_draft_delete"
+                service_present = task_service is not None
+            elif task_draft_match is not None:
+                operation = "task_draft"
+                service_present = task_service is not None
+            elif path == "/api/v1/tasks/plans":
+                operation = "task_plan"
+                service_present = task_service is not None
+            elif path == "/api/v1/tasks":
+                operation = "task_start"
+                service_present = task_service is not None
+            elif task_stop_match is not None:
+                operation = "task_stop"
+                service_present = task_service is not None
             elif path in {"/api/v1/context", "/api/v1/fleet/context"}:
                 operation = "context"
                 service_present = context_injector is not None
@@ -667,7 +902,13 @@ def create_fleet_server(
             if not service_present:
                 self._json(405, {"status": "read_only"})
                 return
+            replay_only = False
             session = session_manager.claim_mutation(self.headers.get("Cookie"))
+            if session is None and operation == "task_start":
+                recovered = session_manager.recover_rotated_session(self.headers.get("Cookie"))
+                if recovered is not None:
+                    session, _ = recovered
+                    replay_only = True
             if session is None:
                 self._json(401, {"status": "blocked", "finding": "fleet_session_required"})
                 return
@@ -700,6 +941,15 @@ def create_fleet_server(
                 return
             if operation in {"chat_submit", "chat_cancel"}:
                 self._chat_post(operation, chat_cancel_match, session)
+                return
+            if operation.startswith("task_"):
+                self._task_post(
+                    operation,
+                    task_draft_delete_match or task_draft_match,
+                    task_stop_match,
+                    session,
+                    replay_only=replay_only,
+                )
                 return
             snapshot = projector.snapshot()
             envelope = controls.envelope(
@@ -901,6 +1151,8 @@ def create_fleet_server(
         ) -> None:
             assert chat_controller is not None
             try:
+                if operation == "chat_submit":
+                    preflight_chat_submit(session)
                 payload = self._read_chat_payload()
                 if operation == "chat_cancel":
                     if payload or cancel_match is None:
@@ -921,6 +1173,12 @@ def create_fleet_server(
                     ):
                         raise ValueError("chat_turn_request_invalid")
                     attachments = [cast(Mapping[str, str], item) for item in attachments_value]
+                    if (
+                        isinstance(workspace_chat_provider, str)
+                        and workspace_chat_provider.casefold() == "claude"
+                        and attachments
+                    ):
+                        raise ValueError("chat_subscription_attachments_unsupported")
                     result = chat_controller.submit(
                         turn_id=turn_id,
                         text=text_value,
@@ -963,6 +1221,111 @@ def create_fleet_server(
             if not isinstance(payload, Mapping):
                 raise ValueError("chat_request_invalid")
             return payload
+
+        def _read_task_payload(self, *, allow_empty: bool = False) -> Mapping[str, Any]:
+            content_types = self.headers.get_all("Content-Type", failobj=[])
+            if len(content_types) != 1 or content_types[0].casefold() not in {
+                "application/json", "application/json; charset=utf-8"
+            }:
+                raise ValueError("task_content_type_invalid")
+            if self.headers.get_all("Transfer-Encoding", failobj=[]):
+                raise ValueError("task_transfer_encoding_denied")
+            lengths = self.headers.get_all("Content-Length", failobj=[])
+            if len(lengths) != 1 or not lengths[0].isdigit():
+                raise ValueError("task_size_invalid")
+            length = int(lengths[0])
+            if length > 65_536 or length == 0 and not allow_empty:
+                raise ValueError("task_size_invalid")
+            if length == 0:
+                return {}
+            payload = json.loads(
+                self.rfile.read(length),
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+            if not isinstance(payload, Mapping):
+                raise ValueError("task_request_invalid")
+            return payload
+
+        def _task_post(
+            self,
+            operation: str,
+            draft_match: re.Match[str] | None,
+            stop_match: re.Match[str] | None,
+            session: _Session,
+            *,
+            replay_only: bool,
+        ) -> None:
+            assert task_service is not None
+            try:
+                payload = self._read_task_payload(allow_empty=operation == "task_stop")
+                if operation == "task_draft":
+                    if set(payload) != {"goal", "input_paths", "output_paths", "expected_revision"} or draft_match is None:
+                        raise ValueError("task_draft_request_invalid")
+                    goal = payload["goal"]
+                    revision = payload["expected_revision"]
+                    input_paths = payload["input_paths"]
+                    output_paths = payload["output_paths"]
+                    if (
+                        not isinstance(goal, str)
+                        or not isinstance(revision, int)
+                        or isinstance(revision, bool)
+                        or not isinstance(input_paths, list)
+                        or not isinstance(output_paths, list)
+                        or not all(isinstance(item, str) for item in input_paths + output_paths)
+                    ):
+                        raise ValueError("task_draft_request_invalid")
+                    result: object = task_service.save_draft(
+                        draft_match.group(1), goal=goal, input_paths=input_paths,
+                        output_paths=output_paths, expected_revision=revision,
+                    )
+                elif operation == "task_draft_delete":
+                    if set(payload) != {"expected_revision"} or draft_match is None:
+                        raise ValueError("task_draft_delete_request_invalid")
+                    revision = payload["expected_revision"]
+                    if not isinstance(revision, int) or isinstance(revision, bool):
+                        raise ValueError("task_draft_delete_request_invalid")
+                    task_service.delete_draft(draft_match.group(1), expected_revision=revision)
+                    result = {"deleted": True, "revision": revision + 1}
+                elif operation == "task_plan":
+                    if set(payload) != {"project_id", "draft_revision", "input_paths", "output_paths"}:
+                        raise ValueError("task_plan_request_invalid")
+                    project_id = payload["project_id"]
+                    draft_revision = payload["draft_revision"]
+                    input_paths = payload["input_paths"]
+                    output_paths = payload["output_paths"]
+                    if (
+                        not isinstance(project_id, str)
+                        or not isinstance(draft_revision, int)
+                        or isinstance(draft_revision, bool)
+                        or not isinstance(input_paths, list)
+                        or not isinstance(output_paths, list)
+                        or not all(isinstance(item, str) for item in input_paths + output_paths)
+                    ):
+                        raise ValueError("task_plan_request_invalid")
+                    result = task_service.review_plan(project_id=project_id, draft_revision=draft_revision, input_paths=input_paths, output_paths=output_paths)
+                elif operation == "task_start":
+                    if set(payload) != {"request_id", "plan_hash"} or not all(isinstance(payload.get(key), str) for key in ("request_id", "plan_hash")):
+                        raise ValueError("task_start_request_invalid")
+                    method = task_service.replay_start if replay_only else task_service.start
+                    result = method(request_id=payload["request_id"], plan_hash=payload["plan_hash"])
+                else:
+                    if payload or stop_match is None:
+                        raise ValueError("task_stop_request_invalid")
+                    result = task_service.stop(stop_match.group(1))
+                rotated = session_manager.rotate(session)
+                self._json(202 if operation in {"task_start", "task_stop"} else 200, {"status": "accepted", "result": result}, session_token=rotated)
+            except ConnectionError:
+                return
+            except (OSError, RuntimeError, ValueError) as exc:
+                finding = str(exc).split(":", 1)[0]
+                if not finding.startswith("task_"):
+                    finding = "task_request_invalid"
+                if replay_only:
+                    self._json(409, {"status": "blocked", "finding": finding})
+                else:
+                    rotated = session_manager.rotate(session)
+                    self._json(409, {"status": "blocked", "finding": finding}, session_token=rotated)
 
         def _read_control_payload(self) -> Mapping[str, Any]:
             content_types = self.headers.get_all("Content-Type", failobj=[])

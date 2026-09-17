@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -129,3 +130,66 @@ def test_fleet_chat_cli_macos_refuses_before_keys_or_provider_start(
         "status": "blocked",
     }
     assert not run_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("root_case", "expected_finding"),
+    [
+        ("missing", "workspace_root_missing"),
+        ("collection", "workspace_run_selection_required:run-select-me"),
+        ("linked", "workspace_root_link_denied"),
+        ("untrusted", "workspace_run_untrusted"),
+    ],
+)
+def test_fleet_chat_cli_preflights_root_before_identity_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    root_case: str,
+    expected_finding: str,
+) -> None:
+    run_root = tmp_path / "selected"
+    if root_case == "collection":
+        run_root.mkdir()
+        selected = run_root / "run-select-me"
+        selected.mkdir()
+        for name in ("receipts.jsonl", "terminal-manifest.json", "run-certificate.json"):
+            (selected / name).write_text("{}", encoding="utf-8")
+    elif root_case == "untrusted":
+        run_root.mkdir()
+        for name in ("receipts.jsonl", "terminal-manifest.json", "run-certificate.json"):
+            (run_root / name).write_text("{}", encoding="utf-8")
+    elif root_case == "linked":
+        target = tmp_path / "actual"
+        target.mkdir()
+        try:
+            os.symlink(target, run_root, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("directory_symlink_unavailable")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("root preflight must precede identity or provider construction")
+
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "FileRunKeyStore", forbidden)
+    monkeypatch.setattr(cli, "ChatEvidenceJournal", forbidden)
+    monkeypatch.setattr(cli, "ChatProviderCommandFactory", forbidden)
+
+    result = cli.main(
+        [
+            "fleet",
+            "--run-root",
+            str(run_root),
+            "--serve",
+            "--chat-provider",
+            "claude",
+            "--chat-model",
+            "claude-opus-4-8",
+        ]
+    )
+    assert result == 3
+    assert json.loads(capsys.readouterr().out) == {
+        "finding": expected_finding,
+        "status": "blocked",
+    }
