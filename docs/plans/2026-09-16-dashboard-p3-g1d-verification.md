@@ -60,3 +60,9 @@ Other independent checks passed:
 P3 creates/replaces bounded UTF-8 files in existing directories. It does not execute generated code, run project unit tests, change credentials, or perform Git operations. Structural-check success is labelled accordingly. Generation retains the existing production platform containment restrictions.
 
 Application is recoverable per file, not a multi-file atomic transaction. The kernel lease coordinates TORQ installations for the same user/host. Pause non-TORQ editors, autosave, formatters, and other writers during Apply/recovery: a write racing the final check and native rename can be overwritten. Observed/preexisting third-party bytes or substituted identities are rejected. Unknown staging and a create-rollback crash after deletion but before its restored receipt remain explicitly recovery-blocked; absence alone is not identity evidence.
+
+## macOS CI follow-up
+
+The initial PR head `b46b448` passed Windows and Linux CI but failed the native macOS transaction test because Python on Darwin does not expose `os.listxattr`. This was a fail-closed platform defect, not a passing platform gate. The follow-up uses descriptor-bound Darwin `flistxattr` and ACL APIs, bounded parsing, strict errors, and before/after BSD-flag checks; it does not skip the test or substitute path-based reads.
+
+Root reran the native adapter, hermetic boundary, and candidate integration selection: **50 passed**; Ruff and Mypy for all three target platforms passed. G2A separately approved the adapter and distinguished mocked API tests from real Darwin execution. Native macOS CI must pass on the updated PR head before merge. The detailed browser/wheel evidence above describes the pre-follow-up package; dashboard assets and Windows execution behavior are unchanged by this Darwin-only fix.

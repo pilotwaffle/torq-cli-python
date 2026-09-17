@@ -1,11 +1,95 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 from pathlib import Path
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
+import torq_cli.safety.primary_transaction as primary_module
 from torq_cli.safety.primary_transaction import AnchoredPrimary
 from torq_cli.safety.task_workspace import digest_bytes
+
+
+class _NativeFunction:
+    def __init__(self, callback: Callable[..., Any]) -> None:
+        self.callback = callback
+        self.argtypes: object = None
+        self.restype: object = None
+
+    def __call__(self, *args: Any) -> Any:
+        return self.callback(*args)
+
+
+class _DarwinLibc:
+    def __init__(
+        self,
+        *,
+        xattrs: bytes = b"",
+        acl: bool = False,
+        xattr_error: int | None = None,
+        acl_error: int | None = None,
+    ) -> None:
+        def list_xattrs(
+            _descriptor: Any, buffer: Any, size: Any, _options: Any
+        ) -> int:
+            if xattr_error is not None:
+                ctypes.set_errno(xattr_error)
+                return -1
+            if buffer is None:
+                return len(xattrs)
+            if int(size) < len(xattrs):
+                ctypes.set_errno(errno.ERANGE)
+                return -1
+            ctypes.memmove(buffer, xattrs, len(xattrs))
+            return len(xattrs)
+
+        def get_acl(_descriptor: Any, _kind: Any) -> int | None:
+            if acl_error is not None:
+                ctypes.set_errno(acl_error)
+                return None
+            return 1234
+
+        def get_entry(*_args: Any) -> int:
+            if acl:
+                return 0
+            ctypes.set_errno(errno.EINVAL)
+            return -1
+
+        self.flistxattr = _NativeFunction(list_xattrs)
+        self.acl_get_fd_np = _NativeFunction(get_acl)
+        self.acl_get_entry = _NativeFunction(get_entry)
+        self.acl_free = _NativeFunction(lambda *_args: 0)
+
+
+def test_darwin_fd_metadata_adapter_is_bounded_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(primary_module, "_darwin_libc", lambda: _DarwinLibc())
+    assert primary_module._darwin_xattrs(7) == []
+    assert primary_module._darwin_acl_present(7) is False
+
+    monkeypatch.setattr(
+        primary_module, "_darwin_libc", lambda: _DarwinLibc(xattrs=b"user.note\x00")
+    )
+    assert primary_module._darwin_xattrs(7) == ["user.note"]
+    monkeypatch.setattr(primary_module, "_darwin_libc", lambda: _DarwinLibc(acl=True))
+    assert primary_module._darwin_acl_present(7) is True
+
+    malformed = _DarwinLibc(xattrs=b"missing-terminator")
+    monkeypatch.setattr(primary_module, "_darwin_libc", lambda: malformed)
+    with pytest.raises(ValueError, match="task_apply_metadata_unsupported"):
+        primary_module._darwin_xattrs(7)
+    unavailable = _DarwinLibc(xattr_error=errno.ENOTSUP)
+    monkeypatch.setattr(primary_module, "_darwin_libc", lambda: unavailable)
+    with pytest.raises(RuntimeError, match="task_apply_metadata_unreadable"):
+        primary_module._darwin_xattrs(7)
+    acl_unavailable = _DarwinLibc(acl_error=errno.ENOTSUP)
+    monkeypatch.setattr(primary_module, "_darwin_libc", lambda: acl_unavailable)
+    with pytest.raises(RuntimeError, match="task_apply_metadata_unreadable"):
+        primary_module._darwin_acl_present(7)
 
 
 def test_anchored_primary_replaces_creates_and_restores_exact_bytes(tmp_path: Path) -> None:

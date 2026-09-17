@@ -72,3 +72,28 @@ recovery-blocking and are not overwritten.
 
 No live provider, user-project mutation outside isolated fixtures, wheel smoke,
 or browser run was performed by this reviewer.
+
+## Darwin native metadata follow-up — 2026-09-17
+
+**APPROVE — bounded macOS metadata-adapter follow-up.** This supplements the
+prior approval, which did not include a Darwin kernel run.
+
+The POSIX transaction now uses Darwin's descriptor-bound `flistxattr` ABI,
+instead of Python's unavailable path/API surface. It rejects every xattr or ACL
+enumeration failure, including unavailable-feature errors and a null ACL handle;
+it therefore never treats unknown metadata as empty. A present ACL entry rejects
+the target. The empty extended-ACL result is the Darwin `acl_get_entry` result
+`-1` with `EINVAL`; this matches Apple's documented Darwin result convention
+(`0` returns an entry, `-1` otherwise). Nonzero BSD `st_flags` also reject.
+
+The snapshot rechecks xattrs/ACLs and BSD flags after the held-descriptor read,
+so the evidence snapshot does not accept a metadata transition during that read.
+The existing anchored-root, no-follow, identity and permission-policy checks
+remain unchanged.
+
+I ran `python -m pytest tests/test_primary_transaction.py -p
+no:cacheprovider -ra` (**3 passed**), `python -m mypy
+src/torq_cli/safety/primary_transaction.py` (clean), and `git diff --check`.
+Those checks exercise the mocked Darwin ABI and static typing on this host; they
+are not a Darwin kernel verification. macOS CI remains the required platform
+gate before publishing this follow-up.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import os
 import re
@@ -21,6 +22,87 @@ from torq_cli.safety.task_workspace import (
 )
 
 _READ_CHUNK = 65_536
+_DARWIN_XATTR_LIST_LIMIT = 65_536
+_DARWIN_XATTR_COUNT_LIMIT = 128
+_DARWIN_ACL_TYPE_EXTENDED = 0x00000100
+_DARWIN_ACL_FIRST_ENTRY = 0
+
+
+def _darwin_libc() -> Any:
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def _darwin_xattrs(descriptor: int) -> list[str]:
+    """Enumerate xattr names through the open descriptor using Darwin's ABI."""
+    function = _darwin_libc().flistxattr
+    function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    function.restype = ctypes.c_ssize_t
+    capacity = 0
+    for _attempt in range(3):
+        ctypes.set_errno(0)
+        required = int(function(descriptor, None, 0, 0))
+        if required < 0:
+            raise RuntimeError("task_apply_metadata_unreadable")
+        if required == 0:
+            return []
+        if required > _DARWIN_XATTR_LIST_LIMIT:
+            raise ValueError("task_apply_metadata_unsupported")
+        capacity = max(capacity, required)
+        buffer = ctypes.create_string_buffer(capacity)
+        ctypes.set_errno(0)
+        count = int(function(descriptor, buffer, capacity, 0))
+        if count < 0:
+            if ctypes.get_errno() == errno.ERANGE:
+                continue
+            raise RuntimeError("task_apply_metadata_unreadable")
+        if count != required or count > capacity or count > _DARWIN_XATTR_LIST_LIMIT:
+            raise ValueError("task_apply_metadata_unsupported")
+        if count == 0:
+            return []
+        raw = bytes(buffer.raw[:count])
+        if not raw.endswith(b"\x00"):
+            raise ValueError("task_apply_metadata_unsupported")
+        encoded = raw[:-1].split(b"\x00")
+        if (
+            len(encoded) > _DARWIN_XATTR_COUNT_LIMIT
+            or any(not item or len(item) > 127 for item in encoded)
+        ):
+            raise ValueError("task_apply_metadata_unsupported")
+        try:
+            return [item.decode("utf-8", errors="strict") for item in encoded]
+        except UnicodeDecodeError as exc:
+            raise ValueError("task_apply_metadata_unsupported") from exc
+    raise RuntimeError("task_apply_metadata_unstable")
+
+
+def _darwin_acl_present(descriptor: int) -> bool:
+    """Detect a Darwin extended ACL through the open descriptor."""
+    library = _darwin_libc()
+    get_acl = library.acl_get_fd_np
+    get_acl.argtypes = [ctypes.c_int, ctypes.c_int]
+    get_acl.restype = ctypes.c_void_p
+    get_entry = library.acl_get_entry
+    get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    get_entry.restype = ctypes.c_int
+    free_acl = library.acl_free
+    free_acl.argtypes = [ctypes.c_void_p]
+    free_acl.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl = get_acl(descriptor, _DARWIN_ACL_TYPE_EXTENDED)
+    if not acl:
+        raise RuntimeError("task_apply_metadata_unreadable")
+    entry = ctypes.c_void_p()
+    try:
+        ctypes.set_errno(0)
+        result = int(get_entry(acl, _DARWIN_ACL_FIRST_ENTRY, ctypes.byref(entry)))
+        if result == 0:
+            return True
+        if result == -1 and ctypes.get_errno() == errno.EINVAL:
+            return False
+        raise RuntimeError("task_apply_metadata_unreadable")
+    finally:
+        if free_acl(acl) != 0:
+            raise RuntimeError("task_apply_metadata_unreadable")
 
 if sys.platform != "win32":
     import fcntl
@@ -36,6 +118,11 @@ if sys.platform != "win32":
         fcntl.flock(descriptor, operation)
 
     def _posix_xattrs(descriptor: int) -> list[str]:
+        if sys.platform == "darwin":
+            result = _darwin_xattrs(descriptor)
+            if _darwin_acl_present(descriptor):
+                result.append("com.apple.system.acl")
+            return result
         reader = getattr(os, "listxattr", None)
         if reader is None:
             raise RuntimeError("task_apply_platform_unsupported")
@@ -304,10 +391,16 @@ class AnchoredPrimary:
                 raise ValueError("task_apply_target_unsafe")
             if before.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
                 raise ValueError("task_apply_metadata_unsupported")
+            if int(getattr(before, "st_flags", 0)) != 0:
+                raise ValueError("task_apply_metadata_unsupported")
             if _posix_xattrs(descriptor):
                 raise ValueError("task_apply_metadata_unsupported")
             content = _bounded_read_fd(descriptor)
             after = os.fstat(descriptor)
+            if _posix_xattrs(descriptor):
+                raise ValueError("task_apply_metadata_unsupported")
+            if int(getattr(after, "st_flags", 0)) != int(getattr(before, "st_flags", 0)):
+                raise ValueError("task_apply_source_changed")
             if _posix_identity(before) != _posix_identity(after) or len(content) != before.st_size:
                 raise ValueError("task_apply_source_changed")
             policy = {
