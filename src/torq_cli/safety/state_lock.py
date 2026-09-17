@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import sys
 from pathlib import Path
 from types import TracebackType
 
@@ -17,7 +17,7 @@ class InstallationStateLock:
         self._stream = self.path.open("a+b")
         restrict_owner_only_file(self.path)
         try:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 self._stream.seek(0)
@@ -39,7 +39,7 @@ class InstallationStateLock:
         if self._stream.closed:
             return
         try:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 self._stream.seek(0)

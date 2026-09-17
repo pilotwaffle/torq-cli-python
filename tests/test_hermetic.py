@@ -81,11 +81,14 @@ def test_production_imports_forbid_subprocess() -> None:
         ):
             # The evidence broker owns the authenticated local-only IPC
             # boundary (AF_PIPE on Windows, AF_UNIX on POSIX).
-            local_allow = (
-                {"os", "socket"}
-                if source_path.name == "evidence_broker.py"
-                else {"os"}
-            )
+            if source_path.name == "evidence_broker.py":
+                local_allow = {"os", "socket"}
+            elif source_path.name == "state_lock.py":
+                # sys.platform is the static type-checkable discriminator for
+                # the mutually exclusive msvcrt/fcntl kernel lock backends.
+                local_allow = {"sys"}
+            else:
+                local_allow = {"os"}
         elif source_path.as_posix().endswith("torq_cli/application/task_store.py"):
             # Durable task CAS/reservations need atomic replace and fsync.
             local_allow = {"os"}
