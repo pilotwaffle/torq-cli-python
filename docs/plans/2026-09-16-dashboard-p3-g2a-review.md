@@ -97,3 +97,22 @@ src/torq_cli/safety/primary_transaction.py` (clean), and `git diff --check`.
 Those checks exercise the mocked Darwin ABI and static typing on this host; they
 are not a Darwin kernel verification. macOS CI remains the required platform
 gate before publishing this follow-up.
+
+### Correction: normal absence of a Darwin extended ACL
+
+The preceding null-ACL sentence was too strict. Apple Libc's
+[`acl_file.c`](https://github.com/apple-oss-distributions/Libc/blob/main/posix1e/acl_file.c)
+implements `acl_get_fd_np` by initializing `acl` to null and returning it after
+calling `filesec_get_property(FILESEC_ACL, ...)`. It deliberately discards that
+call's result. Apple's
+[`filesec.c`](https://github.com/apple-oss-distributions/Libc/blob/main/gen/filesec.c)
+defines an absent `FILESEC_ACL` property as `-1` with `errno = ENOENT`.
+Consequently, a normal macOS plain file yields a null ACL pointer with `ENOENT`.
+
+The corrected, narrowly approved rule resets `errno` immediately before
+`acl_get_fd_np` and treats **only** null plus `ENOENT` as no extended ACL. A
+non-null ACL is enumerated and rejected if it has an entry; all other null/error
+results remain `task_apply_metadata_unreadable`. This preserves the fail-closed
+policy for unknown metadata while allowing ordinary files. The follow-up mock
+must model null-plus-`ENOENT` for the plain-file case. Native macOS CI remains
+the final platform gate for this correction.

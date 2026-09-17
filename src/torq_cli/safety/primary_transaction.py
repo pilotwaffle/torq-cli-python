@@ -90,6 +90,11 @@ def _darwin_acl_present(descriptor: int) -> bool:
     ctypes.set_errno(0)
     acl = get_acl(descriptor, _DARWIN_ACL_TYPE_EXTENDED)
     if not acl:
+        # Apple Libc acl_get_fd_np initializes ACL to NULL and delegates to
+        # filesec_get_property(FILESEC_ACL), which sets ENOENT exactly when the
+        # held file has no FS_VALID_ACL property. Other NULL results are errors.
+        if ctypes.get_errno() == errno.ENOENT:
+            return False
         raise RuntimeError("task_apply_metadata_unreadable")
     entry = ctypes.c_void_p()
     try:

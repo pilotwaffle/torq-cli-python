@@ -50,13 +50,13 @@ class _DarwinLibc:
             if acl_error is not None:
                 ctypes.set_errno(acl_error)
                 return None
+            if not acl:
+                ctypes.set_errno(errno.ENOENT)
+                return None
             return 1234
 
         def get_entry(*_args: Any) -> int:
-            if acl:
-                return 0
-            ctypes.set_errno(errno.EINVAL)
-            return -1
+            return 0
 
         self.flistxattr = _NativeFunction(list_xattrs)
         self.acl_get_fd_np = _NativeFunction(get_acl)
