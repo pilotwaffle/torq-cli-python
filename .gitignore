@@ -20,3 +20,13 @@ tmp/
 # Operator-local memory; not project documentation.
 MEMORY.md
 
+
+# Local build and run output; never project content.
+dist-release-*/
+*.log
+.coverage
+torq-demo-runs/
+
+# Local agent tool caches.
+.playwright-mcp/
+.qwen/
