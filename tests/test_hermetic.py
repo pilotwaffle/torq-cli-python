@@ -55,6 +55,14 @@ def test_production_imports_forbid_subprocess() -> None:
         elif source_path.as_posix().endswith("torq_cli/adapters/chat_provider.py"):
             # Reads explicit runtime facts only to build a scrubbed child.
             local_allow = {"os", "sys"}
+        elif source_path.as_posix().endswith("torq_cli/adapters/candidate_provider.py"):
+            # Resolves the fixed provider/bridge executable and constructs a
+            # scrubbed child environment; process creation stays in OwnedProcess.
+            local_allow = {"os", "sys"}
+        elif source_path.as_posix().endswith("torq_cli/application/workspace.py"):
+            # Read-only workspace classification inspects link/reparse metadata
+            # before projecting trust and never launches a process or reads env.
+            local_allow = {"os"}
         elif source_path.as_posix().endswith("torq_cli/interfaces/fleet_http.py"):
             # The local Fleet transport is isolated to this loopback-only,
             # bounded interface; the application projector remains hermetic.
@@ -67,15 +75,23 @@ def test_production_imports_forbid_subprocess() -> None:
                 "torq_cli/safety/evidence_broker.py",
                 "torq_cli/safety/accounting_registry.py",
                 "torq_cli/safety/chat_evidence.py",
+                "torq_cli/safety/task_workspace.py",
+                "torq_cli/safety/state_lock.py",
             )
         ):
             # The evidence broker owns the authenticated local-only IPC
             # boundary (AF_PIPE on Windows, AF_UNIX on POSIX).
-            local_allow = (
-                {"os", "socket"}
-                if source_path.name == "evidence_broker.py"
-                else {"os"}
-            )
+            if source_path.name == "evidence_broker.py":
+                local_allow = {"os", "socket"}
+            elif source_path.name == "state_lock.py":
+                # sys.platform is the static type-checkable discriminator for
+                # the mutually exclusive msvcrt/fcntl kernel lock backends.
+                local_allow = {"sys"}
+            else:
+                local_allow = {"os"}
+        elif source_path.as_posix().endswith("torq_cli/application/task_store.py"):
+            # Durable task CAS/reservations need atomic replace and fsync.
+            local_allow = {"os"}
         elif source_path.as_posix().endswith("torq_cli/connectors/native_credentials.py"):
             # DISPLAY/WAYLAND_DISPLAY are explicit session-type facts only;
             # this adapter never enumerates credential-bearing environment keys.

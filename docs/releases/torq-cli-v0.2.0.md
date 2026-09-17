@@ -2,9 +2,9 @@
 
 Status: prepared from the protected-`main` release candidate commit
 `35f7990f904f4a648a659702f03168d6febc709a`.
-Do not interpret this file as a tag, signature, GitHub release, or
-published-artifact attestation. Those release actions remain to be performed
-and recorded.
+These notes describe that candidate. The `v0.2.0` tag identifies the release
+revision; signatures, publication status, and artifact attestations are recorded
+separately in the release evidence and are not established by these notes.
 
 ## Feature release
 

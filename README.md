@@ -57,10 +57,49 @@ $ torq evidence verify --run-root torq-demo-runs/run-0d04c989291241d58830a964ce5
 | `torq run` | The governed orchestration boundary. Dry-run by default; live needs `--allow-live` and `--policy-allow-live`. |
 | `torq evidence verify --run-root DIR` | Verify a run's receipt chain and artifacts. |
 | `torq fleet --run-root DIR --serve` | Evidence-backed Fleet control surface with attended chat. |
+| `torq fleet --serve --task-project ID=DIR ...` | Open New task for bounded candidate generation and structural checks. |
 | `torq setup` / `torq auth` | Interactive config; credentials stored as opaque handles in the OS keychain or an attended encrypted file vault. |
 | `torq status` / `torq profile validate` / `torq harness inspect` | Attest the machine, the role profile, and the live harness before a run. |
 | `torq config import-v5-*` | Import normalized or raw Console V5 configuration (read-only projection). |
 | `torq trust readiness` | Report production-trust gaps (signing identity, receipt anchor). |
+
+### Workspace dashboard
+
+`torq fleet --run-root DIR --serve` opens Fleet by default. Choose **Workspace** in
+the header for a calmer, conversation-first view; the choice is saved locally.
+`DIR` must be one individual TORQ run, not its parent collection. If a collection
+is selected, Workspace lists safe relative run IDs and shows the exact relaunch
+form without choosing a run automatically.
+
+Run discussion is opt-in and remains narrower than a build agent:
+
+```powershell
+torq fleet --run-root .\torq-demo-runs\run-0123 --serve `
+  --chat-provider claude --chat-model MODEL
+```
+
+Workspace can discuss verified run history when the configured provider and
+session permit it. Discussion does not create or apply a change. Unsent text is stored only in browser `sessionStorage`, scoped to an
+opaque identity for the selected root; **Clear draft** removes that scoped text.
+Provider keys, attachments, and filesystem paths are never stored there.
+
+### New task
+
+New task is a separate opt-in launch and does not require an existing run directory:
+
+```powershell
+torq fleet --serve --task-project app=C:\work\app `
+  --task-provider claude --task-model MODEL `
+  --task-claude-bin C:\Users\you\.local\bin\claude.exe
+```
+
+TORQ saves the goal and exact relative file scope under an owner-only application
+state directory. Start authorizes one tools-off provider request. TORQ writes the
+returned UTF-8 contents to a separate candidate, then runs the fixed
+`structural-v1` check for Python syntax, strict JSON, and UTF-8 text. The policy
+accepts at most 32 files, 64 KiB per file, and 2 MiB total. It does not run unit
+tests, execute generated code, or modify the configured project. Candidate
+application remains a later governed step.
 
 ## Safety model
 
