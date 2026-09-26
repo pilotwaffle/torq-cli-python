@@ -28,7 +28,7 @@ and backed by a verifiable receipt chain.
 
 ## Install
 
-    pip install torq-cli        # Python 3.11–3.13
+    pip install "git+https://github.com/pilotwaffle/torq-cli-python.git"  # the PyPI package is not published yet; Python 3.11–3.13
 
 ## Try it in one command
 

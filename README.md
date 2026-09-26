@@ -32,7 +32,7 @@ Recorded September 17, 2026 with an **offline test provider**. The dashboard, st
 Requires Python 3.11–3.13.
 
 ```bash
-pip install torq-cli          # or: pip install git+https://github.com/pilotwaffle/torq-cli-python
+pip install "git+https://github.com/pilotwaffle/torq-cli-python.git"  # the PyPI package is not published yet
 torq demo --goal "Add input validation to the login form" --run
 torq evidence verify --run-root ./torq-demo-runs/<run-id>
 ```
