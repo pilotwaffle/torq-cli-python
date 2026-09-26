@@ -29,7 +29,7 @@ torq demo --goal "Add input validation to the login form" --run
 torq evidence verify --run-root ./torq-demo-runs/<run-id>
 ```
 
-`torq demo` scaffolds the identity and attestation documents, runs a real four-stage dry-run (G1D → G1R → Builder → G2A), and leaves a verifiable run directory behind. No provider is contacted and nothing outside the run root is written. The full install matrix is in [docs/install.md](docs/install.md).
+`torq demo` scaffolds the identity and attestation documents, runs a real four-stage dry-run (G1D → G1R → Builder → G2A), and leaves a verifiable run directory behind. No provider is contacted and nothing outside the run root is written. After `--run`, a note on standard error gives the run id and the exact `torq evidence verify` command; the JSON lines on standard output stay the same. Pointing `torq evidence verify` or `torq fleet` at the folder that holds the runs prints one JSON object on standard output (`status` `run_folder`, the run ids, and one verify command) and the same note on standard error. The full install matrix is in [docs/install.md](docs/install.md).
 
 ## What it looks like
 
@@ -42,6 +42,9 @@ $ torq demo --goal "Add input validation to the login form" --run
 {"status": "dry_run_complete", "report": {"mode": "dry_run", "verdict": "dry_run_complete",
   "planned_roles": ["g1d", "g1r", "builder", "g2a", "refine_bug", "refine_ui"],
   "attested": true, "receipts": "torq-demo-runs/run-0d04c989291241d58830a964ce578fc9", ...}}
+No AI provider was contacted (dry run). No project files were changed.
+Run id: run-0d04c989291241d58830a964ce578fc9
+torq evidence verify --run-root torq-demo-runs/run-0d04c989291241d58830a964ce578fc9
 
 $ torq evidence verify --run-root torq-demo-runs/run-0d04c989291241d58830a964ce578fc9
 {"finding": null, "status": "verified"}
