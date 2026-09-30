@@ -25,15 +25,38 @@ def auth_status(
     }
 
 
+def parse_inspect_documents(
+    expected_raw: Any,
+    actual_raw: Any,
+) -> tuple[dict[str, tuple[str, str]], Mapping[str, Any]]:
+    """Validate harness inspect documents or raise ValueError with a finding."""
+    if not isinstance(expected_raw, Mapping) or not isinstance(actual_raw, Mapping):
+        raise ValueError("inspect_input_not_object")
+    expected: dict[str, tuple[str, str]] = {}
+    for agent, binding in expected_raw.items():
+        key = str(agent)
+        if not isinstance(binding, (list, tuple)) or len(binding) != 2:
+            raise ValueError(f"inspect_expected_binding_invalid:{key}")
+        expected[key] = (str(binding[0]), str(binding[1]))
+    for agent, observed in actual_raw.items():
+        if not isinstance(observed, Mapping):
+            raise ValueError(f"inspect_actual_binding_invalid:{agent}")
+    return expected, actual_raw
+
+
 def inspect_harness(
     expected: Mapping[str, tuple[str, str]],
-    actual: Mapping[str, Mapping[str, str | None]],
+    actual: Mapping[str, Any],
 ) -> dict[str, Any]:
     agents: dict[str, Any] = {}
     for agent, (provider, model) in expected.items():
         observed = actual.get(agent, {})
-        observed_provider = observed.get("provider")
-        observed_model = observed.get("model")
+        if not isinstance(observed, Mapping):
+            observed_provider = None
+            observed_model = None
+        else:
+            observed_provider = observed.get("provider")
+            observed_model = observed.get("model")
         if observed_provider is None or observed_model is None:
             status = "unattestable"
         elif (observed_provider, observed_model) != (provider, model):
@@ -42,4 +65,3 @@ def inspect_harness(
             status = "matched"
         agents[agent] = {"status": status, "expected_provider": provider, "expected_model": model, "actual_provider": observed_provider, "actual_model": observed_model}
     return {"agents": agents, "ok": all(row["status"] == "matched" for row in agents.values())}
-

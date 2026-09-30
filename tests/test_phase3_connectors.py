@@ -112,6 +112,8 @@ def test_status_and_attestation_report_mixed_states_without_secrets(tmp_path: Pa
     assert report["profiles"]["selected"]["state"] == "blocked"
     inspection = inspect_harness({"g1d": ("claude", "fable-5")}, {"g1d": {"provider": "claude", "model": None}})
     assert inspection["agents"]["g1d"]["status"] == "unattestable"
+    string_observed = inspect_harness({"g1d": ("claude", "fable-5")}, {"g1d": "local"})
+    assert string_observed["agents"]["g1d"]["status"] == "unattestable"
 
 
 def test_live_smoke_runner_is_manual_and_writes_dated_independent_report(tmp_path: Path) -> None:
