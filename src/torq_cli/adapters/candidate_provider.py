@@ -105,8 +105,6 @@ class CandidateProviderCommandFactory:
                 "--tools",
                 "",
                 "--no-session-persistence",
-                "--permission-mode",
-                "plan",
                 "--disable-slash-commands",
                 "--safe-mode",
                 "--no-chrome",

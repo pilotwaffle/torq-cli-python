@@ -295,7 +295,7 @@ class LiveStageDispatcher:
             (
                 self.claude_binary, "-p", "--output-format", "json", "--model", model,
                 "--json-schema", json.dumps(schema, separators=(",", ":")),
-                "--tools", "", "--no-session-persistence", "--permission-mode", "plan",
+                "--tools", "", "--no-session-persistence",
                 "--disable-slash-commands", "--setting-sources", "",
                 "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             ),
