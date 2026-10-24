@@ -678,7 +678,9 @@ class CandidateTaskService:
             "Return only one JSON object with no markdown. Tools and filesystem access are unavailable. "
             "The contract field must be exactly torq-candidate-output-v1. The exact schema is "
             "{contract,plan_hash,input_hash,operations}; each operation is "
-            "{operation:create|replace,path,base_hash,content}. Produce at least one changed UTF-8 file "
+            "{operation:create|replace,path,base_hash,content}. For create (a path not present in "
+            "input.files) base_hash must be JSON null. For replace, base_hash must be the exact "
+            "content_hash string of that path from input.files. Produce at least one changed UTF-8 file "
             "and only paths in allowed_output_paths.\n"
             + canonical_json({"plan_hash": plan_hash, "input_hash": input_hash, "goal": plan["goal"], "allowed_output_paths": plan["output_paths"], "input": input_bundle})
         )
