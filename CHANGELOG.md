@@ -14,6 +14,13 @@ this file is the canonical cumulative record.
   and attestation documents from the packaged registry and policy, optionally
   executes a real dry-run (`--run`), and leaves a verifiable run directory.
   No provider is contacted.
+- After `torq demo --run`, a note on standard error names the dry run, the run
+  id, and the exact `torq evidence verify` command. The JSON on standard
+  output is unchanged. When `torq evidence verify` or `torq fleet` is pointed
+  at a folder of runs, standard output is one JSON object (`status`
+  `run_folder`, the run ids, and one verify command) and the same note is
+  repeated on standard error. That case does not report `evidence_missing` or
+  `evidence_unstable`. `torq --help` gives each command a one-line description.
 
 ### Changed
 - README rewritten around the visitor: pitch, comparison table, quickstart,

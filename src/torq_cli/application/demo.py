@@ -10,6 +10,8 @@ contacted and nothing outside the chosen run root is written.
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -69,6 +71,22 @@ def execute_demo(run_root: Path, goal: str) -> dict[str, Any]:
     )
 
 
+def _write_dry_run_note(report: dict[str, Any]) -> None:
+    """Tell a person what the dry run did, without touching stdout JSON."""
+    run_id = report.get("run_id")
+    receipts = report.get("receipts")
+    if not isinstance(run_id, str) or not isinstance(receipts, str):
+        return
+    command = "torq evidence verify --run-root " + shlex.quote(receipts)
+    note = (
+        "No AI provider was contacted (dry run). No project files were changed.\n"
+        f"Run id: {run_id}\n"
+        f"{command}\n"
+    )
+    sys.stderr.write(note)
+    sys.stderr.flush()
+
+
 def demo_command(goal: str, run_root: Path, execute: bool) -> int:
     """CLI entry point. Prints JSON reports like the other commands."""
     goal = goal or _DEFAULT_GOAL
@@ -95,6 +113,9 @@ def demo_command(goal: str, run_root: Path, execute: bool) -> int:
             return 0
         report = execute_demo(run_root, goal)
         print(json.dumps({"status": "dry_run_complete", "report": report}, sort_keys=True))
+        # The note is on stderr so the two stdout JSON lines stay byte-compatible.
+        sys.stdout.flush()
+        _write_dry_run_note(report)
         return 0
     except Exception as exc:
         print(json.dumps({"status": "blocked", "finding": str(exc)}, sort_keys=True))

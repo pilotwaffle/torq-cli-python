@@ -22,13 +22,14 @@ and backed by a verifiable receipt chain.
 - **One-command trial.** `torq demo --run` scaffolds a valid identity and
   attestation, executes a real dry-run, and leaves a run directory that
   `torq evidence verify` confirms — no provider calls, no hand-written JSON.
+  The dry run prints that verify command on standard error.
 - **Platform honesty.** Commands report exactly what is production-grade and
   what is not; `torq trust readiness` names the signing and anchoring gaps
   still open.
 
 ## Install
 
-    pip install torq-cli        # Python 3.11–3.13
+    pip install "git+https://github.com/pilotwaffle/torq-cli-python.git"  # the PyPI package is not published yet; Python 3.11–3.13
 
 ## Try it in one command
 

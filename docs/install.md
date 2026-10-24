@@ -1,12 +1,14 @@
 # Install TORQ CLI 0.2.0
 
-Python 3.11 through 3.13 is required. The supported distribution is the signed
-wheel installed with `pipx` or `uv tool`; source checkout is not required.
+Python 3.11 through 3.13 is required. The PyPI package is not published yet.
+Install from GitHub with
+`pip install "git+https://github.com/pilotwaffle/torq-cli-python.git"`.
+`pipx` and `uv tool` accept that same URL. A source checkout is not required.
 
 ## Windows
 
 1. Install Python 3.11-3.13 and `pipx`.
-2. Run `pipx install torq_cli-0.2.0-py3-none-any.whl`.
+2. Run `pipx install "git+https://github.com/pilotwaffle/torq-cli-python.git"`.
 3. Run `torq --version`.
 4. To reuse the Console team credentials temporarily, run
    `torq auth status --credential-file E:\TORQ-CONSOLE\.env`.
@@ -26,7 +28,7 @@ wheel installed with `pipx` or `uv tool`; source checkout is not required.
 ## macOS
 
 1. Install Python 3.11-3.13 and `pipx` or `uv`.
-2. Run `uv tool install torq_cli-0.2.0-py3-none-any.whl`.
+2. Run `uv tool install "git+https://github.com/pilotwaffle/torq-cli-python.git"`.
 3. Run `torq --version`, then use `torq auth store` and `torq auth verify-access`
    with an opaque credential reference.
 4. Complete `torq setup`; use the macOS Keychain or an explicitly supplied
@@ -39,7 +41,7 @@ wheel installed with `pipx` or `uv tool`; source checkout is not required.
 ## Linux
 
 1. Install Python 3.11-3.13 and `pipx` or `uv`.
-2. Run `pipx install torq_cli-0.2.0-py3-none-any.whl`.
+2. Run `pipx install "git+https://github.com/pilotwaffle/torq-cli-python.git"`.
 3. Run `torq --version`, then use `torq auth store` and `torq auth verify-access`
    with an opaque credential reference.
    Explicit external credential files must already be owner-only mode `0600`.
@@ -55,3 +57,6 @@ wheel installed with `pipx` or `uv tool`; source checkout is not required.
 The v0.2.0 candidate has not yet completed protected-main or clean-machine
 release verification. That verification must record the OS image, Python version, wheel
 SHA-256, `torq --version`, and an installed-artifact credential-backend probe.
+Until that verification and a maintainer publish are done, install with the
+GitHub URL above. A local `python -m build` writes
+`torq_cli-0.2.0-py3-none-any.whl` under `dist/` on the build machine.

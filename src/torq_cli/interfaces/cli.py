@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import shlex
 import shutil
 import sys
 import tempfile
@@ -101,22 +102,22 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="torq")
     parser.add_argument("--version", action="version", version=f"torq {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
-    profile = sub.add_parser("profile")
+    profile = sub.add_parser("profile", help="Validate a role profile")
     profile_sub = profile.add_subparsers(dest="profile_command", required=True)
     validate = profile_sub.add_parser("validate")
     validate.add_argument("--config", required=True)
-    status = sub.add_parser("status")
+    status = sub.add_parser("status", help="Attest machine and role status")
     status.add_argument("--offline", action="store_true")
     status.add_argument("--config", required=True)
     status.add_argument("--require-effective", action="store_true")
     status.add_argument("--runtime")
-    config = sub.add_parser("config")
+    config = sub.add_parser("config", help="Import Console V5 configuration")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     import_v5 = config_sub.add_parser("import-v5-normalized")
     import_v5.add_argument("--config", required=True)
     import_v5_console_parser = config_sub.add_parser("import-v5-console")
     import_v5_console_parser.add_argument("--config", required=True)
-    auth = sub.add_parser("auth")
+    auth = sub.add_parser("auth", help="Store and check provider credentials")
     auth_sub = auth.add_subparsers(dest="auth_command", required=True)
     auth_status_parser = auth_sub.add_parser("status")
     auth_status_parser.add_argument("--credential-file")
@@ -129,16 +130,16 @@ def _parser() -> argparse.ArgumentParser:
             default="platform_keychain",
         )
         native.add_argument("--store-root")
-    harness = sub.add_parser("harness")
+    harness = sub.add_parser("harness", help="Inspect the live harness")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     inspect = harness_sub.add_parser("inspect")
     inspect.add_argument("--expected", required=True)
     inspect.add_argument("--actual", required=True)
-    setup = sub.add_parser("setup")
+    setup = sub.add_parser("setup", help="Write local config from answers")
     setup.add_argument("--config", required=True)
     setup.add_argument("--answers", required=True)
     setup.add_argument("--credential-file")
-    run = sub.add_parser("run")
+    run = sub.add_parser("run", help="Run a governed plan, dry-run by default")
     run.add_argument("--goal")
     run.add_argument("--resume")
     run.add_argument("--run-root", required=True)
@@ -149,12 +150,12 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--live", action="store_true")
     run.add_argument("--allow-live", action="store_true")
     run.add_argument("--policy-allow-live", action="store_true")
-    evidence = sub.add_parser("evidence")
+    evidence = sub.add_parser("evidence", help="Verify a run's receipt chain")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
     verify = evidence_sub.add_parser("verify")
     verify.add_argument("--run-root", required=True)
     verify.add_argument("--trusted-public-key")
-    fleet = sub.add_parser("fleet")
+    fleet = sub.add_parser("fleet", help="Show the evidence-backed fleet view for one run")
     fleet.add_argument("--run-root")
     fleet.add_argument("--trusted-public-key")
     fleet.add_argument("--serve", action="store_true")
@@ -180,7 +181,7 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("--goal", default="")
     demo.add_argument("--run-root", default="./torq-demo-runs")
     demo.add_argument("--run", action="store_true", help="execute the dry-run after scaffolding")
-    trust = sub.add_parser("trust")
+    trust = sub.add_parser("trust", help="Report production-trust gaps")
     trust_sub = trust.add_subparsers(dest="trust_command", required=True)
     trust_sub.add_parser("readiness")
     return parser
@@ -330,6 +331,55 @@ def _handle_run(args: argparse.Namespace) -> int:
     except Exception:
         print(json.dumps({"status": "internal_error"}, sort_keys=True))
         return 5
+
+
+def _run_collection(root: Path) -> tuple[list[str], str] | None:
+    """Return run ids and one verify command, or None when this is not a folder of runs.
+
+    A single run, including one whose evidence is missing or tampered, returns
+    None so the existing verifier and fleet exit codes stay in place.
+    """
+    classified = classify_workspace_root(root)
+    if classified.get("root_kind") != "collection":
+        return None
+    runs = classified.get("runs")
+    if not isinstance(runs, list):
+        return None
+    run_ids = [run_id for run_id in runs if isinstance(run_id, str) and run_id]
+    if not run_ids:
+        return None
+    verify_command = "torq evidence verify --run-root " + shlex.quote(str(root / run_ids[0]))
+    return run_ids, verify_command
+
+
+def _emit_run_collection_notice(root: Path) -> int | None:
+    found = _run_collection(root)
+    if found is None:
+        return None
+    run_ids, verify_command = found
+    listed = "\n".join(f"  {run_id}" for run_id in run_ids)
+    notice = (
+        "This is a folder of runs.\n"
+        "Run ids:\n"
+        f"{listed}\n"
+        "Verify one run:\n"
+        f"{verify_command}\n"
+    )
+    # Scripts read one JSON object on stdout. The same facts go to stderr.
+    print(
+        json.dumps(
+            {
+                "status": "run_folder",
+                "run_ids": run_ids,
+                "verify_command": verify_command,
+            }
+        ),
+        flush=True,
+    )
+    sys.stderr.write(notice)
+    sys.stderr.flush()
+    # Usage mistake: exit 2 (invalid). Single-run failures keep their own codes.
+    return 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -595,6 +645,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         if task_runtime_root is not None:
                             shutil.rmtree(task_runtime_root, ignore_errors=True)
             return 0
+        if args.run_root is not None:
+            collection_code = _emit_run_collection_notice(selected_run_root)
+            if collection_code is not None:
+                return collection_code
         snapshot = projector.snapshot()
         print(json.dumps(snapshot, sort_keys=True))
         return {
@@ -606,6 +660,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "unreadable": 4,
         }[str(snapshot["verification"]["state"])]
     if args.command == "evidence":
+        collection_code = _emit_run_collection_notice(Path(args.run_root))
+        if collection_code is not None:
+            return collection_code
         result = verify_receipt_store(Path(args.run_root), trusted_public_key=trusted_public_key)
         print(json.dumps({"status": result.status, "finding": result.finding}, sort_keys=True))
         return result.exit_code
